@@ -1,0 +1,51 @@
+# ─── Планы, ТЗ, внутренние заметки (НЕ коммитим) ───────────────
+/planning/
+/docs/internal/
+*.draft.md
+NOTES.md
+NOTES.local.md
+TODO.local.md
+
+# ─── Rust ──────────────────────────────────────────────────────
+/target/
+**/target/
+*.pdb
+
+# ─── Node / фронтенд / Tauri ───────────────────────────────────
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+/src-tauri/target/
+/src-tauri/gen/
+
+# ─── Сборки / артефакты ────────────────────────────────────────
+*.exe
+*.msi
+*.msix
+*.zip
+/release/
+/out/
+
+# ─── Секреты и пользовательские конфиги ────────────────────────
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+config.local.*
+*.session
+
+# ─── IDE / редакторы ───────────────────────────────────────────
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+
+# ─── ОС ────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
