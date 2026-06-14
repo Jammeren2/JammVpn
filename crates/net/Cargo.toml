@@ -1,0 +1,15 @@
+[package]
+name = "jammvpn-net"
+version = "0.1.0"
+description = "Асинхронное сетевое ядро JammVPN: outbound-диалеры и локальный прокси"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+jammvpn-core = { path = "../core" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }

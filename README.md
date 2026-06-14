@@ -39,8 +39,10 @@
 
 ```
 crates/
-  core/               # переносимое ядро: модель профилей, парсеры импорта, типы
-  platform-windows/   # Windows-слой: WFP split, wintun, DPAPI (интерфейсы + заглушки)
+  core/               # переносимое ядро: модель, парсеры импорта, split/routing-движки
+  net/                # асинхронное сетевое ядро (tokio): outbound-диалеры, локальный прокси
+  platform-windows/   # Windows-слой: WFP split-контракт, wintun, DPAPI (интерфейсы + заглушки)
+wfp-driver/           # kernel-mode WFP callout-драйвер (скелет, требует WDK)
 .github/workflows/    # CI: fmt + clippy + tests
 ```
 
