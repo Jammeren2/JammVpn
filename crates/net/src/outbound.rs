@@ -1,10 +1,11 @@
-//! Исходящие соединения: Direct / SOCKS5 / HTTP CONNECT (ТЗ, раздел 4, `PRO-*`).
+//! Исходящие соединения: Direct / SOCKS5 / HTTP CONNECT / VLESS (ТЗ, раздел 4).
 //!
-//! Диалер устанавливает TCP-соединение до цели через выбранный протокол и
-//! возвращает готовый к обмену [`TcpStream`]. Шифрованные протоколы
-//! (Shadowsocks, WireGuard/AWG, VLESS/REALITY и т.п.) добавляются отдельно.
+//! Диалер устанавливает соединение до цели и возвращает [`BoxedStream`],
+//! готовый к обмену. Шифрованные транспорты (TLS/REALITY) и протоколы
+//! (Shadowsocks, WireGuard/AWG, …) добавляются отдельно.
 
 use crate::target::Target;
+use crate::{vless, BoxedStream};
 use jammvpn_core::base64;
 use std::io;
 use std::net::SocketAddr;
@@ -16,7 +17,7 @@ use tokio::net::TcpStream;
 pub struct Socks5Config {
     /// Адрес прокси `host:port`.
     pub server: String,
-    /// Имя пользователя (для username/password-аутентификации).
+    /// Имя пользователя.
     pub username: Option<String>,
     /// Пароль.
     pub password: Option<String>,
@@ -27,10 +28,34 @@ pub struct Socks5Config {
 pub struct HttpConfig {
     /// Адрес прокси `host:port`.
     pub server: String,
-    /// Имя пользователя (Basic-аутентификация).
+    /// Имя пользователя (Basic).
     pub username: Option<String>,
     /// Пароль.
     pub password: Option<String>,
+}
+
+/// Транспорт для протоколов поверх потока (VLESS и т.п.).
+#[derive(Debug, Clone, Default)]
+pub enum Transport {
+    /// Открытый TCP.
+    #[default]
+    Tcp,
+    // TODO: Tls(TlsConfig) — rustls + SNI/ALPN.
+    // TODO: Reality(RealityConfig) — research-grade, проверяется только против
+    //       реального REALITY-сервера.
+}
+
+/// Настройки VLESS-исходящего.
+#[derive(Debug, Clone)]
+pub struct VlessConfig {
+    /// Адрес сервера `host:port`.
+    pub server: String,
+    /// UUID (16 байт).
+    pub uuid: [u8; 16],
+    /// Flow (XTLS-Vision и т.п.) — пока не реализован, поле для совместимости.
+    pub flow: Option<String>,
+    /// Транспорт.
+    pub transport: Transport,
 }
 
 /// Способ исходящего соединения.
@@ -43,15 +68,18 @@ pub enum Outbound {
     Socks5(Socks5Config),
     /// Через HTTP-прокси (CONNECT).
     Http(HttpConfig),
+    /// Через VLESS.
+    Vless(VlessConfig),
 }
 
 impl Outbound {
-    /// Устанавливает TCP-соединение до `target` согласно способу.
-    pub async fn connect_tcp(&self, target: &Target) -> io::Result<TcpStream> {
+    /// Устанавливает соединение до `target` согласно способу.
+    pub async fn connect_tcp(&self, target: &Target) -> io::Result<BoxedStream> {
         match self {
             Outbound::Direct => direct_connect(target).await,
             Outbound::Socks5(cfg) => socks5_connect(cfg, target).await,
             Outbound::Http(cfg) => http_connect(cfg, target).await,
+            Outbound::Vless(cfg) => vless_connect(cfg, target).await,
         }
     }
 }
@@ -60,14 +88,15 @@ fn proto_err(msg: &str) -> io::Error {
     io::Error::other(msg)
 }
 
-async fn direct_connect(target: &Target) -> io::Result<TcpStream> {
-    match target {
-        Target::Socket(addr) => TcpStream::connect(addr).await,
-        Target::Domain(host, port) => TcpStream::connect((host.as_str(), *port)).await,
-    }
+async fn direct_connect(target: &Target) -> io::Result<BoxedStream> {
+    let stream = match target {
+        Target::Socket(addr) => TcpStream::connect(addr).await?,
+        Target::Domain(host, port) => TcpStream::connect((host.as_str(), *port)).await?,
+    };
+    Ok(Box::new(stream))
 }
 
-async fn socks5_connect(cfg: &Socks5Config, target: &Target) -> io::Result<TcpStream> {
+async fn socks5_connect(cfg: &Socks5Config, target: &Target) -> io::Result<BoxedStream> {
     let mut s = TcpStream::connect(&cfg.server).await?;
 
     // Приветствие: версия 5, предлагаем no-auth (и username/password при наличии).
@@ -140,10 +169,10 @@ async fn socks5_connect(cfg: &Socks5Config, target: &Target) -> io::Result<TcpSt
     };
     let mut tail = vec![0u8; bnd_len + 2];
     s.read_exact(&mut tail).await?;
-    Ok(s)
+    Ok(Box::new(s))
 }
 
-async fn http_connect(cfg: &HttpConfig, target: &Target) -> io::Result<TcpStream> {
+async fn http_connect(cfg: &HttpConfig, target: &Target) -> io::Result<BoxedStream> {
     let mut s = TcpStream::connect(&cfg.server).await?;
     let hostport = match target {
         Target::Domain(h, p) => format!("{h}:{p}"),
@@ -162,7 +191,7 @@ async fn http_connect(cfg: &HttpConfig, target: &Target) -> io::Result<TcpStream
     if !(200..300).contains(&status) {
         return Err(proto_err("http connect: ответ не 2xx"));
     }
-    Ok(s)
+    Ok(Box::new(s))
 }
 
 /// Читает заголовок HTTP-ответа до `\r\n\r\n` и возвращает код статуса.
@@ -183,10 +212,28 @@ async fn read_http_status(s: &mut TcpStream) -> io::Result<u16> {
     }
     let head = String::from_utf8_lossy(&buf);
     let first = head.lines().next().unwrap_or_default();
-    // Формат: "HTTP/1.1 200 Connection established".
     first
         .split_whitespace()
         .nth(1)
         .and_then(|c| c.parse::<u16>().ok())
         .ok_or_else(|| proto_err("http connect: не разобран статус"))
+}
+
+async fn vless_connect(cfg: &VlessConfig, target: &Target) -> io::Result<BoxedStream> {
+    let mut stream: BoxedStream = match &cfg.transport {
+        Transport::Tcp => Box::new(TcpStream::connect(&cfg.server).await?),
+    };
+
+    let header = vless::encode_request(&cfg.uuid, cfg.flow.as_deref(), target);
+    stream.write_all(&header).await?;
+
+    // Ответный заголовок: версия(1) + длина addon(1) + addon(M) — отбрасываем.
+    let mut resp = [0u8; 2];
+    stream.read_exact(&mut resp).await?;
+    let addon_len = resp[1] as usize;
+    if addon_len > 0 {
+        let mut addon = vec![0u8; addon_len];
+        stream.read_exact(&mut addon).await?;
+    }
+    Ok(stream)
 }

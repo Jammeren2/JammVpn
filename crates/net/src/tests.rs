@@ -1,8 +1,9 @@
 //! Интеграционные тесты сетевого ядра: end-to-end через локальные сокеты.
 
 use crate::inbound::serve_socks;
-use crate::outbound::{HttpConfig, Outbound, Socks5Config};
+use crate::outbound::{HttpConfig, Outbound, Socks5Config, Transport, VlessConfig};
 use crate::target::Target;
+use crate::vless;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -152,4 +153,84 @@ async fn direct_connects_to_echo() {
     let mut buf = [0u8; 1];
     s.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"x");
+}
+
+/// Mock VLESS-сервер: валидирует заголовок запроса, шлёт ответный заголовок и
+/// эхо-проксирует тело.
+async fn spawn_mock_vless(expected_uuid: [u8; 16]) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut ver = [0u8; 1];
+        sock.read_exact(&mut ver).await.unwrap();
+        assert_eq!(ver[0], 0x00);
+        let mut uuid = [0u8; 16];
+        sock.read_exact(&mut uuid).await.unwrap();
+        assert_eq!(uuid, expected_uuid);
+        let mut addon_len = [0u8; 1];
+        sock.read_exact(&mut addon_len).await.unwrap();
+        if addon_len[0] > 0 {
+            let mut a = vec![0u8; addon_len[0] as usize];
+            sock.read_exact(&mut a).await.unwrap();
+        }
+        let mut cmd = [0u8; 1];
+        sock.read_exact(&mut cmd).await.unwrap();
+        let mut port = [0u8; 2];
+        sock.read_exact(&mut port).await.unwrap();
+        let mut atyp = [0u8; 1];
+        sock.read_exact(&mut atyp).await.unwrap();
+        match atyp[0] {
+            0x01 => {
+                let mut a = [0u8; 4];
+                sock.read_exact(&mut a).await.unwrap();
+            }
+            0x03 => {
+                let mut a = [0u8; 16];
+                sock.read_exact(&mut a).await.unwrap();
+            }
+            0x02 => {
+                let mut l = [0u8; 1];
+                sock.read_exact(&mut l).await.unwrap();
+                let mut d = vec![0u8; l[0] as usize];
+                sock.read_exact(&mut d).await.unwrap();
+            }
+            _ => return,
+        }
+        // Ответный заголовок: версия + длина addon (0).
+        sock.write_all(&[0x00, 0x00]).await.unwrap();
+        // Эхо тела.
+        let mut buf = vec![0u8; 4096];
+        loop {
+            match sock.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if sock.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn vless_over_tcp_roundtrip() {
+    let uuid = vless::parse_uuid("11111111-2222-3333-4444-555555555555").unwrap();
+    let server = spawn_mock_vless(uuid).await;
+    let ob = Outbound::Vless(VlessConfig {
+        server: server.to_string(),
+        uuid,
+        flow: None,
+        transport: Transport::Tcp,
+    });
+    let mut s = ob
+        .connect_tcp(&Target::Domain("example.com".to_string(), 443))
+        .await
+        .unwrap();
+    s.write_all(b"vless!").await.unwrap();
+    let mut buf = [0u8; 6];
+    s.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"vless!");
 }

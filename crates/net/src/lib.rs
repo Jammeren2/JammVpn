@@ -10,9 +10,20 @@
 pub mod inbound;
 pub mod outbound;
 pub mod target;
+pub mod vless;
 
-pub use outbound::{HttpConfig, Outbound, Socks5Config};
+pub use outbound::{HttpConfig, Outbound, Socks5Config, Transport, VlessConfig};
 pub use target::Target;
+
+use tokio::io::{AsyncRead, AsyncWrite};
+
+/// Поток данных: асинхронные чтение и запись. Позволяет возвращать из разных
+/// транспортов (TCP, TLS, …) единый тип.
+pub trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
+
+/// Боксированный поток.
+pub type BoxedStream = Box<dyn AsyncStream>;
 
 #[cfg(test)]
 mod tests;
