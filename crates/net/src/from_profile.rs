@@ -6,6 +6,7 @@
 use crate::outbound::{
     HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, TrojanConfig, VlessConfig,
 };
+use crate::reality_transport::RealityTransport;
 use crate::shadowsocks::Method;
 use crate::vless;
 use jammvpn_core::{ProtocolKind, ServerProfile};
@@ -60,11 +61,24 @@ pub fn outbound_from_profile(p: &ServerProfile) -> Result<Outbound, ProfileError
         ProtocolKind::Vless => {
             let uuid_str = p.param("uuid").ok_or(ProfileError::MissingField("uuid"))?;
             let uuid = vless::parse_uuid(uuid_str).ok_or(ProfileError::BadUuid)?;
+            let transport = if p.param("security") == Some("reality") {
+                Transport::Reality(RealityTransport {
+                    public_key: p.param("pbk").unwrap_or_default().to_string(),
+                    short_id: p.param("sid").unwrap_or_default().to_string(),
+                    server_name: p
+                        .param("sni")
+                        .or_else(|| p.param("host"))
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+            } else {
+                Transport::Tcp
+            };
             Ok(Outbound::Vless(VlessConfig {
                 server,
                 uuid,
                 flow: p.param("flow").map(str::to_string),
-                transport: Transport::Tcp,
+                transport,
             }))
         }
         ProtocolKind::Trojan => {

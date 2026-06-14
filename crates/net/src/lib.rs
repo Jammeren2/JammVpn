@@ -17,6 +17,7 @@ pub mod inbound;
 pub mod outbound;
 #[allow(dead_code, clippy::all)]
 pub mod reality;
+pub mod reality_transport;
 pub mod shadowsocks;
 #[allow(dead_code, clippy::all)]
 mod slide_buffer;
@@ -30,6 +31,7 @@ pub use from_profile::{outbound_from_profile, ProfileError};
 pub use outbound::{
     HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, TrojanConfig, VlessConfig,
 };
+pub use reality_transport::RealityTransport;
 pub use shadowsocks::Method as ShadowsocksMethod;
 pub use target::Target;
 

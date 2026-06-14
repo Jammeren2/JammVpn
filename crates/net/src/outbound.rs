@@ -4,13 +4,16 @@
 //! готовый к обмену. Шифрованные транспорты (TLS/REALITY) и протоколы
 //! (Shadowsocks, WireGuard/AWG, …) добавляются отдельно.
 
+use crate::reality_transport::{reality_connect, RealityTransport};
 use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream};
 use crate::target::Target;
 use crate::{trojan, vless, BoxedStream};
 use jammvpn_core::base64;
 use std::io;
 use std::net::SocketAddr;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
 /// Настройки SOCKS5-прокси.
@@ -41,9 +44,9 @@ pub enum Transport {
     /// Открытый TCP.
     #[default]
     Tcp,
-    // TODO: Tls(TlsConfig) — rustls + SNI/ALPN.
-    // TODO: Reality(RealityConfig) — research-grade, проверяется только против
-    //       реального REALITY-сервера.
+    /// REALITY — TLS 1.3-обфускация поверх TCP (порт из cfal/shoes).
+    Reality(RealityTransport),
+    // TODO: обычный TLS (rustls + SNI/ALPN).
 }
 
 /// Настройки VLESS-исходящего.
@@ -251,20 +254,99 @@ async fn read_http_status(s: &mut TcpStream) -> io::Result<u16> {
 async fn vless_connect(cfg: &VlessConfig, target: &Target) -> io::Result<BoxedStream> {
     let mut stream: BoxedStream = match &cfg.transport {
         Transport::Tcp => Box::new(TcpStream::connect(&cfg.server).await?),
+        Transport::Reality(rt) => {
+            let tcp = TcpStream::connect(&cfg.server).await?;
+            Box::new(reality_connect(tcp, rt).await?)
+        }
     };
 
     let header = vless::encode_request(&cfg.uuid, cfg.flow.as_deref(), target);
     stream.write_all(&header).await?;
+    stream.flush().await?; // важно для буферизующих транспортов (REALITY)
 
-    // Ответный заголовок: версия(1) + длина addon(1) + addon(M) — отбрасываем.
-    let mut resp = [0u8; 2];
-    stream.read_exact(&mut resp).await?;
-    let addon_len = resp[1] as usize;
-    if addon_len > 0 {
-        let mut addon = vec![0u8; addon_len];
-        stream.read_exact(&mut addon).await?;
+    // VLESS-ответный заголовок отбрасывается ЛЕНИВО при первом чтении: упреждающий
+    // read между записью заголовка и payload ломает порядок поверх REALITY.
+    Ok(Box::new(VlessRespStrip::new(stream)))
+}
+
+/// Обёртка, отбрасывающая VLESS-ответный заголовок (версия + addon) при первом
+/// чтении; записи проходят насквозь.
+struct VlessRespStrip {
+    inner: BoxedStream,
+    hdr_buf: Vec<u8>,
+    addon_len: Option<usize>,
+    done: bool,
+}
+
+impl VlessRespStrip {
+    fn new(inner: BoxedStream) -> Self {
+        Self {
+            inner,
+            hdr_buf: Vec::new(),
+            addon_len: None,
+            done: false,
+        }
     }
-    Ok(stream)
+}
+
+impl AsyncRead for VlessRespStrip {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let me = self.get_mut();
+        while !me.done {
+            let need = match me.addon_len {
+                None => 2,
+                Some(a) => 2 + a,
+            };
+            if me.hdr_buf.len() >= need {
+                if me.addon_len.is_none() {
+                    me.addon_len = Some(me.hdr_buf[1] as usize);
+                    continue;
+                }
+                me.done = true;
+                break;
+            }
+            let mut tmp = [0u8; 64];
+            let want = (need - me.hdr_buf.len()).min(tmp.len());
+            let mut rb = ReadBuf::new(&mut tmp[..want]);
+            match Pin::new(&mut me.inner).poll_read(cx, &mut rb) {
+                Poll::Ready(Ok(())) => {
+                    let filled = rb.filled();
+                    if filled.is_empty() {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "vless: усечён ответный заголовок",
+                        )));
+                    }
+                    me.hdr_buf.extend_from_slice(filled);
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Pin::new(&mut me.inner).poll_read(cx, out)
+    }
+}
+
+impl AsyncWrite for VlessRespStrip {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
 }
 
 /// Адрес назначения в формате Shadowsocks: `ATYP + addr + port(2, BE)`.
@@ -303,6 +385,10 @@ async fn shadowsocks_connect(cfg: &ShadowsocksConfig, target: &Target) -> io::Re
 async fn trojan_connect(cfg: &TrojanConfig, target: &Target) -> io::Result<BoxedStream> {
     let mut stream: BoxedStream = match &cfg.transport {
         Transport::Tcp => Box::new(TcpStream::connect(&cfg.server).await?),
+        Transport::Reality(rt) => {
+            let tcp = TcpStream::connect(&cfg.server).await?;
+            Box::new(reality_connect(tcp, rt).await?)
+        }
     };
     stream
         .write_all(&trojan::encode_request(&cfg.password, target))
