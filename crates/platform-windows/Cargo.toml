@@ -1,0 +1,15 @@
+[package]
+name = "jammvpn-platform-windows"
+version = "0.1.0"
+description = "Windows-слой JammVPN: WFP split-туннелирование, wintun TUN, DPAPI (интерфейсы + заглушки)"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+# Реальная WFP/wintun-интеграция (windows-rs и др.) добавляется на этапе
+# реализации платформенного слоя. Сейчас — только платформо-независимые типы.

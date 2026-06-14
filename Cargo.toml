@@ -1,0 +1,20 @@
+# Корневой манифест воркспейса JammVPN.
+# core      — переносимый крейт (модель, парсеры, маршрутизация); без платформенного кода.
+# platform-windows — Windows-слой (WFP split, wintun, DPAPI). Сейчас: интерфейсы + заглушки.
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/platform-windows",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Jammeren2"]
+rust-version = "1.80"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

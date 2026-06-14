@@ -1,0 +1,15 @@
+[package]
+name = "jammvpn-core"
+version = "0.1.0"
+description = "Переносимое ядро JammVPN: модель профилей, парсеры импорта, типы маршрутизации"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints.clippy]
+# Держим планку качества: те же правила, что и в CI.
+all = "warn"
+
+[dependencies]
+# Ядро намеренно без внешних зависимостей (offline-friendly, минимум supply-chain).
