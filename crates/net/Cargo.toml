@@ -13,3 +13,12 @@ all = "warn"
 [dependencies]
 jammvpn-core = { path = "../core" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+
+# Shadowsocks AEAD (RustCrypto — чистый Rust, без cmake/nasm).
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha1 = "0.10"
+md-5 = "0.10"
+generic-array = "0.14"
+getrandom = "0.2"

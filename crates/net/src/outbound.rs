@@ -4,6 +4,7 @@
 //! готовый к обмену. Шифрованные транспорты (TLS/REALITY) и протоколы
 //! (Shadowsocks, WireGuard/AWG, …) добавляются отдельно.
 
+use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream};
 use crate::target::Target;
 use crate::{vless, BoxedStream};
 use jammvpn_core::base64;
@@ -58,6 +59,17 @@ pub struct VlessConfig {
     pub transport: Transport,
 }
 
+/// Настройки Shadowsocks-исходящего.
+#[derive(Debug, Clone)]
+pub struct ShadowsocksConfig {
+    /// Адрес сервера `host:port`.
+    pub server: String,
+    /// AEAD-метод.
+    pub method: Method,
+    /// Пароль (из него выводится мастер-ключ).
+    pub password: String,
+}
+
 /// Способ исходящего соединения.
 #[derive(Debug, Clone, Default)]
 pub enum Outbound {
@@ -70,6 +82,8 @@ pub enum Outbound {
     Http(HttpConfig),
     /// Через VLESS.
     Vless(VlessConfig),
+    /// Через Shadowsocks (AEAD).
+    Shadowsocks(ShadowsocksConfig),
 }
 
 impl Outbound {
@@ -80,6 +94,7 @@ impl Outbound {
             Outbound::Socks5(cfg) => socks5_connect(cfg, target).await,
             Outbound::Http(cfg) => http_connect(cfg, target).await,
             Outbound::Vless(cfg) => vless_connect(cfg, target).await,
+            Outbound::Shadowsocks(cfg) => shadowsocks_connect(cfg, target).await,
         }
     }
 }
@@ -236,4 +251,37 @@ async fn vless_connect(cfg: &VlessConfig, target: &Target) -> io::Result<BoxedSt
         stream.read_exact(&mut addon).await?;
     }
     Ok(stream)
+}
+
+/// Адрес назначения в формате Shadowsocks: `ATYP + addr + port(2, BE)`.
+/// ATYP: `1`=IPv4, `3`=домен, `4`=IPv6.
+fn encode_ss_address(target: &Target) -> Vec<u8> {
+    let mut b = Vec::new();
+    match target {
+        Target::Domain(host, port) => {
+            b.push(0x03);
+            b.push(host.len() as u8);
+            b.extend_from_slice(host.as_bytes());
+            b.extend_from_slice(&port.to_be_bytes());
+        }
+        Target::Socket(SocketAddr::V4(a)) => {
+            b.push(0x01);
+            b.extend_from_slice(&a.ip().octets());
+            b.extend_from_slice(&a.port().to_be_bytes());
+        }
+        Target::Socket(SocketAddr::V6(a)) => {
+            b.push(0x04);
+            b.extend_from_slice(&a.ip().octets());
+            b.extend_from_slice(&a.port().to_be_bytes());
+        }
+    }
+    b
+}
+
+async fn shadowsocks_connect(cfg: &ShadowsocksConfig, target: &Target) -> io::Result<BoxedStream> {
+    let tcp = TcpStream::connect(&cfg.server).await?;
+    let master = evp_bytes_to_key(cfg.password.as_bytes(), cfg.method.key_len());
+    let mut stream = ShadowsocksStream::new(tcp, cfg.method, master);
+    stream.write_all(&encode_ss_address(target)).await?;
+    Ok(Box::new(stream))
 }

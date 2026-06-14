@@ -1,7 +1,10 @@
 //! Интеграционные тесты сетевого ядра: end-to-end через локальные сокеты.
 
 use crate::inbound::serve_socks;
-use crate::outbound::{HttpConfig, Outbound, Socks5Config, Transport, VlessConfig};
+use crate::outbound::{
+    HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, VlessConfig,
+};
+use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream};
 use crate::target::Target;
 use crate::vless;
 use std::net::{IpAddr, SocketAddr};
@@ -233,4 +236,92 @@ async fn vless_over_tcp_roundtrip() {
     let mut buf = [0u8; 6];
     s.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"vless!");
+}
+
+/// Mock SS-сервер: оборачивает сокет в `ShadowsocksStream`, читает адрес и
+/// эхо-проксирует тело.
+async fn spawn_mock_ss(method: Method, password: String) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let key = evp_bytes_to_key(password.as_bytes(), method.key_len());
+    tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.unwrap();
+        let mut ss = ShadowsocksStream::new(sock, method, key);
+        let mut atyp = [0u8; 1];
+        ss.read_exact(&mut atyp).await.unwrap();
+        match atyp[0] {
+            0x01 => {
+                let mut a = [0u8; 4];
+                ss.read_exact(&mut a).await.unwrap();
+            }
+            0x04 => {
+                let mut a = [0u8; 16];
+                ss.read_exact(&mut a).await.unwrap();
+            }
+            0x03 => {
+                let mut l = [0u8; 1];
+                ss.read_exact(&mut l).await.unwrap();
+                let mut d = vec![0u8; l[0] as usize];
+                ss.read_exact(&mut d).await.unwrap();
+            }
+            _ => return,
+        }
+        let mut port = [0u8; 2];
+        ss.read_exact(&mut port).await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        loop {
+            match ss.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if ss.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn shadowsocks_stream_duplex_roundtrip() {
+    let method = Method::Aes256Gcm;
+    let key = evp_bytes_to_key(b"secret", method.key_len());
+    let (a, b) = tokio::io::duplex(128 * 1024);
+    let mut ca = ShadowsocksStream::new(a, method, key.clone());
+    let mut cb = ShadowsocksStream::new(b, method, key.clone());
+
+    // Многочанковая нагрузка (> MAX_CHUNK).
+    let payload = vec![0xABu8; 50_000];
+    ca.write_all(&payload).await.unwrap();
+    ca.flush().await.unwrap();
+    let mut got = vec![0u8; 50_000];
+    cb.read_exact(&mut got).await.unwrap();
+    assert_eq!(got, payload);
+
+    // Обратное направление.
+    cb.write_all(b"pong").await.unwrap();
+    cb.flush().await.unwrap();
+    let mut r = [0u8; 4];
+    ca.read_exact(&mut r).await.unwrap();
+    assert_eq!(&r, b"pong");
+}
+
+#[tokio::test]
+async fn outbound_shadowsocks_against_mock() {
+    let method = Method::Chacha20IetfPoly1305;
+    let server = spawn_mock_ss(method, "pw".to_string()).await;
+    let ob = Outbound::Shadowsocks(ShadowsocksConfig {
+        server: server.to_string(),
+        method,
+        password: "pw".to_string(),
+    });
+    let mut s = ob
+        .connect_tcp(&Target::Domain("example.com".to_string(), 443))
+        .await
+        .unwrap();
+    s.write_all(b"shadow").await.unwrap();
+    let mut buf = [0u8; 6];
+    s.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"shadow");
 }

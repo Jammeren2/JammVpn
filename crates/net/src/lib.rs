@@ -9,10 +9,12 @@
 
 pub mod inbound;
 pub mod outbound;
+pub mod shadowsocks;
 pub mod target;
 pub mod vless;
 
-pub use outbound::{HttpConfig, Outbound, Socks5Config, Transport, VlessConfig};
+pub use outbound::{HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, VlessConfig};
+pub use shadowsocks::Method as ShadowsocksMethod;
 pub use target::Target;
 
 use tokio::io::{AsyncRead, AsyncWrite};
