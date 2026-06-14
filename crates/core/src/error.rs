@@ -23,6 +23,8 @@ pub enum ParseError {
     Base64(String),
     /// Декодированные байты не являются валидным UTF-8.
     Utf8,
+    /// Некорректный CIDR/IP в списке маршрутизации.
+    InvalidCidr(String),
 }
 
 impl fmt::Display for ParseError {
@@ -37,6 +39,7 @@ impl fmt::Display for ParseError {
             ParseError::MissingField(s) => write!(f, "отсутствует поле: {s}"),
             ParseError::Base64(s) => write!(f, "ошибка base64: {s}"),
             ParseError::Utf8 => write!(f, "некорректный UTF-8"),
+            ParseError::InvalidCidr(s) => write!(f, "некорректный CIDR/IP: {s}"),
         }
     }
 }

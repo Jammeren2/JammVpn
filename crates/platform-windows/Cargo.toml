@@ -11,5 +11,6 @@ rust-version.workspace = true
 all = "warn"
 
 [dependencies]
+jammvpn-core = { path = "../core" }
 # Реальная WFP/wintun-интеграция (windows-rs и др.) добавляется на этапе
 # реализации платформенного слоя. Сейчас — только платформо-независимые типы.

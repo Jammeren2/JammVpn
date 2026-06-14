@@ -11,8 +11,10 @@ pub mod base64;
 pub mod error;
 pub mod model;
 pub mod parse;
+pub mod split;
 pub mod util;
 
 pub use error::ParseError;
 pub use model::{ProtocolKind, ServerProfile};
 pub use parse::{parse_link, parse_subscription};
+pub use split::{decide, Action, SplitConfig, SplitMode};
