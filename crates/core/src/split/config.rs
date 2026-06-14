@@ -28,7 +28,8 @@ pub struct ConnApp {
 }
 
 impl AppMatcher {
-    fn matches(&self, app: &ConnApp) -> bool {
+    /// Совпадает ли матчер с указанным приложением.
+    pub fn matches(&self, app: &ConnApp) -> bool {
         match self {
             AppMatcher::ExePath(p) => app
                 .exe_path
