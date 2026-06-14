@@ -7,6 +7,7 @@
 use crate::reality_transport::{reality_connect, RealityTransport};
 use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream};
 use crate::target::Target;
+use crate::vision::VisionStream;
 use crate::{trojan, vless, BoxedStream};
 use jammvpn_core::base64;
 use std::io;
@@ -252,6 +253,26 @@ async fn read_http_status(s: &mut TcpStream) -> io::Result<u16> {
 }
 
 async fn vless_connect(cfg: &VlessConfig, target: &Target) -> io::Result<BoxedStream> {
+    // XTLS-Vision: только поверх REALITY. По образцу cfal/shoes — VLESS-заголовок
+    // (с flow-addon) отправляется ОБЫЧНОЙ TLS-записью, после чего TLS-поток
+    // разбирается на (TCP, сессия), а Vision-padding применяется к прикладным
+    // данным. VisionStream сам отбрасывает VLESS-ответ.
+    if cfg.flow.as_deref() == Some(vless::FLOW_VISION) {
+        let Transport::Reality(rt) = &cfg.transport else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "flow=xtls-rprx-vision поддерживается только с transport=reality",
+            ));
+        };
+        let tcp = TcpStream::connect(&cfg.server).await?;
+        let mut tls = reality_connect(tcp, rt).await?;
+        let header = vless::encode_request(&cfg.uuid, cfg.flow.as_deref(), target);
+        tls.write_all(&header).await?;
+        tls.flush().await?;
+        let (io, conn) = tls.into_inner();
+        return Ok(Box::new(VisionStream::new_client(io, conn, cfg.uuid)));
+    }
+
     let mut stream: BoxedStream = match &cfg.transport {
         Transport::Tcp => Box::new(TcpStream::connect(&cfg.server).await?),
         Transport::Reality(rt) => {

@@ -10,8 +10,9 @@
 //! Ответ сервера начинается с `версия(1) | len_addon(1) | addon(M)`, после чего
 //! идёт полезная нагрузка.
 //!
-//! Ограничения текущей версии: команда только TCP; flow (XTLS-Vision) не
-//! реализован (addon пустой) — заголовок совместим с VLESS без flow.
+//! Команда — только TCP. Flow (XTLS-Vision) кодируется в addon как protobuf
+//! `Addons { Flow = 1 }`; без flow addon пуст (совместимо с VLESS без flow).
+//! Сам data-path Vision реализован в [`crate::vision`].
 
 use crate::target::Target;
 use std::net::SocketAddr;
@@ -20,13 +21,43 @@ use std::net::SocketAddr;
 pub const VERSION: u8 = 0x00;
 /// Команда «TCP».
 pub const CMD_TCP: u8 = 0x01;
+/// Значение flow для XTLS-Vision.
+pub const FLOW_VISION: &str = "xtls-rprx-vision";
 
 /// Кодирует заголовок запроса VLESS.
-pub fn encode_request(uuid: &[u8; 16], _flow: Option<&str>, target: &Target) -> Vec<u8> {
+///
+/// Если задан `flow`, addon кодируется как protobuf-сообщение `Addons { Flow = 1 }`
+/// (тег `0x0A`, длина-varint, строка). Иначе addon пуст (длина 0) — заголовок
+/// совместим с VLESS без flow.
+pub fn encode_request(uuid: &[u8; 16], flow: Option<&str>, target: &Target) -> Vec<u8> {
     let mut b = Vec::with_capacity(24);
     b.push(VERSION);
     b.extend_from_slice(uuid);
-    b.push(0x00); // длина addon = 0 (flow не реализован)
+    match flow {
+        Some(f) if !f.is_empty() => {
+            let fb = f.as_bytes();
+            let mut addon = Vec::with_capacity(2 + fb.len());
+            addon.push(0x0A); // field=1 (Flow), wire type=2 (length-delimited)
+                              // длина строки как protobuf varint (для коротких flow — один байт)
+            let mut len = fb.len();
+            loop {
+                let mut byte = (len & 0x7F) as u8;
+                len >>= 7;
+                if len != 0 {
+                    byte |= 0x80;
+                }
+                addon.push(byte);
+                if len == 0 {
+                    break;
+                }
+            }
+            addon.extend_from_slice(fb);
+            debug_assert!(addon.len() <= u8::MAX as usize);
+            b.push(addon.len() as u8);
+            b.extend_from_slice(&addon);
+        }
+        _ => b.push(0x00), // длина addon = 0
+    }
     b.push(CMD_TCP);
     b.extend_from_slice(&target.port().to_be_bytes());
     match target {
@@ -78,6 +109,27 @@ mod tests {
         assert_eq!(b[21], 0x02); // domain
         assert_eq!(b[22], 5); // len("a.com")
         assert_eq!(&b[23..28], b"a.com");
+    }
+
+    #[test]
+    fn encode_request_vision_flow_addon() {
+        let uuid = [7u8; 16];
+        let b = encode_request(
+            &uuid,
+            Some(FLOW_VISION),
+            &Target::Domain("a.com".to_string(), 443),
+        );
+        // addon = protobuf Addons{Flow=1}: 0x0A, len(16), "xtls-rprx-vision" = 18 байт
+        let addon_len = 2 + FLOW_VISION.len();
+        assert_eq!(b[17], addon_len as u8);
+        assert_eq!(b[18], 0x0A); // field 1, wire type 2
+        assert_eq!(b[19], FLOW_VISION.len() as u8); // 16
+        assert_eq!(&b[20..20 + FLOW_VISION.len()], FLOW_VISION.as_bytes());
+        // далее — команда/порт/адрес
+        let cmd_off = 18 + addon_len;
+        assert_eq!(b[cmd_off], CMD_TCP);
+        assert_eq!(&b[cmd_off + 1..cmd_off + 3], &443u16.to_be_bytes());
+        assert_eq!(b[cmd_off + 3], 0x02); // domain
     }
 
     #[test]

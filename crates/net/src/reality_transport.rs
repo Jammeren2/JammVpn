@@ -25,8 +25,20 @@ pub struct RealityTransport {
     pub server_name: String,
 }
 
-/// Выполняет REALITY/TLS 1.3 хендшейк поверх `inner`, возвращает поток app-data.
-pub async fn reality_connect<S>(mut inner: S, t: &RealityTransport) -> io::Result<RealityStream<S>>
+/// Выполняет REALITY/TLS 1.3 хендшейк поверх `inner` и возвращает **сырой**
+/// нижележащий поток вместе с установленным коннектором.
+///
+/// Используется там, где нужен раздельный доступ к TCP и TLS-сессии — в первую
+/// очередь для XTLS-Vision (его «direct splice» пишет в сырой TCP мимо TLS).
+/// Для обычного app-data поверх REALITY используйте [`reality_connect`].
+///
+/// Инвариант на выходе: хендшейк полностью завершён и **все** исходящие
+/// TLS-записи (включая клиентский Finished) уже отправлены в `inner` — цикл
+/// сбрасывает `wants_write` перед проверкой `is_handshaking`.
+pub async fn reality_handshake<S>(
+    mut inner: S,
+    t: &RealityTransport,
+) -> io::Result<(S, RealityClientConnection)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -62,6 +74,15 @@ where
         conn.process_new_packets()?;
     }
 
+    Ok((inner, conn))
+}
+
+/// Выполняет REALITY/TLS 1.3 хендшейк поверх `inner`, возвращает поток app-data.
+pub async fn reality_connect<S>(inner: S, t: &RealityTransport) -> io::Result<RealityStream<S>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (inner, conn) = reality_handshake(inner, t).await?;
     Ok(RealityStream {
         inner,
         conn,
@@ -79,6 +100,19 @@ pub struct RealityStream<S> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> RealityStream<S> {
+    /// Разбирает поток на сырой транспорт и установленный TLS-коннектор —
+    /// для XTLS-Vision, которому нужен раздельный доступ к TCP и сессии.
+    ///
+    /// Вызывать только после [`AsyncWriteExt::flush`]: иначе несброшенные
+    /// исходящие TLS-записи в `wbuf` будут потеряны.
+    pub fn into_inner(self) -> (S, RealityClientConnection) {
+        debug_assert!(
+            self.wpos >= self.wbuf.len(),
+            "RealityStream::into_inner с несброшенным wbuf"
+        );
+        (self.inner, self.conn)
+    }
+
     fn flush_wbuf(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         while self.wpos < self.wbuf.len() {
             match Pin::new(&mut self.inner).poll_write(cx, &self.wbuf[self.wpos..]) {
