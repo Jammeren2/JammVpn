@@ -25,6 +25,8 @@ pub enum ParseError {
     Utf8,
     /// Некорректный CIDR/IP в списке маршрутизации.
     InvalidCidr(String),
+    /// Ошибка разбора JSON.
+    Json(String),
 }
 
 impl fmt::Display for ParseError {
@@ -40,6 +42,7 @@ impl fmt::Display for ParseError {
             ParseError::Base64(s) => write!(f, "ошибка base64: {s}"),
             ParseError::Utf8 => write!(f, "некорректный UTF-8"),
             ParseError::InvalidCidr(s) => write!(f, "некорректный CIDR/IP: {s}"),
+            ParseError::Json(s) => write!(f, "ошибка JSON: {s}"),
         }
     }
 }
