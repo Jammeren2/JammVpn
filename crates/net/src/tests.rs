@@ -1,13 +1,15 @@
 //! Интеграционные тесты сетевого ядра: end-to-end через локальные сокеты.
 
 use crate::engine::{serve_socks_routed, Engine};
+use crate::from_profile::outbound_from_profile;
 use crate::inbound::serve_socks;
 use crate::outbound::{
-    HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, VlessConfig,
+    HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, TrojanConfig, VlessConfig,
 };
 use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream};
 use crate::target::Target;
 use crate::vless;
+use jammvpn_core::parse_link;
 use jammvpn_core::routing::{RouteAction, Rule};
 use jammvpn_core::split::IpCidr;
 use std::collections::HashMap;
@@ -380,4 +382,85 @@ async fn routed_engine_proxy_chain() {
     let mut buf = [0u8; 6];
     s.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"viapxy");
+}
+
+/// Mock Trojan-сервер: читает заголовок (hash+CRLF, запрос, CRLF) и эхо.
+async fn spawn_mock_trojan() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut hdr = [0u8; 58]; // hash(56) + CRLF
+        sock.read_exact(&mut hdr).await.unwrap();
+        let mut ca = [0u8; 2]; // CMD + ATYP
+        sock.read_exact(&mut ca).await.unwrap();
+        match ca[1] {
+            0x01 => {
+                let mut a = [0u8; 4];
+                sock.read_exact(&mut a).await.unwrap();
+            }
+            0x04 => {
+                let mut a = [0u8; 16];
+                sock.read_exact(&mut a).await.unwrap();
+            }
+            0x03 => {
+                let mut l = [0u8; 1];
+                sock.read_exact(&mut l).await.unwrap();
+                let mut d = vec![0u8; l[0] as usize];
+                sock.read_exact(&mut d).await.unwrap();
+            }
+            _ => return,
+        }
+        let mut tail = [0u8; 4]; // port(2) + CRLF
+        sock.read_exact(&mut tail).await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        loop {
+            match sock.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if sock.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn outbound_trojan_against_mock() {
+    let server = spawn_mock_trojan().await;
+    let ob = Outbound::Trojan(TrojanConfig {
+        server: server.to_string(),
+        password: "pw".to_string(),
+        transport: Transport::Tcp,
+    });
+    let mut s = ob
+        .connect_tcp(&Target::Domain("example.com".to_string(), 443))
+        .await
+        .unwrap();
+    s.write_all(b"trojan").await.unwrap();
+    let mut buf = [0u8; 6];
+    s.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"trojan");
+}
+
+#[tokio::test]
+async fn import_link_to_outbound_chain() {
+    // Полный путь: ss-ссылка → профиль → Outbound → подключение к mock SS.
+    let method = Method::Aes256Gcm;
+    let server = spawn_mock_ss(method, "pass".to_string()).await;
+    // base64("aes-256-gcm:pass") = YWVzLTI1Ni1nY206cGFzcw==
+    let link = format!("ss://YWVzLTI1Ni1nY206cGFzcw==@{server}#node");
+    let profile = parse_link(&link).unwrap();
+    let ob = outbound_from_profile(&profile).unwrap();
+    let mut s = ob
+        .connect_tcp(&Target::Domain("example.com".to_string(), 443))
+        .await
+        .unwrap();
+    s.write_all(b"chain!").await.unwrap();
+    let mut buf = [0u8; 6];
+    s.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"chain!");
 }

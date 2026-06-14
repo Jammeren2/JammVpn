@@ -6,7 +6,7 @@
 
 use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream};
 use crate::target::Target;
-use crate::{vless, BoxedStream};
+use crate::{trojan, vless, BoxedStream};
 use jammvpn_core::base64;
 use std::io;
 use std::net::SocketAddr;
@@ -70,6 +70,17 @@ pub struct ShadowsocksConfig {
     pub password: String,
 }
 
+/// Настройки Trojan-исходящего.
+#[derive(Debug, Clone)]
+pub struct TrojanConfig {
+    /// Адрес сервера `host:port`.
+    pub server: String,
+    /// Пароль.
+    pub password: String,
+    /// Транспорт.
+    pub transport: Transport,
+}
+
 /// Способ исходящего соединения.
 #[derive(Debug, Clone, Default)]
 pub enum Outbound {
@@ -84,6 +95,8 @@ pub enum Outbound {
     Vless(VlessConfig),
     /// Через Shadowsocks (AEAD).
     Shadowsocks(ShadowsocksConfig),
+    /// Через Trojan.
+    Trojan(TrojanConfig),
 }
 
 impl Outbound {
@@ -95,6 +108,7 @@ impl Outbound {
             Outbound::Http(cfg) => http_connect(cfg, target).await,
             Outbound::Vless(cfg) => vless_connect(cfg, target).await,
             Outbound::Shadowsocks(cfg) => shadowsocks_connect(cfg, target).await,
+            Outbound::Trojan(cfg) => trojan_connect(cfg, target).await,
         }
     }
 }
@@ -284,4 +298,14 @@ async fn shadowsocks_connect(cfg: &ShadowsocksConfig, target: &Target) -> io::Re
     let mut stream = ShadowsocksStream::new(tcp, cfg.method, master);
     stream.write_all(&encode_ss_address(target)).await?;
     Ok(Box::new(stream))
+}
+
+async fn trojan_connect(cfg: &TrojanConfig, target: &Target) -> io::Result<BoxedStream> {
+    let mut stream: BoxedStream = match &cfg.transport {
+        Transport::Tcp => Box::new(TcpStream::connect(&cfg.server).await?),
+    };
+    stream
+        .write_all(&trojan::encode_request(&cfg.password, target))
+        .await?;
+    Ok(stream)
 }

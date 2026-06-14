@@ -8,14 +8,19 @@
 //! Соответствие ТЗ: раздел 4 (протоколы/ядро, `PRO-*`).
 
 pub mod engine;
+pub mod from_profile;
 pub mod inbound;
 pub mod outbound;
 pub mod shadowsocks;
 pub mod target;
+pub mod trojan;
 pub mod vless;
 
 pub use engine::{serve_socks_routed, Decision, Engine};
-pub use outbound::{HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, VlessConfig};
+pub use from_profile::{outbound_from_profile, ProfileError};
+pub use outbound::{
+    HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, TrojanConfig, VlessConfig,
+};
 pub use shadowsocks::Method as ShadowsocksMethod;
 pub use target::Target;
 
