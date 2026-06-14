@@ -903,6 +903,17 @@ impl RealityClientConnection {
         !self.ciphertext_write_buf.is_empty() || !self.plaintext_write_buf.is_empty()
     }
 
+    /// Это клиентская сторона REALITY (всегда true). Нужно для совместимости с
+    /// `CryptoConnection`-API, ожидаемым `VisionStream`.
+    pub fn is_client(&self) -> bool {
+        true
+    }
+
+    /// Это НЕ серверная сторона (всегда false). См. [`Self::is_client`].
+    pub fn is_server(&self) -> bool {
+        false
+    }
+
     /// Check if handshake is still in progress
     pub fn is_handshaking(&self) -> bool {
         !matches!(self.handshake_state, HandshakeState::Complete)

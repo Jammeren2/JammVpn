@@ -21,6 +21,8 @@ pub mod reality_transport;
 pub mod shadowsocks;
 #[allow(dead_code, clippy::all)]
 mod slide_buffer;
+#[allow(dead_code, clippy::all)]
+mod sync_adapter;
 pub mod target;
 pub mod trojan;
 mod util;
