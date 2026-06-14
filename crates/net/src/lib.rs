@@ -24,6 +24,8 @@ mod slide_buffer;
 pub mod target;
 pub mod trojan;
 mod util;
+#[allow(dead_code, clippy::all)]
+mod vision;
 pub mod vless;
 
 pub use engine::{serve_socks_routed, Decision, Engine};
