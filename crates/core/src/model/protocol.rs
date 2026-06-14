@@ -1,9 +1,11 @@
 //! Перечень поддерживаемых протоколов (ТЗ, раздел 4).
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Тип исходящего протокола (outbound).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProtocolKind {
     /// VLESS (в т.ч. REALITY / XTLS-Vision).
     Vless,

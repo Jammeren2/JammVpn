@@ -12,4 +12,6 @@ rust-version.workspace = true
 all = "warn"
 
 [dependencies]
-# Ядро намеренно без внешних зависимостей (offline-friendly, минимум supply-chain).
+# Сериализация конфига/модели. Остальная логика — на std, без тяжёлых зависимостей.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

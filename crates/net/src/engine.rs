@@ -4,9 +4,11 @@
 //! [`Outbound`]. На каждое соединение определяет действие (Direct / прокси по
 //! тегу / Block) и проксирует через выбранный исходящий.
 
+use crate::from_profile::outbound_from_profile;
 use crate::inbound::{relay_through, reply, socks_handshake};
 use crate::outbound::Outbound;
 use crate::target::Target;
+use jammvpn_core::config::AppConfig;
 use jammvpn_core::routing::{evaluate, RouteAction, RouteRequest, Rule};
 use jammvpn_core::split::ConnApp;
 use std::collections::HashMap;
@@ -52,6 +54,30 @@ impl Engine {
             rules,
             default_action,
         }
+    }
+
+    /// Строит движок из загруженного конфига [`AppConfig`].
+    ///
+    /// Серверы становятся именованными исходящими (тег = имя профиля);
+    /// нераспознанные/неподдержанные серверы пропускаются.
+    pub fn from_config(cfg: &AppConfig) -> Self {
+        let mut outbounds = HashMap::new();
+        for server in &cfg.servers {
+            if let Ok(ob) = outbound_from_profile(server) {
+                outbounds.insert(server.name.clone(), ob);
+            }
+        }
+        let default_action = if cfg.settings.default_to_proxy {
+            RouteAction::Proxy(None)
+        } else {
+            RouteAction::Direct
+        };
+        Engine::new(
+            outbounds,
+            cfg.settings.default_proxy.clone(),
+            cfg.rules.clone(),
+            default_action,
+        )
     }
 
     /// Определяет решение для цели соединения.
@@ -204,6 +230,31 @@ mod tests {
         assert!(matches!(
             e.resolve_target(&Target::Domain("10.1.2.3".to_string(), 443)),
             Decision::Connect(Outbound::Socks5(_))
+        ));
+    }
+
+    #[test]
+    fn engine_from_config() {
+        use jammvpn_core::config::AppConfig;
+        use jammvpn_core::parse_link;
+        use jammvpn_core::routing::DomainRule;
+
+        let mut cfg = AppConfig::default();
+        cfg.servers
+            .push(parse_link("ss://YWVzLTI1Ni1nY206cGFzcw==@1.2.3.4:8388#myproxy").unwrap());
+        cfg.rules.push(Rule {
+            domains: vec![DomainRule::Suffix("proxy.test".into())],
+            action: RouteAction::Proxy(Some("myproxy".into())),
+            ..Default::default()
+        });
+        let e = Engine::from_config(&cfg);
+        assert!(matches!(
+            e.resolve_target(&Target::Domain("a.proxy.test".to_string(), 443)),
+            Decision::Connect(Outbound::Shadowsocks(_))
+        ));
+        assert!(matches!(
+            e.resolve_target(&Target::Domain("other".to_string(), 443)),
+            Decision::Connect(Outbound::Direct)
         ));
     }
 }

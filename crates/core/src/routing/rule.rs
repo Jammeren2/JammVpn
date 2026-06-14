@@ -2,10 +2,11 @@
 
 use super::domain::DomainRule;
 use crate::split::{AppMatcher, ConnApp, IpCidr};
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 /// Действие правила.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RouteAction {
     /// Выпустить напрямую.
     #[default]
@@ -22,7 +23,7 @@ pub enum RouteAction {
 /// критериев совпало хотя бы одно значение (AND между категориями, OR внутри).
 /// Правило без единого критерия — catch-all (срабатывает всегда), пригодно как
 /// финальное.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rule {
     /// Доменные критерии.
     pub domains: Vec<DomainRule>,

@@ -1,7 +1,9 @@
 //! Доменные правила маршрутизации (`RTE-*`).
 
+use serde::{Deserialize, Serialize};
+
 /// Способ сопоставления домена.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DomainRule {
     /// Точное совпадение хоста.
     Full(String),

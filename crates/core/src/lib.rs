@@ -8,6 +8,7 @@
 //! Соответствие ТЗ: раздел 4 (модель/протоколы), раздел 6 (импорт, `IMP-*`).
 
 pub mod base64;
+pub mod config;
 pub mod error;
 pub mod json;
 pub mod model;
@@ -16,6 +17,7 @@ pub mod routing;
 pub mod split;
 pub mod util;
 
+pub use config::{AppConfig, ConfigError, Settings, Subscription};
 pub use error::ParseError;
 pub use json::JsonValue;
 pub use model::{ProtocolKind, ServerProfile};

@@ -1,7 +1,9 @@
 //! Модель конфигурации split и сопоставление приложений.
 
+use serde::{Deserialize, Serialize};
+
 /// Режим раздельного туннелирования (`SPL-19`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SplitMode {
     /// В тоннель идут ТОЛЬКО соединения выбранных приложений.
     Inclusive,
@@ -10,7 +12,7 @@ pub enum SplitMode {
 }
 
 /// Способ сопоставления приложения (`SPL-08`, `SPL-09`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppMatcher {
     /// Полный путь к `.exe` — первичный, строгий ключ.
     ExePath(String),
@@ -54,7 +56,7 @@ fn file_name(path: &str) -> String {
 }
 
 /// Конфигурация подсистемы split.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitConfig {
     /// Режим (см. [`SplitMode`]).
     pub mode: SplitMode,

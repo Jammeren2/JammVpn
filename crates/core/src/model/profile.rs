@@ -6,10 +6,11 @@
 //! протокол появятся при реализации сетевого слоя.
 
 use crate::model::ProtocolKind;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Один импортированный/настроенный сервер.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerProfile {
     /// Отображаемое имя (из `#fragment` ссылки либо `host:port`).
     pub name: String,
