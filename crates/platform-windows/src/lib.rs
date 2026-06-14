@@ -8,3 +8,4 @@
 //! `cfg(windows)`) появится в следующей фазе — см. ТЗ, раздел 3 (`SPL-*`).
 
 pub mod split;
+pub mod wfp;

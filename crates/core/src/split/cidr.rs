@@ -33,6 +33,25 @@ impl IpCidr {
         Ok(IpCidr { base, prefix })
     }
 
+    /// Конструирует подсеть из адреса и длины префикса.
+    pub fn new(base: IpAddr, prefix: u8) -> Result<Self, ParseError> {
+        let max = if base.is_ipv4() { 32 } else { 128 };
+        if prefix > max {
+            return Err(ParseError::InvalidCidr(format!("{base}/{prefix}")));
+        }
+        Ok(IpCidr { base, prefix })
+    }
+
+    /// Базовый адрес подсети.
+    pub fn base(&self) -> IpAddr {
+        self.base
+    }
+
+    /// Длина префикса.
+    pub fn prefix(&self) -> u8 {
+        self.prefix
+    }
+
     /// Входит ли адрес в подсеть (разные семейства → `false`).
     pub fn contains(&self, ip: IpAddr) -> bool {
         match (self.base, ip) {
@@ -110,5 +129,14 @@ mod tests {
     fn rejects_bad() {
         assert!(IpCidr::parse("notanip").is_err());
         assert!(IpCidr::parse("10.0.0.0/40").is_err());
+    }
+
+    #[test]
+    fn new_and_accessors_roundtrip() {
+        let c = IpCidr::new(ip("172.16.0.0"), 12).unwrap();
+        assert_eq!(c.base(), ip("172.16.0.0"));
+        assert_eq!(c.prefix(), 12);
+        assert!(c.contains(ip("172.16.5.5")));
+        assert!(IpCidr::new(ip("10.0.0.0"), 33).is_err());
     }
 }
