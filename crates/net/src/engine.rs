@@ -56,6 +56,18 @@ impl Engine {
         }
     }
 
+    /// Движок, тунелирующий ВЕСЬ трафик через единственный исходящий.
+    pub fn single_proxy(outbound: Outbound) -> Self {
+        let mut outbounds = HashMap::new();
+        outbounds.insert("proxy".to_string(), outbound);
+        Engine::new(
+            outbounds,
+            Some("proxy".to_string()),
+            Vec::new(),
+            RouteAction::Proxy(None),
+        )
+    }
+
     /// Строит движок из загруженного конфига [`AppConfig`].
     ///
     /// Серверы становятся именованными исходящими (тег = имя профиля);
