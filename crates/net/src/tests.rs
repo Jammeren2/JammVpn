@@ -1,5 +1,6 @@
 //! Интеграционные тесты сетевого ядра: end-to-end через локальные сокеты.
 
+use crate::engine::{serve_socks_routed, Engine};
 use crate::inbound::serve_socks;
 use crate::outbound::{
     HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, VlessConfig,
@@ -7,6 +8,9 @@ use crate::outbound::{
 use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream};
 use crate::target::Target;
 use crate::vless;
+use jammvpn_core::routing::{RouteAction, Rule};
+use jammvpn_core::split::IpCidr;
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -324,4 +328,56 @@ async fn outbound_shadowsocks_against_mock() {
     let mut buf = [0u8; 6];
     s.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"shadow");
+}
+
+/// Поднимает SOCKS5-сервер с маршрутизацией, возвращает его адрес.
+async fn spawn_routed(engine: Engine) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(serve_socks_routed(listener, Arc::new(engine)));
+    addr
+}
+
+#[tokio::test]
+async fn routed_engine_direct_path() {
+    let echo = spawn_echo().await;
+    // Без правил, действие по умолчанию — Direct.
+    let engine = Engine::new(HashMap::new(), None, vec![], RouteAction::Direct);
+    let proxy = spawn_routed(engine).await;
+    let mut s = socks5_client(proxy, echo).await;
+    s.write_all(b"routed").await.unwrap();
+    let mut buf = [0u8; 6];
+    s.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"routed");
+}
+
+#[tokio::test]
+async fn routed_engine_proxy_chain() {
+    let echo = spawn_echo().await;
+    // Вышестоящий прокси: SOCKS5-inbound, проксирующий напрямую.
+    let upstream = spawn_socks_inbound(Outbound::Direct).await;
+
+    let mut outbounds = HashMap::new();
+    outbounds.insert(
+        "p".to_string(),
+        Outbound::Socks5(Socks5Config {
+            server: upstream.to_string(),
+            username: None,
+            password: None,
+        }),
+    );
+    // Правило: IP echo-сервера → через прокси "p".
+    let rule = Rule {
+        ip_cidrs: vec![IpCidr::parse(&format!("{}/32", echo.ip())).unwrap()],
+        action: RouteAction::Proxy(Some("p".to_string())),
+        ..Default::default()
+    };
+    let engine = Engine::new(outbounds, None, vec![rule], RouteAction::Direct);
+    let proxy = spawn_routed(engine).await;
+
+    let mut s = socks5_client(proxy, echo).await;
+    s.write_all(b"viapxy").await.unwrap();
+    let mut buf = [0u8; 6];
+    s.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"viapxy");
 }

@@ -7,12 +7,14 @@
 //!
 //! Соответствие ТЗ: раздел 4 (протоколы/ядро, `PRO-*`).
 
+pub mod engine;
 pub mod inbound;
 pub mod outbound;
 pub mod shadowsocks;
 pub mod target;
 pub mod vless;
 
+pub use engine::{serve_socks_routed, Decision, Engine};
 pub use outbound::{HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, VlessConfig};
 pub use shadowsocks::Method as ShadowsocksMethod;
 pub use target::Target;

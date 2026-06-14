@@ -1,8 +1,8 @@
 //! Локальный SOCKS5-сервер (inbound) — цель перенаправления WFP-драйвера.
 //!
-//! Принимает соединения по SOCKS5 (без аутентификации, команда CONNECT),
-//! определяет цель и проксирует её через переданный [`Outbound`], после чего
-//! гоняет данные в обе стороны.
+//! Принимает соединения по SOCKS5 (без аутентификации, команда CONNECT) и
+//! проксирует их через [`Outbound`]. Рукопожатие и relay вынесены в
+//! `pub(crate)`-хелперы — их переиспользует движок маршрутизации ([`crate::engine`]).
 
 use crate::outbound::Outbound;
 use crate::target::Target;
@@ -12,20 +12,24 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-/// Обслуживает входящие SOCKS5-соединения на `listener`, проксируя их через
-/// `outbound`. Бесконечный цикл; каждое соединение обрабатывается в своей задаче.
+/// Обслуживает входящие SOCKS5-соединения, проксируя их через один `outbound`.
 pub async fn serve_socks(listener: TcpListener, outbound: Arc<Outbound>) -> io::Result<()> {
     loop {
         let (client, _) = listener.accept().await?;
         let ob = Arc::clone(&outbound);
         tokio::spawn(async move {
-            let _ = handle_client(client, &ob).await;
+            let _ = handle_client(client, ob).await;
         });
     }
 }
 
-async fn handle_client(mut client: TcpStream, outbound: &Outbound) -> io::Result<()> {
-    // Приветствие.
+async fn handle_client(mut client: TcpStream, outbound: Arc<Outbound>) -> io::Result<()> {
+    let target = socks_handshake(&mut client).await?;
+    relay_through(client, &outbound, &target).await
+}
+
+/// SOCKS5-рукопожатие (no-auth, CONNECT). Возвращает цель соединения.
+pub(crate) async fn socks_handshake(client: &mut TcpStream) -> io::Result<Target> {
     let mut head = [0u8; 2];
     client.read_exact(&mut head).await?;
     if head[0] != 0x05 {
@@ -34,19 +38,24 @@ async fn handle_client(mut client: TcpStream, outbound: &Outbound) -> io::Result
     let nmethods = head[1] as usize;
     let mut methods = vec![0u8; nmethods];
     client.read_exact(&mut methods).await?;
-    // Поддерживаем только no-auth.
     client.write_all(&[0x05, 0x00]).await?;
 
-    // Запрос: VER CMD RSV ATYP ...
     let mut rhead = [0u8; 4];
     client.read_exact(&mut rhead).await?;
     if rhead[1] != 0x01 {
         client.write_all(&reply(0x07)).await?; // command not supported
         return Err(err("socks5: поддерживается только CONNECT"));
     }
-    let target = read_target(&mut client, rhead[3]).await?;
+    read_target(client, rhead[3]).await
+}
 
-    match outbound.connect_tcp(&target).await {
+/// Подключается к цели через `outbound` и гоняет данные в обе стороны.
+pub(crate) async fn relay_through(
+    mut client: TcpStream,
+    outbound: &Outbound,
+    target: &Target,
+) -> io::Result<()> {
+    match outbound.connect_tcp(target).await {
         Ok(mut upstream) => {
             client.write_all(&reply(0x00)).await?;
             tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
@@ -90,7 +99,7 @@ async fn read_target(client: &mut TcpStream, atyp: u8) -> io::Result<Target> {
 }
 
 /// Ответ SOCKS5 с указанным кодом и фиктивным адресом `0.0.0.0:0`.
-fn reply(rep: u8) -> [u8; 10] {
+pub(crate) fn reply(rep: u8) -> [u8; 10] {
     [0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
 }
 
