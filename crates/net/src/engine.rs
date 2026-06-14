@@ -11,6 +11,7 @@ use jammvpn_core::routing::{evaluate, RouteAction, RouteRequest, Rule};
 use jammvpn_core::split::ConnApp;
 use std::collections::HashMap;
 use std::io;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -60,7 +61,9 @@ impl Engine {
     pub fn resolve_target(&self, target: &Target) -> Decision {
         let app = ConnApp::default();
         let (domain, ip) = match target {
-            Target::Domain(host, _) => (Some(host.as_str()), None),
+            // Литеральный IP, закодированный как домен (легальный SOCKS5 ATYP=3),
+            // тоже подаём IP-правилам — иначе IP-CIDR Block/Proxy тривиально обходятся.
+            Target::Domain(host, _) => (Some(host.as_str()), host.parse::<IpAddr>().ok()),
             Target::Socket(addr) => (None, Some(addr.ip())),
         };
         let req = RouteRequest {
@@ -185,6 +188,22 @@ mod tests {
         assert!(matches!(
             without_default.resolve_target(&domain("any")),
             Decision::Block
+        ));
+    }
+
+    #[test]
+    fn literal_ip_as_domain_matches_ip_rule() {
+        use jammvpn_core::split::IpCidr;
+        // Правило по IP-CIDR должно срабатывать даже если IP пришёл как ATYP=domain.
+        let rule = Rule {
+            ip_cidrs: vec![IpCidr::parse("10.0.0.0/8").unwrap()],
+            action: RouteAction::Proxy(Some("ss".into())),
+            ..Default::default()
+        };
+        let e = engine_with(vec![rule], None);
+        assert!(matches!(
+            e.resolve_target(&Target::Domain("10.1.2.3".to_string(), 443)),
+            Decision::Connect(Outbound::Socks5(_))
         ));
     }
 }

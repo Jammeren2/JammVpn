@@ -464,3 +464,23 @@ async fn import_link_to_outbound_chain() {
     s.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"chain!");
 }
+
+#[tokio::test]
+async fn shadowsocks_truncation_is_error_not_eof() {
+    // Усечение потока посреди length-frame должно давать ошибку, а не чистый EOF.
+    let method = Method::Aes256Gcm;
+    let key = evp_bytes_to_key(b"secret", method.key_len());
+    let (mut a, b) = tokio::io::duplex(4096);
+    // Валидная соль + частичный length-frame (3 из 18 байт), затем закрытие.
+    a.write_all(&vec![0u8; method.salt_len()]).await.unwrap();
+    a.write_all(&[1, 2, 3]).await.unwrap();
+    a.flush().await.unwrap();
+    drop(a);
+
+    let mut cb = ShadowsocksStream::new(b, method, key);
+    let mut buf = [0u8; 16];
+    assert!(
+        cb.read(&mut buf).await.is_err(),
+        "усечение должно давать ошибку, а не EOF"
+    );
+}

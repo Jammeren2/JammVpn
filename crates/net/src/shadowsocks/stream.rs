@@ -66,7 +66,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ShadowsocksStream<S> {
                 Poll::Ready(Ok(())) => {
                     let filled = rb.filled();
                     if filled.is_empty() {
-                        return Poll::Ready(Ok(false));
+                        // EOF на пустой границе — штатное завершение; EOF посреди
+                        // недочитанного frame — усечение (truncation) = ошибка.
+                        if self.rtmp.is_empty() {
+                            return Poll::Ready(Ok(false));
+                        }
+                        return Poll::Ready(Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
                     }
                     self.rtmp.extend_from_slice(filled);
                 }
