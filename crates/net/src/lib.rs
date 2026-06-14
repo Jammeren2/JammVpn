@@ -7,13 +7,22 @@
 //!
 //! Соответствие ТЗ: раздел 4 (протоколы/ядро, `PRO-*`).
 
+// Вендоренные из cfal/shoes (MIT) модули: код не «улучшаем», поэтому глушим
+// dead_code (часть API ещё не подключена) и clippy (стиль апстрима). См. ATTRIBUTION.md.
+#[allow(dead_code, clippy::all)]
+mod buf_reader;
 pub mod engine;
 pub mod from_profile;
 pub mod inbound;
 pub mod outbound;
+#[allow(dead_code, clippy::all)]
+pub mod reality;
 pub mod shadowsocks;
+#[allow(dead_code, clippy::all)]
+mod slide_buffer;
 pub mod target;
 pub mod trojan;
+mod util;
 pub mod vless;
 
 pub use engine::{serve_socks_routed, Decision, Engine};
