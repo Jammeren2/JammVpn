@@ -141,16 +141,30 @@ impl Outbound {
                 let sock = bind_connected(peer).await?;
                 Ok(UdpSession::Direct(sock))
             }
-            Outbound::Shadowsocks(cfg) if !cfg.method.is_2022() => {
+            Outbound::Shadowsocks(cfg) => {
                 let server = resolve_host(&cfg.server).await?;
                 let sock = bind_connected(server).await?;
-                let master = evp_bytes_to_key(cfg.password.as_bytes(), cfg.method.key_len());
-                Ok(UdpSession::Shadowsocks {
-                    sock,
-                    method: cfg.method,
-                    master,
-                    target: target.clone(),
-                })
+                if cfg.method.is_2022() {
+                    // SS-2022: PSK = base64-декодированный пароль длиной key_len.
+                    let psk = base64::decode_loose(&cfg.password)
+                        .map_err(|_| proto_err("ss2022: пароль не base64"))?;
+                    if psk.len() != cfg.method.key_len() {
+                        return Err(proto_err("ss2022: длина PSK не совпадает с методом"));
+                    }
+                    Ok(UdpSession::Ss2022 {
+                        sock,
+                        session: crate::shadowsocks::Ss2022UdpSession::new(cfg.method, psk)?,
+                        target: target.clone(),
+                    })
+                } else {
+                    let master = evp_bytes_to_key(cfg.password.as_bytes(), cfg.method.key_len());
+                    Ok(UdpSession::Shadowsocks {
+                        sock,
+                        method: cfg.method,
+                        master,
+                        target: target.clone(),
+                    })
+                }
             }
             Outbound::Tuic(cfg) => {
                 let manager = cfg.udp().await?;
@@ -203,6 +217,12 @@ pub enum UdpSession {
         master: Vec<u8>,
         target: Target,
     },
+    /// Через Shadowsocks 2022 (SIP022): session/packet id + anti-replay.
+    Ss2022 {
+        sock: tokio::net::UdpSocket,
+        session: crate::shadowsocks::Ss2022UdpSession,
+        target: Target,
+    },
     /// Через TUIC: assoc_id поверх общего QUIC-соединения; ответы — из канала.
     Tuic {
         manager: std::sync::Arc<crate::tuic::TuicUdp>,
@@ -248,6 +268,14 @@ impl UdpSession {
                 w.write_all(&pkt).await?;
                 w.flush().await?;
             }
+            UdpSession::Ss2022 {
+                sock,
+                session,
+                target,
+            } => {
+                let pkt = session.encrypt(target, payload)?;
+                sock.send(&pkt).await?;
+            }
         }
         Ok(())
     }
@@ -286,6 +314,11 @@ impl UdpSession {
                 let mut r = read.lock().await;
                 let (_addr, payload) = crate::trojan::read_udp_packet(&mut *r).await?;
                 Ok(payload)
+            }
+            UdpSession::Ss2022 { sock, session, .. } => {
+                let mut buf = vec![0u8; 65_535];
+                let n = sock.recv(&mut buf).await?;
+                session.decrypt(&buf[..n])
             }
         }
     }

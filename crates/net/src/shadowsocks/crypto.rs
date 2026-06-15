@@ -72,6 +72,11 @@ impl Method {
         )
     }
 
+    /// `true` для `2022-blake3-chacha20-poly1305` (UDP: XChaCha, без separate header).
+    pub fn is_chacha2022(self) -> bool {
+        matches!(self, Method::Ss2022Chacha20Poly1305)
+    }
+
     fn cipher(self) -> Cipher {
         match self {
             Method::Aes128Gcm | Method::Ss2022Aes128Gcm => Cipher::Aes128,
@@ -185,6 +190,59 @@ impl Crypto {
         incr_nonce(&mut self.nonce);
         Ok(pt)
     }
+}
+
+/// AEAD seal с явным 12-байтным nonce (SS-2022 UDP, AES-GCM body).
+pub fn seal_nonce(
+    method: Method,
+    subkey: &[u8],
+    nonce: &[u8; 12],
+    pt: &[u8],
+) -> io::Result<Vec<u8>> {
+    AeadKey::new(method, subkey)?.seal(nonce, pt)
+}
+
+/// AEAD open с явным 12-байтным nonce (SS-2022 UDP, AES-GCM body).
+pub fn open_nonce(
+    method: Method,
+    subkey: &[u8],
+    nonce: &[u8; 12],
+    ct: &[u8],
+) -> io::Result<Vec<u8>> {
+    AeadKey::new(method, subkey)?.open(nonce, ct)
+}
+
+/// AES-ECB шифрование одного 16-байтного блока ключом PSK (separate header
+/// SS-2022 UDP). Длина PSK выбирает AES-128/256.
+pub fn aes_ecb_encrypt_block(psk: &[u8], block: &mut [u8; 16]) -> io::Result<()> {
+    use aes::cipher::{BlockEncrypt, KeyInit};
+    let b = generic_array::GenericArray::from_mut_slice(block);
+    match psk.len() {
+        16 => aes::Aes128::new_from_slice(psk)
+            .map_err(|_| io::Error::other("ss2022: ключ AES-128"))?
+            .encrypt_block(b),
+        32 => aes::Aes256::new_from_slice(psk)
+            .map_err(|_| io::Error::other("ss2022: ключ AES-256"))?
+            .encrypt_block(b),
+        _ => return Err(io::Error::other("ss2022: длина PSK не 16/32")),
+    }
+    Ok(())
+}
+
+/// AES-ECB расшифровка одного 16-байтного блока ключом PSK.
+pub fn aes_ecb_decrypt_block(psk: &[u8], block: &mut [u8; 16]) -> io::Result<()> {
+    use aes::cipher::{BlockDecrypt, KeyInit};
+    let b = generic_array::GenericArray::from_mut_slice(block);
+    match psk.len() {
+        16 => aes::Aes128::new_from_slice(psk)
+            .map_err(|_| io::Error::other("ss2022: ключ AES-128"))?
+            .decrypt_block(b),
+        32 => aes::Aes256::new_from_slice(psk)
+            .map_err(|_| io::Error::other("ss2022: ключ AES-256"))?
+            .decrypt_block(b),
+        _ => return Err(io::Error::other("ss2022: длина PSK не 16/32")),
+    }
+    Ok(())
 }
 
 /// Инкремент nonce как little-endian счётчика.

@@ -440,6 +440,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn udp_associate_relays_through_ss2022() {
+        use crate::outbound::{Outbound, ShadowsocksConfig};
+        use crate::shadowsocks::{echo_server_packet, Method};
+        use jammvpn_core::base64;
+
+        let method = Method::Ss2022Aes128Gcm;
+        let psk = vec![0x11u8; method.key_len()]; // 16 байт PSK
+        let password = base64::encode_standard(&psk);
+
+        // Mock SS-2022 UDP-сервер: расшифровывает запрос, эхит ответ (type=1).
+        let srv_psk = psk.clone();
+        let ss = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ss_addr = ss.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let mut server_pid = 0u64;
+            while let Ok((n, src)) = ss.recv_from(&mut buf).await {
+                let resp = echo_server_packet(method, &srv_psk, &buf[..n], server_pid);
+                server_pid += 1;
+                let _ = ss.send_to(&resp, src).await;
+            }
+        });
+
+        let engine = Arc::new(Engine::single_proxy(Outbound::Shadowsocks(
+            ShadowsocksConfig {
+                server: ss_addr.to_string(),
+                method,
+                password,
+            },
+        )));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks = listener.local_addr().unwrap();
+        tokio::spawn(serve_socks_routed(listener, engine));
+
+        let run = async {
+            let mut ctl = TcpStream::connect(socks).await.unwrap();
+            ctl.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+            let mut m = [0u8; 2];
+            ctl.read_exact(&mut m).await.unwrap();
+            ctl.write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            let mut rep = [0u8; 10];
+            ctl.read_exact(&mut rep).await.unwrap();
+            let relay = SocketAddr::from((
+                [rep[4], rep[5], rep[6], rep[7]],
+                u16::from_be_bytes([rep[8], rep[9]]),
+            ));
+            let dst = Target::Domain("echo.test".into(), 5353);
+            let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            cli.send_to(&encode_udp_datagram(&dst, b"via-ss2022"), relay)
+                .await
+                .unwrap();
+            let mut buf = [0u8; 2048];
+            let (n, _) = cli.recv_from(&mut buf).await.unwrap();
+            let (_, target, off) = parse_udp_datagram(&buf[..n]).unwrap();
+            assert_eq!(target, dst, "ответ под доменным DST клиента");
+            assert_eq!(&buf[off..n], b"via-ss2022");
+            drop(ctl);
+        };
+        timeout(Duration::from_secs(5), run)
+            .await
+            .expect("SS-2022 UDP relay не уложился в таймаут");
+    }
+
+    #[tokio::test]
     async fn udp_associate_relays_through_trojan() {
         use crate::outbound::{Outbound, Transport, TrojanConfig};
 

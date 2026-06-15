@@ -653,6 +653,7 @@ dependencies = [
 name = "jammvpn-net"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "aws-lc-rs",
  "base64",

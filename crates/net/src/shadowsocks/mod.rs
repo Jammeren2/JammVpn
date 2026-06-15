@@ -10,10 +10,14 @@
 
 mod crypto;
 mod ss2022;
+mod ss2022_udp;
 mod stream;
 pub mod udp;
 
 pub use crypto::{evp_bytes_to_key, Method};
 pub use ss2022::Ss2022Stream;
+#[cfg(test)]
+pub(crate) use ss2022_udp::echo_server_packet;
+pub use ss2022_udp::Ss2022UdpSession;
 pub use stream::ShadowsocksStream;
 pub use udp::{decrypt_packet, encrypt_packet};

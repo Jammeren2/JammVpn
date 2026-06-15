@@ -15,14 +15,15 @@ fn bad(msg: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-fn random_salt(len: usize) -> Vec<u8> {
+fn random_salt(len: usize) -> io::Result<Vec<u8>> {
     let mut salt = vec![0u8; len];
-    let _ = getrandom::getrandom(&mut salt);
-    salt
+    // Ошибку ГСЧ пробрасываем: предсказуемая соль → предсказуемый подключ.
+    getrandom::getrandom(&mut salt).map_err(|_| io::Error::other("ss-udp: ошибка ГСЧ"))?;
+    Ok(salt)
 }
 
 /// Адрес назначения SS: `ATYP + addr + port(BE)`.
-fn encode_address(target: &Target) -> Vec<u8> {
+pub(super) fn encode_address(target: &Target) -> Vec<u8> {
     let mut b = Vec::new();
     match target {
         Target::Domain(host, port) => {
@@ -48,7 +49,7 @@ fn encode_address(target: &Target) -> Vec<u8> {
 }
 
 /// Разбирает `ATYP+addr+port` в начале `buf` → (адрес, остаток-payload).
-fn parse_address(buf: &[u8]) -> io::Result<(Target, &[u8])> {
+pub(super) fn parse_address(buf: &[u8]) -> io::Result<(Target, &[u8])> {
     if buf.is_empty() {
         return Err(bad("ss-udp: пустой заголовок"));
     }
@@ -74,6 +75,9 @@ fn parse_address(buf: &[u8]) -> io::Result<(Target, &[u8])> {
             ))
         }
         0x03 => {
+            if buf.len() < 2 {
+                return Err(bad("ss-udp: домен без байта длины"));
+            }
             let len = buf[1] as usize;
             let end = 2 + len + 2;
             if buf.len() < end {
@@ -94,7 +98,7 @@ pub fn encrypt_packet(
     target: &Target,
     payload: &[u8],
 ) -> io::Result<Vec<u8>> {
-    let salt = random_salt(method.salt_len());
+    let salt = random_salt(method.salt_len())?;
     let subkey = session_subkey(method, master, &salt);
     let mut pt = encode_address(target);
     pt.extend_from_slice(payload);

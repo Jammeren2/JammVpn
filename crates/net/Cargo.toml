@@ -16,6 +16,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macro
 
 # Shadowsocks AEAD (RustCrypto — чистый Rust, без cmake/nasm).
 aes-gcm = "0.10"
+aes = "0.8" # AES-ECB single-block для separate header SS-2022 UDP (SIP022)
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 sha1 = "0.10"
