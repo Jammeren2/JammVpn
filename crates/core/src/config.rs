@@ -60,6 +60,8 @@ pub enum ConfigError {
     Io(String),
     /// Ошибка разбора JSON.
     Json(String),
+    /// Ошибка шифрования/расшифровки секретов.
+    Secret(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -67,6 +69,7 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::Io(s) => write!(f, "ошибка ввода-вывода: {s}"),
             ConfigError::Json(s) => write!(f, "ошибка JSON: {s}"),
+            ConfigError::Secret(s) => write!(f, "ошибка секретов: {s}"),
         }
     }
 }
@@ -93,6 +96,31 @@ impl AppConfig {
     /// Сохраняет конфиг в файл.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
         std::fs::write(path, self.to_json()).map_err(|e| ConfigError::Io(e.to_string()))
+    }
+
+    /// Сохраняет конфиг, предварительно зашифровав секреты через `store`
+    /// (на диске секретные значения параметров получают префикс `enc:`).
+    /// Конфиг в памяти не изменяется.
+    pub fn save_protected(
+        &self,
+        path: &Path,
+        store: &dyn crate::secret::SecretStore,
+    ) -> Result<(), ConfigError> {
+        let mut clone = self.clone();
+        crate::secret::protect_config(&mut clone, store)
+            .map_err(|e| ConfigError::Secret(e.to_string()))?;
+        clone.save(path)
+    }
+
+    /// Загружает конфиг и расшифровывает секреты через `store`.
+    pub fn load_protected(
+        path: &Path,
+        store: &dyn crate::secret::SecretStore,
+    ) -> Result<Self, ConfigError> {
+        let mut cfg = Self::load(path)?;
+        crate::secret::unprotect_config(&mut cfg, store)
+            .map_err(|e| ConfigError::Secret(e.to_string()))?;
+        Ok(cfg)
     }
 }
 
