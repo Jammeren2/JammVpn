@@ -7,6 +7,7 @@
 use crate::reality_transport::{reality_connect, RealityTransport};
 use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream};
 use crate::target::Target;
+use crate::tuic::TuicConfig;
 use crate::vision::VisionStream;
 use crate::wireguard::WgConfig;
 use crate::{trojan, vless, BoxedStream};
@@ -104,6 +105,8 @@ pub enum Outbound {
     Trojan(TrojanConfig),
     /// Через WireGuard / AmneziaWG (userspace netstack).
     Wireguard(WgConfig),
+    /// Через TUIC v5 (QUIC).
+    Tuic(TuicConfig),
 }
 
 impl Outbound {
@@ -117,6 +120,7 @@ impl Outbound {
             Outbound::Shadowsocks(cfg) => shadowsocks_connect(cfg, target).await,
             Outbound::Trojan(cfg) => trojan_connect(cfg, target).await,
             Outbound::Wireguard(cfg) => crate::wireguard::wireguard_connect(cfg, target).await,
+            Outbound::Tuic(cfg) => crate::tuic::tuic_connect(cfg, target).await,
         }
     }
 }

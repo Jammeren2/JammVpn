@@ -25,6 +25,7 @@ mod slide_buffer;
 mod sync_adapter;
 pub mod target;
 pub mod trojan;
+pub mod tuic;
 mod util;
 #[allow(dead_code, clippy::all)]
 mod vision;
@@ -39,6 +40,7 @@ pub use outbound::{
 pub use reality_transport::RealityTransport;
 pub use shadowsocks::Method as ShadowsocksMethod;
 pub use target::Target;
+pub use tuic::{TuicConfig, TuicParams};
 pub use wireguard::{AwgObfuscation, WgConfig, WgParams};
 
 use tokio::io::{AsyncRead, AsyncWrite};

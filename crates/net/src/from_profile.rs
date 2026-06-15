@@ -8,6 +8,7 @@ use crate::outbound::{
 };
 use crate::reality_transport::RealityTransport;
 use crate::shadowsocks::Method;
+use crate::tuic::{TuicConfig, TuicParams};
 use crate::vless;
 use crate::wireguard::{
     decode_key, parse_addresses, parse_ip_list, AwgObfuscation, WgConfig, WgParams,
@@ -160,6 +161,38 @@ pub fn outbound_from_profile(p: &ServerProfile) -> Result<Outbound, ProfileError
                 dns,
                 persistent_keepalive,
                 awg,
+            })))
+        }
+        ProtocolKind::Tuic => {
+            let uuid_str = p.param("uuid").ok_or(ProfileError::MissingField("uuid"))?;
+            let uuid = vless::parse_uuid(uuid_str).ok_or(ProfileError::BadUuid)?;
+            let password = p
+                .param("password")
+                .ok_or(ProfileError::MissingField("password"))?
+                .to_string();
+            let sni = p.param("sni").map(str::to_string);
+            let insecure = matches!(
+                p.param("insecure").or_else(|| p.param("allow_insecure")),
+                Some("1") | Some("true")
+            );
+            // ALPN из CSV; по умолчанию ["h3"] (маскировка под HTTP/3).
+            let alpn = p
+                .param("alpn")
+                .map(|s| {
+                    s.split(',')
+                        .map(|a| a.trim().as_bytes().to_vec())
+                        .filter(|a| !a.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| vec![b"h3".to_vec()]);
+            Ok(Outbound::Tuic(TuicConfig::new(TuicParams {
+                server,
+                uuid,
+                password,
+                sni,
+                insecure,
+                alpn,
             })))
         }
         other => Err(ProfileError::Unsupported(other)),

@@ -47,5 +47,18 @@ smoltcp = { version = "0.13.1", default-features = false, features = [
     "async",
     "log",
 ] }
+
+# TUIC v5 (QUIC): quinn + rustls с тем же aws-lc-rs-провайдером, что REALITY/WG
+# (default-features off — иначе quinn тянет ring как второй крипто-провайдер).
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls-aws-lc-rs",
+    "log",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "std",
+    "aws_lc_rs",
+    "tls12",
+] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 x509-parser = { version = "0.18", default-features = false, features = ["verify-aws"] }
