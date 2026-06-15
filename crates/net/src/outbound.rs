@@ -5,7 +5,7 @@
 //! (Shadowsocks, WireGuard/AWG, …) добавляются отдельно.
 
 use crate::reality_transport::{reality_connect, RealityTransport};
-use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream};
+use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream, Ss2022Stream};
 use crate::target::Target;
 use crate::tuic::TuicConfig;
 use crate::vision::VisionStream;
@@ -405,10 +405,23 @@ fn encode_ss_address(target: &Target) -> Vec<u8> {
 
 async fn shadowsocks_connect(cfg: &ShadowsocksConfig, target: &Target) -> io::Result<BoxedStream> {
     let tcp = TcpStream::connect(&cfg.server).await?;
-    let master = evp_bytes_to_key(cfg.password.as_bytes(), cfg.method.key_len());
-    let mut stream = ShadowsocksStream::new(tcp, cfg.method, master);
-    stream.write_all(&encode_ss_address(target)).await?;
-    Ok(Box::new(stream))
+    if cfg.method.is_2022() {
+        // SS-2022: пароль — base64-кодированный PSK длиной key_len; адрес цели —
+        // в структурном заголовке (формируется в new), флашим его сразу.
+        let psk = base64::decode_loose(&cfg.password)
+            .map_err(|_| proto_err("ss2022: пароль не base64"))?;
+        if psk.len() != cfg.method.key_len() {
+            return Err(proto_err("ss2022: длина PSK не совпадает с методом"));
+        }
+        let mut stream = Ss2022Stream::new(tcp, cfg.method, psk, encode_ss_address(target))?;
+        stream.flush().await?;
+        Ok(Box::new(stream))
+    } else {
+        let master = evp_bytes_to_key(cfg.password.as_bytes(), cfg.method.key_len());
+        let mut stream = ShadowsocksStream::new(tcp, cfg.method, master);
+        stream.write_all(&encode_ss_address(target)).await?;
+        Ok(Box::new(stream))
+    }
 }
 
 async fn trojan_connect(cfg: &TrojanConfig, target: &Target) -> io::Result<BoxedStream> {

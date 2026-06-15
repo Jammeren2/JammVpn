@@ -9,7 +9,7 @@ use md5::{Digest, Md5};
 use sha1::Sha1;
 use std::io;
 
-/// AEAD-метод Shadowsocks.
+/// AEAD-метод Shadowsocks (legacy AEAD + SS-2022/SIP022 на BLAKE3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     /// `aes-128-gcm`
@@ -18,6 +18,20 @@ pub enum Method {
     Aes256Gcm,
     /// `chacha20-ietf-poly1305`
     Chacha20IetfPoly1305,
+    /// `2022-blake3-aes-128-gcm`
+    Ss2022Aes128Gcm,
+    /// `2022-blake3-aes-256-gcm`
+    Ss2022Aes256Gcm,
+    /// `2022-blake3-chacha20-poly1305`
+    Ss2022Chacha20Poly1305,
+}
+
+/// Базовый AEAD-шифр (общий для legacy и 2022).
+#[derive(Clone, Copy)]
+enum Cipher {
+    Aes128,
+    Aes256,
+    Chacha,
 }
 
 impl Method {
@@ -27,6 +41,9 @@ impl Method {
             "aes-128-gcm" => Some(Method::Aes128Gcm),
             "aes-256-gcm" => Some(Method::Aes256Gcm),
             "chacha20-ietf-poly1305" | "chacha20-poly1305" => Some(Method::Chacha20IetfPoly1305),
+            "2022-blake3-aes-128-gcm" => Some(Method::Ss2022Aes128Gcm),
+            "2022-blake3-aes-256-gcm" => Some(Method::Ss2022Aes256Gcm),
+            "2022-blake3-chacha20-poly1305" => Some(Method::Ss2022Chacha20Poly1305),
             _ => None,
         }
     }
@@ -34,14 +51,33 @@ impl Method {
     /// Длина ключа в байтах.
     pub fn key_len(self) -> usize {
         match self {
-            Method::Aes128Gcm => 16,
-            Method::Aes256Gcm | Method::Chacha20IetfPoly1305 => 32,
+            Method::Aes128Gcm | Method::Ss2022Aes128Gcm => 16,
+            Method::Aes256Gcm
+            | Method::Chacha20IetfPoly1305
+            | Method::Ss2022Aes256Gcm
+            | Method::Ss2022Chacha20Poly1305 => 32,
         }
     }
 
     /// Длина соли (равна длине ключа).
     pub fn salt_len(self) -> usize {
         self.key_len()
+    }
+
+    /// `true` для методов SS-2022 (BLAKE3-деривация + структурный заголовок).
+    pub fn is_2022(self) -> bool {
+        matches!(
+            self,
+            Method::Ss2022Aes128Gcm | Method::Ss2022Aes256Gcm | Method::Ss2022Chacha20Poly1305
+        )
+    }
+
+    fn cipher(self) -> Cipher {
+        match self {
+            Method::Aes128Gcm | Method::Ss2022Aes128Gcm => Cipher::Aes128,
+            Method::Aes256Gcm | Method::Ss2022Aes256Gcm => Cipher::Aes256,
+            Method::Chacha20IetfPoly1305 | Method::Ss2022Chacha20Poly1305 => Cipher::Chacha,
+        }
     }
 }
 
@@ -61,13 +97,23 @@ pub fn evp_bytes_to_key(password: &[u8], key_len: usize) -> Vec<u8> {
     key
 }
 
-/// Сессионный подключ: HKDF-SHA1(master, salt, "ss-subkey").
+/// Сессионный подключ (legacy AEAD): HKDF-SHA1(master, salt, "ss-subkey").
 pub fn session_subkey(method: Method, master: &[u8], salt: &[u8]) -> Vec<u8> {
     let hk = Hkdf::<Sha1>::new(Some(salt), master);
     let mut okm = vec![0u8; method.key_len()];
     hk.expand(b"ss-subkey", &mut okm)
         .expect("hkdf expand: фиксированная длина");
     okm
+}
+
+/// Сессионный подключ SS-2022 (SIP022):
+/// `BLAKE3_derive_key("shadowsocks 2022 session subkey", PSK || salt)[..key_len]`.
+pub fn session_subkey_2022(method: Method, psk: &[u8], salt: &[u8]) -> Vec<u8> {
+    let mut material = Vec::with_capacity(psk.len() + salt.len());
+    material.extend_from_slice(psk);
+    material.extend_from_slice(salt);
+    let derived = blake3::derive_key("shadowsocks 2022 session subkey", &material);
+    derived[..method.key_len()].to_vec()
 }
 
 enum AeadKey {
@@ -78,14 +124,14 @@ enum AeadKey {
 
 impl AeadKey {
     fn new(method: Method, subkey: &[u8]) -> io::Result<Self> {
-        let res = match method {
-            Method::Aes128Gcm => {
+        let res = match method.cipher() {
+            Cipher::Aes128 => {
                 Aes128Gcm::new_from_slice(subkey).map(|c| AeadKey::Aes128(Box::new(c)))
             }
-            Method::Aes256Gcm => {
+            Cipher::Aes256 => {
                 Aes256Gcm::new_from_slice(subkey).map(|c| AeadKey::Aes256(Box::new(c)))
             }
-            Method::Chacha20IetfPoly1305 => {
+            Cipher::Chacha => {
                 ChaCha20Poly1305::new_from_slice(subkey).map(|c| AeadKey::Chacha(Box::new(c)))
             }
         };
@@ -189,6 +235,23 @@ mod tests {
         let mut ct = enc.seal(b"secret").unwrap();
         ct[0] ^= 0xFF;
         assert!(dec.open(&ct).is_err());
+    }
+
+    #[test]
+    fn from_name_and_is_2022() {
+        assert_eq!(Method::from_name("aes-256-gcm"), Some(Method::Aes256Gcm));
+        assert_eq!(
+            Method::from_name("2022-blake3-aes-256-gcm"),
+            Some(Method::Ss2022Aes256Gcm)
+        );
+        assert_eq!(
+            Method::from_name("2022-blake3-chacha20-poly1305"),
+            Some(Method::Ss2022Chacha20Poly1305)
+        );
+        assert!(Method::Ss2022Aes128Gcm.is_2022());
+        assert!(!Method::Aes256Gcm.is_2022());
+        assert_eq!(Method::Ss2022Aes128Gcm.key_len(), 16);
+        assert_eq!(Method::Ss2022Chacha20Poly1305.key_len(), 32);
     }
 
     #[test]
