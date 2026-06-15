@@ -118,6 +118,7 @@ async function doImport() {
     msg.className = "hint ok";
     $("import-arg").value = "";
     await refreshNodes();
+    await refreshSubs();
   } catch (e) {
     msg.textContent = "ошибка: " + e;
     msg.className = "hint err";
@@ -159,6 +160,99 @@ async function stopProxy() {
   setStatus(null);
 }
 
+async function refreshSubs() {
+  const subs = await invoke("list_subscriptions");
+  const body = $("subs-body");
+  body.innerHTML = "";
+  for (const s of subs) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="url">${esc(s.url)}</td><td>${esc(
+      s.tag || "—"
+    )}</td><td>${s.update_interval_hours}</td><td class="del"><button class="x" title="Удалить" data-url="${esc(
+      s.url
+    )}">✕</button></td>`;
+    body.appendChild(tr);
+  }
+  for (const btn of body.querySelectorAll("button.x")) {
+    btn.addEventListener("click", () => removeSub(btn.dataset.url));
+  }
+  $("subs-empty").style.display = subs.length ? "none" : "block";
+}
+
+async function addSub() {
+  const url = $("sub-url").value.trim();
+  const tag = $("sub-tag").value.trim() || null;
+  // Клампим в [1, 8760] — параметр уходит в u32 (отрицательное сломало бы вызов).
+  const intervalHours = Math.min(8760, Math.max(1, parseInt($("sub-interval").value, 10) || 12));
+  const msg = $("subs-msg");
+  if (!url) return;
+  try {
+    const added = await invoke("add_subscription", { url, tag, intervalHours });
+    msg.textContent = added ? "добавлено" : "такая подписка уже есть";
+    msg.className = "hint " + (added ? "ok" : "");
+    if (added) {
+      $("sub-url").value = "";
+      $("sub-tag").value = "";
+      await refreshSubs();
+    }
+  } catch (e) {
+    msg.textContent = "ошибка: " + e;
+    msg.className = "hint err";
+  }
+}
+
+async function removeSub(url) {
+  if (!confirm("Удалить подписку?\n" + url)) return;
+  try {
+    await invoke("remove_subscription", { url });
+    await refreshSubs();
+  } catch (e) {
+    $("subs-msg").textContent = "ошибка удаления: " + e;
+    $("subs-msg").className = "hint err";
+  }
+}
+
+function setGeoInd(id, path, exists) {
+  const el = $(id);
+  if (!path) {
+    el.textContent = "—";
+    el.className = "geo-ind";
+    el.title = "путь не задан";
+  } else if (exists) {
+    el.textContent = "✓ есть";
+    el.className = "geo-ind ok";
+    el.title = "файл найден";
+  } else {
+    el.textContent = "✗ нет файла";
+    el.className = "geo-ind err";
+    el.title = "файл по указанному пути не найден";
+  }
+}
+
+async function loadGeo() {
+  const g = await invoke("geo_status");
+  $("geo-site").value = g.geosite_path || "";
+  $("geo-ip").value = g.geoip_path || "";
+  setGeoInd("geo-site-ind", g.geosite_path, g.geosite_exists);
+  setGeoInd("geo-ip-ind", g.geoip_path, g.geoip_exists);
+}
+
+async function saveGeo() {
+  const msg = $("geo-msg");
+  try {
+    await invoke("set_geo_paths", {
+      geosite: $("geo-site").value.trim() || null,
+      geoip: $("geo-ip").value.trim() || null,
+    });
+    await loadGeo();
+    msg.textContent = "пути сохранены";
+    msg.className = "hint ok";
+  } catch (e) {
+    msg.textContent = "ошибка: " + e;
+    msg.className = "hint err";
+  }
+}
+
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
@@ -173,13 +267,20 @@ async function init() {
   $("btn-import").addEventListener("click", doImport);
   $("btn-update").addEventListener("click", updateSubs);
   $("btn-save-settings").addEventListener("click", saveSettings);
+  $("btn-add-sub").addEventListener("click", addSub);
+  $("btn-save-geo").addEventListener("click", saveGeo);
   $("import-arg").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doImport();
+  });
+  $("sub-url").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") addSub();
   });
 
   $("config-path").textContent = await invoke("config_path");
   await refreshNodes();
   await loadSettings();
+  await refreshSubs();
+  await loadGeo();
   setStatus(await invoke("proxy_status"));
 }
 

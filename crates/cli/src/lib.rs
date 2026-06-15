@@ -51,6 +51,23 @@ pub struct SettingsInfo {
     pub default_proxy: Option<String>,
 }
 
+/// Подписка в списке (для UI).
+#[derive(Debug, Clone, Serialize)]
+pub struct SubscriptionInfo {
+    pub url: String,
+    pub tag: Option<String>,
+    pub update_interval_hours: u32,
+}
+
+/// Состояние geo-баз: пути и наличие файлов на диске (индикатор в UI).
+#[derive(Debug, Clone, Serialize)]
+pub struct GeoStatus {
+    pub geosite_path: Option<String>,
+    pub geosite_exists: bool,
+    pub geoip_path: Option<String>,
+    pub geoip_exists: bool,
+}
+
 /// Путь к конфигу: `%APPDATA%/jammvpn/config.json` (или `$HOME/.config/...`).
 pub fn config_path() -> PathBuf {
     let base = std::env::var_os("APPDATA")
@@ -236,6 +253,106 @@ pub fn set_settings(default_to_proxy: bool, default_proxy: Option<String>) -> Re
     save_config(&path, &cfg, store.as_ref())
 }
 
+/// Список подписок из конфига.
+pub fn list_subscriptions() -> Vec<SubscriptionInfo> {
+    load()
+        .subscriptions
+        .into_iter()
+        .map(|s| SubscriptionInfo {
+            url: s.url,
+            tag: s.tag,
+            update_interval_hours: s.update_interval_hours,
+        })
+        .collect()
+}
+
+/// Добавляет подписку (чистая логика): дубль по URL → `false` (не добавляет).
+fn apply_add_subscription(cfg: &mut AppConfig, sub: Subscription) -> bool {
+    if cfg.subscriptions.iter().any(|s| s.url == sub.url) {
+        return false;
+    }
+    cfg.subscriptions.push(sub);
+    true
+}
+
+/// Добавляет подписку в конфиг (без скачивания — после вызовите
+/// [`update_subscriptions`]). URL обязан быть http(s). `Ok(false)` — уже есть.
+pub fn add_subscription(
+    url: &str,
+    tag: Option<String>,
+    interval_hours: u32,
+) -> Result<bool, String> {
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("URL подписки должен начинаться с http:// или https://".into());
+    }
+    let sub = Subscription {
+        url: url.to_string(),
+        tag: tag.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+        update_interval_hours: if interval_hours == 0 { 12 } else { interval_hours },
+    };
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    let added = apply_add_subscription(&mut cfg, sub);
+    if added {
+        save_config(&path, &cfg, store.as_ref())?;
+    }
+    Ok(added)
+}
+
+/// Удаляет подписку по URL (чистая логика): была ли удалена.
+fn apply_remove_subscription(cfg: &mut AppConfig, url: &str) -> bool {
+    let before = cfg.subscriptions.len();
+    cfg.subscriptions.retain(|s| s.url != url);
+    cfg.subscriptions.len() != before
+}
+
+/// Удаляет подписку по URL (узлы, уже импортированные из неё, остаются —
+/// удалить можно вручную). `Ok(false)` — подписки не было.
+pub fn remove_subscription(url: &str) -> Result<bool, String> {
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    let removed = apply_remove_subscription(&mut cfg, url);
+    if removed {
+        save_config(&path, &cfg, store.as_ref())?;
+    }
+    Ok(removed)
+}
+
+/// Статус geo-баз по конфигу (наличие файлов на диске; чистая логика).
+fn geo_status_of(cfg: &AppConfig) -> GeoStatus {
+    let exists = |p: &Option<String>| {
+        p.as_deref()
+            .map(|s| Path::new(s).is_file())
+            .unwrap_or(false)
+    };
+    GeoStatus {
+        geosite_exists: exists(&cfg.geo.geosite_path),
+        geoip_exists: exists(&cfg.geo.geoip_path),
+        geosite_path: cfg.geo.geosite_path.clone(),
+        geoip_path: cfg.geo.geoip_path.clone(),
+    }
+}
+
+/// Текущий статус geo-баз (пути из конфига + проверка файлов).
+pub fn geo_status() -> GeoStatus {
+    geo_status_of(&load())
+}
+
+/// Задаёт пути к geo-базам (пустые → сброс в `None`). Существование файлов здесь
+/// не проверяется — индикатор покажет [`geo_status`].
+pub fn set_geo_paths(geosite: Option<String>, geoip: Option<String>) -> Result<(), String> {
+    let norm = |o: Option<String>| o.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    cfg.geo.geosite_path = norm(geosite);
+    cfg.geo.geoip_path = norm(geoip);
+    save_config(&path, &cfg, store.as_ref())
+}
+
 /// Строит движок для запуска прокси: `server` — весь трафик через узел, иначе —
 /// маршрутизация по правилам конфига (с fail-closed-проверкой geo-баз).
 pub fn build_engine(cfg: &AppConfig, server: Option<&str>) -> Result<Engine, String> {
@@ -355,6 +472,46 @@ mod tests {
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.servers[0].name, "A");
         assert_eq!(cfg.settings.default_proxy, None);
+    }
+
+    #[test]
+    fn apply_subscription_ops() {
+        let mut cfg = AppConfig::default();
+        let sub = Subscription {
+            url: "https://x/sub".into(),
+            tag: Some("g".into()),
+            update_interval_hours: 6,
+        };
+        // добавление нового — true; дубль по URL — false (без дублей).
+        assert!(apply_add_subscription(&mut cfg, sub.clone()));
+        assert_eq!(cfg.subscriptions.len(), 1);
+        assert!(!apply_add_subscription(&mut cfg, sub.clone()));
+        assert_eq!(cfg.subscriptions.len(), 1);
+        // удаление существующей — true; повторное — false.
+        assert!(apply_remove_subscription(&mut cfg, "https://x/sub"));
+        assert!(cfg.subscriptions.is_empty());
+        assert!(!apply_remove_subscription(&mut cfg, "https://x/sub"));
+    }
+
+    #[test]
+    fn geo_status_reflects_files() {
+        let dir = std::env::temp_dir();
+        let present = dir.join(format!("jammvpn-geo-test-{}.dat", std::process::id()));
+        std::fs::write(&present, b"x").unwrap();
+
+        let mut cfg = AppConfig::default();
+        cfg.geo.geosite_path = Some(present.to_string_lossy().into_owned());
+        cfg.geo.geoip_path =
+            Some(dir.join("jammvpn-geo-absent.dat").to_string_lossy().into_owned());
+
+        let st = geo_status_of(&cfg);
+        assert!(st.geosite_exists);
+        assert!(!st.geoip_exists);
+        assert!(st.geosite_path.is_some());
+        // путь без файла отдаётся, но exists=false.
+        assert!(st.geoip_path.is_some());
+
+        let _ = std::fs::remove_file(&present);
     }
 
     #[test]

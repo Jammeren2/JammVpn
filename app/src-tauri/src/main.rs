@@ -90,6 +90,40 @@ fn set_settings(default_to_proxy: bool, default_proxy: Option<String>) -> Result
     ctl::set_settings(default_to_proxy, default_proxy)
 }
 
+/// Список сохранённых подписок.
+#[tauri::command]
+fn list_subscriptions() -> Vec<ctl::SubscriptionInfo> {
+    ctl::list_subscriptions()
+}
+
+/// Добавить подписку (без скачивания). `false` — уже есть.
+#[tauri::command]
+fn add_subscription(
+    url: String,
+    tag: Option<String>,
+    interval_hours: u32,
+) -> Result<bool, String> {
+    ctl::add_subscription(&url, tag, interval_hours)
+}
+
+/// Удалить подписку по URL. `false` — не было.
+#[tauri::command]
+fn remove_subscription(url: String) -> Result<bool, String> {
+    ctl::remove_subscription(&url)
+}
+
+/// Статус geo-баз (пути + наличие файлов).
+#[tauri::command]
+fn geo_status() -> ctl::GeoStatus {
+    ctl::geo_status()
+}
+
+/// Сохранить пути к geo-базам (пустые → сброс).
+#[tauri::command]
+fn set_geo_paths(geosite: Option<String>, geoip: Option<String>) -> Result<(), String> {
+    ctl::set_geo_paths(geosite, geoip)
+}
+
 /// Показать главное окно и вывести его на передний план.
 fn show_main(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
@@ -156,6 +190,11 @@ fn main() {
             remove_node,
             get_settings,
             set_settings,
+            list_subscriptions,
+            add_subscription,
+            remove_subscription,
+            geo_status,
+            set_geo_paths,
         ])
         .run(tauri::generate_context!())
         .expect("ошибка запуска приложения Tauri");

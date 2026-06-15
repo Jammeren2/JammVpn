@@ -73,6 +73,41 @@
       <p class="hint" id="import-msg"></p>
     </section>
 
+    <section class="panel">
+      <h2>Подписки</h2>
+      <table id="subs">
+        <thead>
+          <tr><th>URL</th><th>Тег</th><th>Период, ч</th><th></th></tr>
+        </thead>
+        <tbody id="subs-body"></tbody>
+      </table>
+      <p class="hint" id="subs-empty">Подписок нет.</p>
+      <div class="row">
+        <input id="sub-url" type="text" placeholder="https://…/subscription" />
+        <input id="sub-tag" type="text" class="narrow" placeholder="тег (необяз.)" />
+        <input id="sub-interval" type="number" class="narrow" min="1" value="12"
+               title="период автообновления, часов" />
+        <button id="btn-add-sub">Добавить</button>
+      </div>
+      <p class="hint" id="subs-msg">Добавление не скачивает узлы — нажмите «Обновить подписки».</p>
+    </section>
+
+    <section class="panel">
+      <h2>Geo-базы (geosite / geoip)</h2>
+      <div class="row geo-row">
+        <label>geosite.dat <input id="geo-site" type="text" placeholder="путь к geosite.dat" /></label>
+        <span class="geo-ind" id="geo-site-ind" title="наличие файла">—</span>
+      </div>
+      <div class="row geo-row">
+        <label>geoip.dat <input id="geo-ip" type="text" placeholder="путь к geoip.dat" /></label>
+        <span class="geo-ind" id="geo-ip-ind" title="наличие файла">—</span>
+      </div>
+      <div class="row">
+        <button id="btn-save-geo">Сохранить пути</button>
+      </div>
+      <p class="hint" id="geo-msg">Нужны для правил <code>geosite:*</code> / <code>geoip:*</code> (форматы v2ray/xray <code>.dat</code>).</p>
+    </section>
+
     <footer>
       <span id="config-path"></span>
     </footer>
