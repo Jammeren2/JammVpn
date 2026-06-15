@@ -76,33 +76,27 @@
 
     <section class="panel">
       <div class="panel-head">
-        <h2>Раздельное туннелирование (split)</h2>
+        <h2>Раздельное туннелирование (драйвер)</h2>
         <span class="split-state off" id="split-state">снято</span>
       </div>
-      <div class="grid2">
-        <label>Режим
-          <select id="sp-mode">
-            <option value="inclusive">в тоннель только выбранные</option>
-            <option value="exclusive">в тоннель всё, кроме выбранных</option>
-          </select>
+      <p class="hint">
+        Приложения и маршруты задаются в разделе <b>«Правила маршрутизации»</b>:
+        правило с указанным <b>процессом</b> и действием <b>«проксировать»</b> —
+        это приложение перехватывается драйвером в туннель. Здесь — только
+        управление драйвером.
+      </p>
+      <div class="row">
+        <label class="check">
+          <input id="sp-kill" type="checkbox" /> kill-switch (не выпускать перехваченный трафик при неготовом тоннеле)
         </label>
-        <label class="check sp-check">
-          <input id="sp-kill" type="checkbox" /> kill-switch (не выпускать при неготовом тоннеле)
-        </label>
-        <label>Приложения <input id="sp-apps" type="text" placeholder="name:app.exe, exe:C:\game.exe" /></label>
-        <label class="check sp-check">
-          <input id="sp-inherit" type="checkbox" /> наследовать дочерним процессам
-        </label>
-        <label>Всегда напрямую (CIDR) <input id="sp-fd" type="text" placeholder="192.168.0.0/16" /></label>
-        <label>Всегда в тоннель (CIDR) <input id="sp-ft" type="text" placeholder="10.0.0.0/8" /></label>
-        <label>Адреса VPN-сервера (hairpin) <input id="sp-ep" type="text" placeholder="203.0.113.9, vpn.example.com:443" /></label>
       </div>
+      <p class="hint" id="sp-captured">Перехватываемые приложения: —</p>
       <div class="row">
         <button id="btn-split-save">Сохранить</button>
         <button id="btn-split-apply">Применить</button>
         <button id="btn-split-clear" class="ghost">Снять</button>
       </div>
-      <p class="hint" id="split-msg">Перенаправляет выбранные приложения в тоннель через WFP-драйвер. Требует загруженного драйвера и прав администратора.</p>
+      <p class="hint" id="split-msg">Требует загруженного WFP-драйвера и прав администратора.</p>
     </section>
 
     <section class="panel">

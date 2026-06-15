@@ -296,34 +296,21 @@ function setSplitState(active) {
   el.className = "split-state " + (active ? "on" : "off");
 }
 
-function buildSplitInfo() {
-  return {
-    mode: $("sp-mode").value,
-    apps: splitList($("sp-apps").value),
-    inherit_children: $("sp-inherit").checked,
-    kill_switch: $("sp-kill").checked,
-    force_direct: splitList($("sp-fd").value),
-    force_tunnel: splitList($("sp-ft").value),
-    endpoints: splitList($("sp-ep").value),
-  };
-}
-
 async function loadSplit() {
   const s = await invoke("get_split");
-  $("sp-mode").value = s.mode || "inclusive";
-  $("sp-apps").value = (s.apps || []).join(", ");
-  $("sp-inherit").checked = !!s.inherit_children;
   $("sp-kill").checked = !!s.kill_switch;
-  $("sp-fd").value = (s.force_direct || []).join(", ");
-  $("sp-ft").value = (s.force_tunnel || []).join(", ");
-  $("sp-ep").value = (s.endpoints || []).join(", ");
+  const apps = s.captured_apps || [];
+  $("sp-captured").textContent =
+    "Перехватываемые приложения: " +
+    (apps.length ? apps.join(", ") : "— (добавьте правило с процессом и действием «проксировать»)");
   setSplitState(await invoke("split_status"));
 }
 
 async function saveSplit() {
   const msg = $("split-msg");
   try {
-    await invoke("set_split", { split: buildSplitInfo() });
+    await invoke("set_split", { killSwitch: $("sp-kill").checked });
+    await loadSplit();
     msg.textContent = "сохранено";
     msg.className = "hint ok";
   } catch (e) {
@@ -335,7 +322,7 @@ async function saveSplit() {
 async function applySplit() {
   const msg = $("split-msg");
   try {
-    await invoke("set_split", { split: buildSplitInfo() }); // сохраняем перед применением
+    await invoke("set_split", { killSwitch: $("sp-kill").checked }); // сохранить перед применением
     await invoke("split_apply");
     setSplitState(true);
     msg.textContent = "split применён";
@@ -477,6 +464,7 @@ async function saveRule() {
     }
     resetRuleForm();
     await refreshRules();
+    await loadSplit(); // перехватываемые приложения выводятся из правил
     msg.textContent = "сохранено";
     msg.className = "hint ok";
   } catch (e) {
@@ -492,6 +480,7 @@ async function removeRule(i) {
     // Индексы сместились — сбрасываем форму, чтобы правка не попала не в то правило.
     if (editingRule !== null) resetRuleForm();
     await refreshRules();
+    await loadSplit();
   } catch (e) {
     $("rules-msg").textContent = "ошибка удаления: " + e;
     $("rules-msg").className = "hint err";

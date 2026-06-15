@@ -589,91 +589,83 @@ pub fn set_autostart(_enabled: bool) -> Result<(), String> {
 /// выбранных приложений (read original-dst → outbound).
 pub const SPLIT_REDIRECT_PORT: u16 = 39001;
 
-/// Конфигурация split в плоском UI-представлении.
+/// Драйвер-специфичные настройки split (приложения/маршруты — в [`list_rules`]).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SplitInfo {
-    /// Режим: `inclusive` (в тоннель только выбранные) | `exclusive` (всё, кроме них).
-    pub mode: String,
-    /// Приложения: `exe:C:\\app.exe` / `name:app.exe`.
-    pub apps: Vec<String>,
-    /// Наследовать решение дочерними процессами.
-    pub inherit_children: bool,
+pub struct SplitOptions {
     /// Kill-switch: не выпускать перенаправляемый трафик при неготовом тоннеле.
     pub kill_switch: bool,
-    /// «Всегда напрямую» (CIDR).
-    pub force_direct: Vec<String>,
-    /// «Всегда в тоннель» (CIDR).
-    pub force_tunnel: Vec<String>,
-    /// Адреса VPN-сервера для hairpin-исключения (`ip` или `host:port`).
-    pub endpoints: Vec<String>,
+    /// Приложения, которые будут перехвачены драйвером (выводятся из правил с
+    /// действием «проксировать»; только для показа в UI).
+    pub captured_apps: Vec<String>,
 }
 
-/// [`SplitConfig`] → плоский [`SplitInfo`].
-fn split_to_info(s: &SplitConfig) -> SplitInfo {
-    SplitInfo {
-        mode: match s.mode {
-            SplitMode::Inclusive => "inclusive".into(),
-            SplitMode::Exclusive => "exclusive".into(),
-        },
-        apps: s.apps.iter().map(process_to_string).collect(),
-        inherit_children: s.inherit_children,
-        kill_switch: s.kill_switch,
-        force_direct: s.force_direct_cidrs.clone(),
-        force_tunnel: s.force_tunnel_cidrs.clone(),
-        endpoints: s.server_endpoints.clone(),
+/// Строит конфиг драйвера из правил: перехватываются приложения, упомянутые в
+/// правилах с действием «проксировать» (единый источник — [`AppConfig::rules`]).
+/// Режим inclusive; hairpin-исключения — литеральные IP-адреса узлов. Маршрут
+/// (узел/прямо/блок) для перехваченного трафика далее решает движок по правилам.
+fn rules_to_split(cfg: &AppConfig) -> SplitConfig {
+    let mut apps: Vec<AppMatcher> = Vec::new();
+    for r in &cfg.rules {
+        if matches!(r.action, RouteAction::Proxy(_)) {
+            for p in &r.processes {
+                if !apps.contains(p) {
+                    apps.push(p.clone());
+                }
+            }
+        }
+    }
+    // hairpin: адреса узлов, заданные литеральным IP (чтобы не зациклить трафик
+    // самого VPN-сервера обратно в туннель).
+    let endpoints = cfg
+        .servers
+        .iter()
+        .filter(|s| s.address.parse::<std::net::IpAddr>().is_ok())
+        .map(|s| s.address.clone())
+        .collect();
+    SplitConfig {
+        mode: SplitMode::Inclusive,
+        apps,
+        inherit_children: cfg.split.inherit_children,
+        kill_switch: cfg.split.kill_switch,
+        force_direct_cidrs: Vec::new(),
+        force_tunnel_cidrs: Vec::new(),
+        server_endpoints: endpoints,
     }
 }
 
-/// Плоский [`SplitInfo`] → [`SplitConfig`] (валидирует режим и force-CIDR).
-fn info_to_split(info: &SplitInfo) -> Result<SplitConfig, String> {
-    let mode = match info.mode.trim() {
-        "inclusive" => SplitMode::Inclusive,
-        "exclusive" => SplitMode::Exclusive,
-        other => return Err(format!("неизвестный режим split: «{other}»")),
-    };
-    let cidrs = |list: &[String], label: &str| -> Result<Vec<String>, String> {
-        let mut out = Vec::new();
-        for s in clean_list(list) {
-            IpCidr::parse(&s).map_err(|e| format!("{label}: неверный CIDR «{s}»: {e}"))?;
-            out.push(s);
-        }
-        Ok(out)
-    };
-    Ok(SplitConfig {
-        mode,
-        apps: clean_list(&info.apps).iter().map(|s| parse_process(s)).collect(),
-        inherit_children: info.inherit_children,
-        kill_switch: info.kill_switch,
-        force_direct_cidrs: cidrs(&info.force_direct, "force_direct")?,
-        force_tunnel_cidrs: cidrs(&info.force_tunnel, "force_tunnel")?,
-        server_endpoints: clean_list(&info.endpoints),
-    })
+/// Текущие настройки split + предпросмотр перехватываемых приложений.
+pub fn get_split_options() -> SplitOptions {
+    let cfg = load();
+    SplitOptions {
+        kill_switch: cfg.split.kill_switch,
+        captured_apps: rules_to_split(&cfg)
+            .apps
+            .iter()
+            .map(process_to_string)
+            .collect(),
+    }
 }
 
-/// Текущая конфигурация split.
-pub fn get_split() -> SplitInfo {
-    split_to_info(&load().split)
-}
-
-/// Сохраняет конфигурацию split (валидирует).
-pub fn set_split(info: SplitInfo) -> Result<(), String> {
-    let split = info_to_split(&info)?;
+/// Сохраняет драйвер-настройки split (kill-switch).
+pub fn set_split_options(kill_switch: bool) -> Result<(), String> {
     let path = config_path();
     let store = secret_store();
     let mut cfg = load_config(&path, store.as_ref());
-    cfg.split = split;
+    cfg.split.kill_switch = kill_switch;
     save_config(&path, &cfg, store.as_ref())
 }
 
 /// Применяет split к драйверу (`redirect_port` — порт транспарент-прокси).
-/// Требует загруженного WFP-драйвера и прав администратора.
+/// Набор перехватываемых приложений выводится из правил. Требует загруженного
+/// WFP-драйвера и прав администратора.
 #[cfg(windows)]
 pub fn apply_split(redirect_port: u16) -> Result<(), String> {
-    use jammvpn_platform_windows::wfp::WfpDriverController;
     use jammvpn_platform_windows::split::SplitController;
+    use jammvpn_platform_windows::wfp::WfpDriverController;
     let cfg = load();
+    let split = rules_to_split(&cfg);
     let mut ctrl = WfpDriverController::new(redirect_port);
-    ctrl.apply(&cfg.split).map_err(|e| e.to_string())
+    ctrl.apply(&split).map_err(|e| e.to_string())
 }
 #[cfg(not(windows))]
 pub fn apply_split(_redirect_port: u16) -> Result<(), String> {
@@ -955,39 +947,33 @@ mod tests {
     }
 
     #[test]
-    fn split_info_roundtrip_and_validation() {
-        let split = SplitConfig {
-            mode: SplitMode::Exclusive,
-            apps: vec![
-                AppMatcher::ProcessName("game.exe".into()),
-                AppMatcher::ExePath("C:\\app.exe".into()),
-            ],
-            inherit_children: false,
-            kill_switch: true,
-            force_direct_cidrs: vec!["1.1.1.1/32".into()],
-            force_tunnel_cidrs: vec!["10.0.0.0/8".into()],
-            server_endpoints: vec!["198.51.100.7:443".into()],
-        };
-        let info = split_to_info(&split);
-        assert_eq!(info.mode, "exclusive");
-        assert!(info.kill_switch);
-        assert_eq!(info.apps[0], "name:game.exe");
-        // обратно совпадает.
-        assert_eq!(info_to_split(&info).unwrap(), split);
+    fn rules_to_split_captures_proxy_apps() {
+        let mut cfg = AppConfig::default();
+        // процесс chrome.exe → проксировать ⇒ перехватывается драйвером.
+        cfg.rules.push(Rule {
+            processes: vec![AppMatcher::ProcessName("chrome.exe".into())],
+            action: RouteAction::Proxy(Some("node".into())),
+            ..Default::default()
+        });
+        // процесс game.exe → напрямую ⇒ НЕ перехватывается.
+        cfg.rules.push(Rule {
+            processes: vec![AppMatcher::ProcessName("game.exe".into())],
+            action: RouteAction::Direct,
+            ..Default::default()
+        });
+        // узел с литеральным IP → в endpoints (hairpin), доменный — нет.
+        cfg.servers
+            .push(parse_link("ss://YWVzLTI1Ni1nY206cGFzcw==@9.9.9.9:8388#S").unwrap());
+        cfg.split.kill_switch = true;
 
-        // плохой режим → ошибка.
-        let bad_mode = SplitInfo {
-            mode: "nope".into(),
-            ..Default::default()
-        };
-        assert!(info_to_split(&bad_mode).is_err());
-        // плохой force-CIDR → ошибка.
-        let bad_cidr = SplitInfo {
-            mode: "inclusive".into(),
-            force_direct: vec!["not-a-cidr".into()],
-            ..Default::default()
-        };
-        assert!(info_to_split(&bad_cidr).is_err());
+        let split = rules_to_split(&cfg);
+        assert_eq!(split.mode, SplitMode::Inclusive);
+        assert!(split.kill_switch);
+        assert_eq!(
+            split.apps,
+            vec![AppMatcher::ProcessName("chrome.exe".into())]
+        );
+        assert!(split.server_endpoints.contains(&"9.9.9.9".to_string()));
     }
 
     #[test]

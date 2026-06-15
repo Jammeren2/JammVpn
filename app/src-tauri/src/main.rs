@@ -171,16 +171,16 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
     ctl::set_autostart(enabled)
 }
 
-/// Текущая конфигурация раздельного туннелирования.
+/// Драйвер-настройки split + предпросмотр перехватываемых приложений.
 #[tauri::command]
-fn get_split() -> ctl::SplitInfo {
-    ctl::get_split()
+fn get_split() -> ctl::SplitOptions {
+    ctl::get_split_options()
 }
 
-/// Сохранить конфигурацию split.
+/// Сохранить драйвер-настройки split (kill-switch).
 #[tauri::command]
-fn set_split(split: ctl::SplitInfo) -> Result<(), String> {
-    ctl::set_split(split)
+fn set_split(kill_switch: bool) -> Result<(), String> {
+    ctl::set_split_options(kill_switch)
 }
 
 /// Применить split: поднять локальный редирект-прокси и передать правила
