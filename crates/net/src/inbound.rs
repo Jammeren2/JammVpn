@@ -24,12 +24,26 @@ pub async fn serve_socks(listener: TcpListener, outbound: Arc<Outbound>) -> io::
 }
 
 async fn handle_client(mut client: TcpStream, outbound: Arc<Outbound>) -> io::Result<()> {
-    let target = socks_handshake(&mut client).await?;
-    relay_through(client, &outbound, &target).await
+    match socks_handshake(&mut client).await? {
+        SocksRequest::Connect(target) => relay_through(client, &outbound, &target).await,
+        // Одиночный исходящий не маршрутизирует UDP — отвечаем «не поддерживается».
+        SocksRequest::UdpAssociate => {
+            client.write_all(&reply(0x07)).await?;
+            Ok(())
+        }
+    }
 }
 
-/// SOCKS5-рукопожатие (no-auth, CONNECT). Возвращает цель соединения.
-pub(crate) async fn socks_handshake(client: &mut TcpStream) -> io::Result<Target> {
+/// Запрос клиента после SOCKS5-рукопожатия.
+pub(crate) enum SocksRequest {
+    /// CONNECT к цели (TCP).
+    Connect(Target),
+    /// UDP ASSOCIATE (DST в запросе — подсказка источника, игнорируется).
+    UdpAssociate,
+}
+
+/// SOCKS5-рукопожатие (no-auth). Поддерживает CONNECT и UDP ASSOCIATE.
+pub(crate) async fn socks_handshake(client: &mut TcpStream) -> io::Result<SocksRequest> {
     let mut head = [0u8; 2];
     client.read_exact(&mut head).await?;
     if head[0] != 0x05 {
@@ -42,11 +56,17 @@ pub(crate) async fn socks_handshake(client: &mut TcpStream) -> io::Result<Target
 
     let mut rhead = [0u8; 4];
     client.read_exact(&mut rhead).await?;
-    if rhead[1] != 0x01 {
-        client.write_all(&reply(0x07)).await?; // command not supported
-        return Err(err("socks5: поддерживается только CONNECT"));
+    let cmd = rhead[1];
+    // Адрес запроса читаем всегда (для CONNECT — цель, для ASSOCIATE — подсказка).
+    let addr = read_target(client, rhead[3]).await?;
+    match cmd {
+        0x01 => Ok(SocksRequest::Connect(addr)),
+        0x03 => Ok(SocksRequest::UdpAssociate),
+        _ => {
+            client.write_all(&reply(0x07)).await?; // command not supported
+            Err(err("socks5: команда не поддерживается"))
+        }
     }
-    read_target(client, rhead[3]).await
 }
 
 /// Подключается к цели через `outbound` и гоняет данные в обе стороны.
@@ -101,6 +121,23 @@ async fn read_target(client: &mut TcpStream, atyp: u8) -> io::Result<Target> {
 /// Ответ SOCKS5 с указанным кодом и фиктивным адресом `0.0.0.0:0`.
 pub(crate) fn reply(rep: u8) -> [u8; 10] {
     [0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
+}
+
+/// Ответ SOCKS5 с указанным кодом и адресом привязки (BND) — для UDP ASSOCIATE.
+pub(crate) fn reply_addr(rep: u8, addr: SocketAddr) -> Vec<u8> {
+    let mut out = vec![0x05, rep, 0x00];
+    match addr {
+        SocketAddr::V4(a) => {
+            out.push(0x01);
+            out.extend_from_slice(&a.ip().octets());
+        }
+        SocketAddr::V6(a) => {
+            out.push(0x04);
+            out.extend_from_slice(&a.ip().octets());
+        }
+    }
+    out.extend_from_slice(&addr.port().to_be_bytes());
+    out
 }
 
 fn err(msg: &str) -> io::Error {

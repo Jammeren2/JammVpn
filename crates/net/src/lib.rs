@@ -30,6 +30,7 @@ pub mod target;
 mod tlsutil;
 pub mod trojan;
 pub mod tuic;
+pub mod udp;
 pub mod urltest;
 mod util;
 #[allow(dead_code, clippy::all)]
@@ -41,12 +42,14 @@ pub use engine::{serve_socks_routed, Decision, Engine, Routed};
 pub use fakeip::FakeIp;
 pub use from_profile::{outbound_from_profile, ProfileError};
 pub use outbound::{
-    HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, TrojanConfig, VlessConfig,
+    HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, TrojanConfig, UdpSession,
+    VlessConfig,
 };
 pub use reality_transport::RealityTransport;
 pub use shadowsocks::Method as ShadowsocksMethod;
 pub use target::Target;
 pub use tuic::{TuicConfig, TuicParams};
+pub use udp::{encode_udp_datagram, parse_udp_datagram, udp_associate};
 pub use wireguard::{AwgObfuscation, WgConfig, WgParams};
 
 use tokio::io::{AsyncRead, AsyncWrite};

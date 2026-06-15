@@ -7,7 +7,7 @@
 use crate::dns::{DnsResolver, DnsServer};
 use crate::fakeip::FakeIp;
 use crate::from_profile::outbound_from_profile;
-use crate::inbound::{relay_through, reply, socks_handshake};
+use crate::inbound::{relay_through, reply, socks_handshake, SocksRequest};
 use crate::outbound::Outbound;
 use crate::target::Target;
 use jammvpn_core::config::{AppConfig, DnsServerConfig};
@@ -208,6 +208,27 @@ impl Engine {
     }
 
     /// Определяет решение для цели соединения **без DNS-резолва** (синхронно).
+    ///
+    /// # ⚠️ Внимание: НЕ использовать для доменных целей при IP/geoip-правилах
+    ///
+    /// Для доменной цели ([`Target::Domain`] с нелитеральным хостом, т.е. без
+    /// собственного IP) IP-критерии (`ip_cidrs`/`geoip`) **молча пропускаются**:
+    /// домен здесь не резолвится, IP неизвестен — правило не срабатывает, и
+    /// маршрутизация уходит в `default_action` (обычно `Direct`). Это значит, что
+    /// `geoip:ru -> Block` или `ip_cidrs -> Block` на этом пути **fail-open**:
+    /// блокировка молча обходится. Наличие резолвера ([`with_resolver`]) тут НЕ
+    /// помогает — метод синхронный и не резолвит вовсе.
+    ///
+    /// Корректную fail-closed семантику (резолв домена + сбой DNS → `Block`) даёт
+    /// только асинхронный [`Engine::route`] — используйте **его** для любого
+    /// реального трафика. `resolve_target` допустим лишь там, где гарантировано
+    /// нет IP/geoip-правил, либо цель — всегда литеральный IP / [`Target::Socket`].
+    /// Расхождение закреплено тестом
+    /// `resolve_target_fails_open_vs_route_on_domain_ip_rule`.
+    ///
+    /// [`with_resolver`]: Engine::with_resolver
+    ///
+    /// ---
     ///
     /// Процесс-инициатор на уровне SOCKS5 неизвестен, поэтому правила по
     /// приложению здесь не срабатывают (их применяет драйвер до редиректа).
@@ -432,18 +453,22 @@ pub async fn serve_socks_routed(listener: TcpListener, engine: Arc<Engine>) -> i
         let (mut client, _) = listener.accept().await?;
         let eng = Arc::clone(&engine);
         tokio::spawn(async move {
-            let target = match socks_handshake(&mut client).await {
-                Ok(t) => t,
-                Err(_) => return,
-            };
-            let routed = eng.route(&target).await;
-            match routed.decision {
-                Decision::Connect(ob) => {
-                    let _ = relay_through(client, &ob, &routed.target).await;
+            match socks_handshake(&mut client).await {
+                Ok(SocksRequest::Connect(target)) => {
+                    let routed = eng.route(&target).await;
+                    match routed.decision {
+                        Decision::Connect(ob) => {
+                            let _ = relay_through(client, &ob, &routed.target).await;
+                        }
+                        Decision::Block => {
+                            let _ = client.write_all(&reply(0x02)).await; // not allowed by ruleset
+                        }
+                    }
                 }
-                Decision::Block => {
-                    let _ = client.write_all(&reply(0x02)).await; // not allowed by ruleset
+                Ok(SocksRequest::UdpAssociate) => {
+                    let _ = crate::udp::udp_associate(client, eng).await;
                 }
+                Err(_) => {}
             }
         });
     }
@@ -721,6 +746,47 @@ mod tests {
             e.resolve_target(&Target::Socket(SocketAddr::from(([8, 8, 8, 8], 443)))),
             Decision::Connect(Outbound::Direct)
         ));
+    }
+
+    #[tokio::test]
+    async fn resolve_target_fails_open_vs_route_on_domain_ip_rule() {
+        // Регрессия: закрепляет расхождение sync `resolve_target` и async `route`
+        // на ОДНОЙ И ТОЙ ЖЕ конфигурации (geoip:ru -> Block + резолвер) для
+        // доменной цели. Доменное имя `ru.example` резолвится в 1.1.1.7 ∈ geoip:ru:
+        //   - resolve_target (sync) НЕ резолвит домен → IP-критерий молча
+        //     пропускается → fail-open в default (Direct), даже когда резолвер
+        //     задан (метод синхронный, резолвер он не использует вовсе);
+        //   - route (async) резолвит → правило срабатывает → Block (fail-closed).
+        //
+        // Тест намеренно фиксирует ограничение из доки resolve_target: будущий
+        // вызов resolve_target для доменных целей при IP/geoip-`Block` молча
+        // открыл бы обход блокировки. Если sync-путь когда-то начнёт резолвить
+        // (или иначе закроет дыру) — этот тест упадёт и заставит обновить доку.
+        let (_, ip) = geo_dbs();
+        let dns = mock_dns(Ipv4Addr::new(1, 1, 1, 7)).await; // 1.1.1.7 ∈ ru
+        let rule = Rule {
+            geoip: vec!["ru".into()],
+            action: RouteAction::Block,
+            ..Default::default()
+        };
+        let e = engine_with(vec![rule], None)
+            .with_geoip(ip)
+            .with_resolver(DnsResolver::new(DnsServer::Udp(dns)));
+
+        // Sync: домен не резолвится → geoip:ru пропущен → fail-open (Direct).
+        assert!(
+            matches!(
+                e.resolve_target(&domain("ru.example")),
+                Decision::Connect(Outbound::Direct)
+            ),
+            "resolve_target молча пропускает geoip:ru для доменной цели (fail-open)"
+        );
+        // Async: тот же движок → домен → 1.1.1.7 ∈ geoip:ru → Block (fail-closed).
+        let r = e.route(&domain("ru.example")).await;
+        assert!(
+            matches!(r.decision, Decision::Block),
+            "route резолвит домен и применяет geoip:ru → Block"
+        );
     }
 
     #[tokio::test]

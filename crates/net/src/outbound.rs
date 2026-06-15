@@ -123,6 +123,51 @@ impl Outbound {
             Outbound::Tuic(cfg) => crate::tuic::tuic_connect(cfg, target).await,
         }
     }
+
+    /// Открывает UDP-сессию исходящего к КОНКРЕТНОМУ адресату `peer` (SOCKS5 UDP
+    /// ASSOCIATE). Сокет `connect()`-ится на peer, поэтому ядро отбрасывает
+    /// датаграммы от чужих источников (защита от off-path инъекции). Пока
+    /// поддержан только `Direct`; UDP через прокси добавляется отдельно.
+    pub async fn connect_udp(&self, peer: SocketAddr) -> io::Result<UdpSession> {
+        match self {
+            Outbound::Direct => {
+                let bind: SocketAddr = if peer.is_ipv4() {
+                    "0.0.0.0:0".parse().unwrap()
+                } else {
+                    "[::]:0".parse().unwrap()
+                };
+                let sock = tokio::net::UdpSocket::bind(bind).await?;
+                sock.connect(peer).await?;
+                Ok(UdpSession::Direct(sock))
+            }
+            _ => Err(proto_err(
+                "udp: данный исходящий пока не поддерживает UDP (только Direct)",
+            )),
+        }
+    }
+}
+
+/// UDP-сессия исходящего к одному адресату (сокет `connect()`-нут на peer).
+#[derive(Debug)]
+pub enum UdpSession {
+    /// Прямая отправка через connected UDP-сокет.
+    Direct(tokio::net::UdpSocket),
+}
+
+impl UdpSession {
+    /// Отправляет датаграмму `payload` адресату сессии.
+    pub async fn send(&self, payload: &[u8]) -> io::Result<()> {
+        let UdpSession::Direct(sock) = self;
+        sock.send(payload).await?;
+        Ok(())
+    }
+
+    /// Принимает следующую датаграмму от адресата сессии (чужие источники ядро
+    /// уже отбросило благодаря `connect()`).
+    pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let UdpSession::Direct(sock) = self;
+        sock.recv(buf).await
+    }
 }
 
 fn proto_err(msg: &str) -> io::Error {
