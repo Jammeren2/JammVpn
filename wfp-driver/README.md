@@ -34,10 +34,16 @@ Kernel-mode WFP callout-драйвер, реализующий per-app connect-r
 ## Сборка (требуется WDK)
 
 1. Установить **Visual Studio** + **Windows Driver Kit (WDK)** соответствующей
-   версии (или **EWDK**).
-2. Создать проект «Kernel Mode Driver, Empty (WDM)», добавить `src/*.c`,
-   слинковать с `fwpkclnt.lib`, `ntoskrnl.lib`, `uuid.lib`.
-   (Сборка из VS/MSBuild; CMake для kernel-драйверов не используется.)
+   версии (или **EWDK**). WDK ставится поверх Windows SDK той же версии и
+   добавляет kernel-заголовки (`Include\<ver>\km`), km-библиотеки и тулсет
+   `WindowsKernelModeDriver10.0` для VS.
+2. Открыть готовый **`JammVpnSplit.vcxproj`** (WDM-драйвер; уже ссылается на
+   `src/driver.c`, `src/driver.h`, `JammVpnSplit.inf` и линкует
+   `fwpkclnt.lib`/`ntoskrnl.lib`) → собрать конфигурацию `x64`. Если VS
+   предложит «Retarget» — согласиться.
+   - *Альтернатива*, если проект не открывается на твоей версии WDK: создать в
+     VS «Kernel Mode Driver, Empty (WDM)» и добавить те же три файла.
+   - Сборка из VS/MSBuild; CMake для kernel-драйверов не используется.
 3. Сверить помеченные `СВЕРИТЬ:` места с актуальным WDK (имена полей
    `FWPS_CONNECT_REQUEST0`, владение redirect-context, доступность
    `RtlUTF8ToUnicodeN`) — компилятор/анализатор драйвера их проверит.
