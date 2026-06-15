@@ -29,6 +29,7 @@ mod util;
 #[allow(dead_code, clippy::all)]
 mod vision;
 pub mod vless;
+pub mod wireguard;
 
 pub use engine::{serve_socks_routed, Decision, Engine};
 pub use from_profile::{outbound_from_profile, ProfileError};
@@ -38,6 +39,7 @@ pub use outbound::{
 pub use reality_transport::RealityTransport;
 pub use shadowsocks::Method as ShadowsocksMethod;
 pub use target::Target;
+pub use wireguard::{AwgObfuscation, WgConfig, WgParams};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 

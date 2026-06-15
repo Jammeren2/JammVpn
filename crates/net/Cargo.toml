@@ -32,5 +32,19 @@ subtle = "2"
 log = "0.4"
 bytes = "1"
 memchr = "2"
+
+# WireGuard / AmneziaWG outbound: Noise-ядро (boringtun) + userspace netstack
+# (smoltcp). AWG-обфускация — своя, поверх UDP (см. wireguard/obfs.rs).
+boringtun = "0.7.1"
+smoltcp = { version = "0.13.1", default-features = false, features = [
+    "std",
+    "medium-ip",
+    "proto-ipv4",
+    "proto-ipv6",
+    "socket-tcp",
+    "socket-udp",
+    "socket-dns",
+    "log",
+] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 x509-parser = { version = "0.18", default-features = false, features = ["verify-aws"] }
