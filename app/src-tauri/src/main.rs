@@ -124,6 +124,36 @@ fn set_geo_paths(geosite: Option<String>, geoip: Option<String>) -> Result<(), S
     ctl::set_geo_paths(geosite, geoip)
 }
 
+/// Список правил маршрутизации (в порядке применения).
+#[tauri::command]
+fn list_rules() -> Vec<ctl::RuleInfo> {
+    ctl::list_rules()
+}
+
+/// Добавить правило в конец списка.
+#[tauri::command]
+fn add_rule(rule: ctl::RuleInfo) -> Result<(), String> {
+    ctl::add_rule(rule)
+}
+
+/// Заменить правило по индексу.
+#[tauri::command]
+fn update_rule(index: usize, rule: ctl::RuleInfo) -> Result<(), String> {
+    ctl::update_rule(index, rule)
+}
+
+/// Удалить правило по индексу. `false` — индекс вне диапазона.
+#[tauri::command]
+fn remove_rule(index: usize) -> Result<bool, String> {
+    ctl::remove_rule(index)
+}
+
+/// Переместить правило вверх (`up=true`) или вниз. `false` — двигать некуда.
+#[tauri::command]
+fn move_rule(index: usize, up: bool) -> Result<bool, String> {
+    ctl::move_rule(index, up)
+}
+
 /// Показать главное окно и вывести его на передний план.
 fn show_main(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
@@ -195,6 +225,11 @@ fn main() {
             remove_subscription,
             geo_status,
             set_geo_paths,
+            list_rules,
+            add_rule,
+            update_rule,
+            remove_rule,
+            move_rule,
         ])
         .run(tauri::generate_context!())
         .expect("ошибка запуска приложения Tauri");

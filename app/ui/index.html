@@ -108,6 +108,49 @@
       <p class="hint" id="geo-msg">Нужны для правил <code>geosite:*</code> / <code>geoip:*</code> (форматы v2ray/xray <code>.dat</code>).</p>
     </section>
 
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Правила маршрутизации</h2>
+        <span class="hint" style="margin: 0">сверху вниз, первое совпадение</span>
+      </div>
+      <table id="rules">
+        <thead>
+          <tr><th>#</th><th>Критерии</th><th>Действие</th><th></th></tr>
+        </thead>
+        <tbody id="rules-body"></tbody>
+      </table>
+      <p class="hint" id="rules-empty">Правил нет — трафик идёт по настройке «по умолчанию».</p>
+
+      <div class="rule-form">
+        <h3 id="rule-form-title">Новое правило</h3>
+        <div class="grid2">
+          <label>Домены <input id="r-domains" type="text" placeholder="suffix:example.com, keyword:ads" /></label>
+          <label>IP-CIDR <input id="r-cidrs" type="text" placeholder="10.0.0.0/8, 1.2.3.4" /></label>
+          <label>Процессы <input id="r-procs" type="text" placeholder="name:app.exe, exe:C:\path.exe" /></label>
+          <label>Порты <input id="r-ports" type="text" placeholder="443, 80" /></label>
+          <label>geosite <input id="r-geosite" type="text" placeholder="google, cn" /></label>
+          <label>geoip <input id="r-geoip" type="text" placeholder="ru, us" /></label>
+          <label>Действие
+            <select id="r-action">
+              <option value="proxy">проксировать</option>
+              <option value="direct">напрямую</option>
+              <option value="block">блокировать</option>
+            </select>
+          </label>
+          <label id="r-tag-wrap">Узел (тег)
+            <input id="r-tag" type="text" placeholder="пусто = дефолтный" list="node-names" />
+          </label>
+        </div>
+        <div class="row">
+          <button id="btn-rule-save">Добавить</button>
+          <button id="btn-rule-cancel" class="ghost" style="display: none">Отмена</button>
+        </div>
+        <p class="hint" id="rules-msg">Критерии в категории — через запятую; между категориями — И, внутри — ИЛИ. Пустое правило = catch-all.</p>
+      </div>
+    </section>
+
+    <datalist id="node-names"></datalist>
+
     <footer>
       <span id="config-path"></span>
     </footer>

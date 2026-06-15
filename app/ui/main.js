@@ -48,6 +48,16 @@ async function refreshNodes() {
   for (const btn of body.querySelectorAll("button.x")) {
     btn.addEventListener("click", () => removeNode(btn.dataset.name));
   }
+  // datalist имён узлов — для автодополнения тега в редакторе правил.
+  const dl = $("node-names");
+  if (dl) {
+    dl.innerHTML = "";
+    for (const n of nodes) {
+      const o = document.createElement("option");
+      o.value = n.name;
+      dl.appendChild(o);
+    }
+  }
   $("nodes-empty").style.display = nodes.length ? "none" : "block";
 }
 
@@ -253,6 +263,174 @@ async function saveGeo() {
   }
 }
 
+// --- Правила маршрутизации ---
+
+let rulesCache = [];
+let editingRule = null; // индекс редактируемого правила или null (добавление).
+
+function splitList(str) {
+  return str
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function parsePorts(str) {
+  const out = [];
+  for (const part of splitList(str)) {
+    const n = parseInt(part, 10);
+    if (Number.isInteger(n) && n >= 1 && n <= 65535) out.push(n);
+  }
+  return out;
+}
+
+function buildRuleInfo() {
+  const action = $("r-action").value;
+  return {
+    domains: splitList($("r-domains").value),
+    ip_cidrs: splitList($("r-cidrs").value),
+    processes: splitList($("r-procs").value),
+    ports: parsePorts($("r-ports").value),
+    geosite: splitList($("r-geosite").value),
+    geoip: splitList($("r-geoip").value),
+    action,
+    proxy_tag: action === "proxy" ? $("r-tag").value.trim() || null : null,
+  };
+}
+
+function ruleSummary(r) {
+  const parts = [];
+  if (r.domains.length) parts.push("дом: " + r.domains.join(", "));
+  if (r.ip_cidrs.length) parts.push("ip: " + r.ip_cidrs.join(", "));
+  if (r.processes.length) parts.push("proc: " + r.processes.join(", "));
+  if (r.ports.length) parts.push("порт: " + r.ports.join(", "));
+  if (r.geosite.length) parts.push("geosite: " + r.geosite.join(", "));
+  if (r.geoip.length) parts.push("geoip: " + r.geoip.join(", "));
+  return parts.length ? parts.join(" · ") : "любой трафик (catch-all)";
+}
+
+function actionLabel(r) {
+  if (r.action === "proxy")
+    return "→ proxy" + (r.proxy_tag ? `(${r.proxy_tag})` : "");
+  if (r.action === "block") return "✖ block";
+  return "→ direct";
+}
+
+async function refreshRules() {
+  rulesCache = await invoke("list_rules");
+  const body = $("rules-body");
+  body.innerHTML = "";
+  rulesCache.forEach((r, i) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${i + 1}</td><td class="crit">${esc(
+      ruleSummary(r)
+    )}</td><td class="act ${esc(r.action)}">${esc(
+      actionLabel(r)
+    )}</td><td class="rule-ctl">
+      <button class="mini" data-i="${i}" data-act="up" title="выше">▲</button>
+      <button class="mini" data-i="${i}" data-act="down" title="ниже">▼</button>
+      <button class="mini" data-i="${i}" data-act="edit" title="изменить">✎</button>
+      <button class="x" data-i="${i}" data-act="del" title="удалить">✕</button>
+    </td>`;
+    body.appendChild(tr);
+  });
+  $("rules-empty").style.display = rulesCache.length ? "none" : "block";
+}
+
+function fillRuleForm(r) {
+  $("r-domains").value = (r.domains || []).join(", ");
+  $("r-cidrs").value = (r.ip_cidrs || []).join(", ");
+  $("r-procs").value = (r.processes || []).join(", ");
+  $("r-ports").value = (r.ports || []).join(", ");
+  $("r-geosite").value = (r.geosite || []).join(", ");
+  $("r-geoip").value = (r.geoip || []).join(", ");
+  $("r-action").value = r.action || "proxy";
+  $("r-tag").value = r.proxy_tag || "";
+  updateTagVisibility();
+}
+
+function resetRuleForm() {
+  editingRule = null;
+  fillRuleForm({ action: "proxy" });
+  $("rule-form-title").textContent = "Новое правило";
+  $("btn-rule-save").textContent = "Добавить";
+  $("btn-rule-cancel").style.display = "none";
+}
+
+function updateTagVisibility() {
+  $("r-tag-wrap").style.display = $("r-action").value === "proxy" ? "" : "none";
+}
+
+function startEditRule(i) {
+  editingRule = i;
+  fillRuleForm(rulesCache[i]);
+  $("rule-form-title").textContent = `Изменить правило #${i + 1}`;
+  $("btn-rule-save").textContent = "Сохранить";
+  $("btn-rule-cancel").style.display = "";
+  $("r-domains").focus();
+}
+
+async function saveRule() {
+  const rule = buildRuleInfo();
+  const msg = $("rules-msg");
+  try {
+    if (editingRule === null) {
+      await invoke("add_rule", { rule });
+    } else {
+      await invoke("update_rule", { index: editingRule, rule });
+    }
+    resetRuleForm();
+    await refreshRules();
+    msg.textContent = "сохранено";
+    msg.className = "hint ok";
+  } catch (e) {
+    msg.textContent = "ошибка: " + e;
+    msg.className = "hint err";
+  }
+}
+
+async function removeRule(i) {
+  if (!confirm(`Удалить правило #${i + 1}?`)) return;
+  try {
+    await invoke("remove_rule", { index: i });
+    // Индексы сместились — сбрасываем форму, чтобы правка не попала не в то правило.
+    if (editingRule !== null) resetRuleForm();
+    await refreshRules();
+  } catch (e) {
+    $("rules-msg").textContent = "ошибка удаления: " + e;
+    $("rules-msg").className = "hint err";
+  }
+}
+
+async function moveRule(i, up) {
+  try {
+    const moved = await invoke("move_rule", { index: i, up });
+    if (moved) {
+      if (editingRule !== null) resetRuleForm();
+      await refreshRules();
+    }
+  } catch (e) {
+    $("rules-msg").textContent = "ошибка: " + e;
+    $("rules-msg").className = "hint err";
+  }
+}
+
+function onRulesClick(e) {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const i = parseInt(btn.dataset.i, 10);
+  switch (btn.dataset.act) {
+    case "up":
+      return moveRule(i, true);
+    case "down":
+      return moveRule(i, false);
+    case "edit":
+      return startEditRule(i);
+    case "del":
+      return removeRule(i);
+  }
+}
+
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
@@ -269,6 +447,10 @@ async function init() {
   $("btn-save-settings").addEventListener("click", saveSettings);
   $("btn-add-sub").addEventListener("click", addSub);
   $("btn-save-geo").addEventListener("click", saveGeo);
+  $("btn-rule-save").addEventListener("click", saveRule);
+  $("btn-rule-cancel").addEventListener("click", resetRuleForm);
+  $("r-action").addEventListener("change", updateTagVisibility);
+  $("rules-body").addEventListener("click", onRulesClick);
   $("import-arg").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doImport();
   });
@@ -281,6 +463,8 @@ async function init() {
   await loadSettings();
   await refreshSubs();
   await loadGeo();
+  await refreshRules();
+  resetRuleForm();
   setStatus(await invoke("proxy_status"));
 }
 

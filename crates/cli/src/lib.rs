@@ -6,9 +6,11 @@
 //! в нём шифруются (DPAPI на Windows). Операции возвращают ДАННЫЕ (не печатают),
 //! ошибки — человекочитаемой строкой; UI/CLI форматируют сами.
 
-use jammvpn_core::{parse_link, AppConfig, SecretStore, Subscription};
+use jammvpn_core::routing::DomainRule;
+use jammvpn_core::split::{AppMatcher, IpCidr};
+use jammvpn_core::{parse_link, AppConfig, RouteAction, Rule, SecretStore, Subscription};
 use jammvpn_net::{outbound_from_profile, serve_socks_routed, subscription, urltest, Engine};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,6 +68,29 @@ pub struct GeoStatus {
     pub geosite_exists: bool,
     pub geoip_path: Option<String>,
     pub geoip_exists: bool,
+}
+
+/// Правило маршрутизации в плоском UI-представлении. Доменные и процессные
+/// критерии кодируются строкой `тип:значение`; контроллер конвертирует в
+/// [`Rule`]. Порядок в списке = порядок применения (first-match).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuleInfo {
+    /// Домены: `full:host` / `suffix:example.com` / `keyword:str` (без префикса → suffix).
+    pub domains: Vec<String>,
+    /// IP-CIDR: `10.0.0.0/8`, `1.2.3.4`, `::1/128`.
+    pub ip_cidrs: Vec<String>,
+    /// Процессы: `exe:C:\\app.exe` / `name:app.exe` (без префикса → name).
+    pub processes: Vec<String>,
+    /// Порты назначения.
+    pub ports: Vec<u16>,
+    /// geosite-категории (`google`, `cn`).
+    pub geosite: Vec<String>,
+    /// geoip-коды стран (`ru`, `us`).
+    pub geoip: Vec<String>,
+    /// Действие: `direct` | `proxy` | `block`.
+    pub action: String,
+    /// Тег прокси для `action == "proxy"` (пусто → дефолтный outbound).
+    pub proxy_tag: Option<String>,
 }
 
 /// Путь к конфигу: `%APPDATA%/jammvpn/config.json` (или `$HOME/.config/...`).
@@ -353,6 +378,182 @@ pub fn set_geo_paths(geosite: Option<String>, geoip: Option<String>) -> Result<(
     save_config(&path, &cfg, store.as_ref())
 }
 
+// --- Правила маршрутизации (CRUD + конвертеры core::Rule ↔ RuleInfo) ---
+
+fn domain_to_string(d: &DomainRule) -> String {
+    match d {
+        DomainRule::Full(s) => format!("full:{s}"),
+        DomainRule::Suffix(s) => format!("suffix:{s}"),
+        DomainRule::Keyword(s) => format!("keyword:{s}"),
+    }
+}
+
+/// `тип:значение` → `DomainRule` (без/с неизвестным префиксом → `Suffix`).
+fn parse_domain(s: &str) -> DomainRule {
+    let s = s.trim();
+    match s.split_once(':') {
+        Some(("full", v)) => DomainRule::Full(v.trim().to_string()),
+        Some(("suffix", v)) => DomainRule::Suffix(v.trim().to_string()),
+        Some(("keyword", v)) => DomainRule::Keyword(v.trim().to_string()),
+        _ => DomainRule::Suffix(s.to_string()),
+    }
+}
+
+fn process_to_string(m: &AppMatcher) -> String {
+    match m {
+        AppMatcher::ExePath(p) => format!("exe:{p}"),
+        AppMatcher::ProcessName(n) => format!("name:{n}"),
+    }
+}
+
+/// `тип:значение` → `AppMatcher` (без/с неизвестным префиксом → `ProcessName`).
+fn parse_process(s: &str) -> AppMatcher {
+    let s = s.trim();
+    match s.split_once(':') {
+        Some(("exe", v)) => AppMatcher::ExePath(v.trim().to_string()),
+        Some(("name", v)) => AppMatcher::ProcessName(v.trim().to_string()),
+        _ => AppMatcher::ProcessName(s.to_string()),
+    }
+}
+
+/// Чистит список строк: trim + отбрасывает пустые.
+fn clean_list(v: &[String]) -> Vec<String> {
+    v.iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// [`Rule`] → плоский [`RuleInfo`] (для UI).
+fn rule_to_info(r: &Rule) -> RuleInfo {
+    let (action, proxy_tag) = match &r.action {
+        RouteAction::Direct => ("direct".to_string(), None),
+        RouteAction::Block => ("block".to_string(), None),
+        RouteAction::Proxy(tag) => ("proxy".to_string(), tag.clone()),
+    };
+    RuleInfo {
+        domains: r.domains.iter().map(domain_to_string).collect(),
+        ip_cidrs: r.ip_cidrs.iter().map(|c| c.to_string()).collect(),
+        processes: r.processes.iter().map(process_to_string).collect(),
+        ports: r.ports.clone(),
+        geosite: r.geosite.clone(),
+        geoip: r.geoip.clone(),
+        action,
+        proxy_tag,
+    }
+}
+
+/// Плоский [`RuleInfo`] → [`Rule`] (валидирует CIDR и действие).
+fn info_to_rule(info: &RuleInfo) -> Result<Rule, String> {
+    let mut ip_cidrs = Vec::new();
+    for s in clean_list(&info.ip_cidrs) {
+        ip_cidrs.push(IpCidr::parse(&s).map_err(|e| format!("неверный CIDR «{s}»: {e}"))?);
+    }
+    let action = match info.action.trim() {
+        "direct" => RouteAction::Direct,
+        "block" => RouteAction::Block,
+        "proxy" => RouteAction::Proxy(
+            info.proxy_tag
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        ),
+        other => return Err(format!("неизвестное действие: «{other}»")),
+    };
+    Ok(Rule {
+        domains: clean_list(&info.domains).iter().map(|s| parse_domain(s)).collect(),
+        ip_cidrs,
+        processes: clean_list(&info.processes).iter().map(|s| parse_process(s)).collect(),
+        ports: info.ports.clone(),
+        geosite: clean_list(&info.geosite),
+        geoip: clean_list(&info.geoip),
+        action,
+    })
+}
+
+/// Список правил (в порядке применения).
+pub fn list_rules() -> Vec<RuleInfo> {
+    load().rules.iter().map(rule_to_info).collect()
+}
+
+/// Добавляет правило в конец списка.
+pub fn add_rule(info: RuleInfo) -> Result<(), String> {
+    let rule = info_to_rule(&info)?;
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    cfg.rules.push(rule);
+    save_config(&path, &cfg, store.as_ref())
+}
+
+/// Заменяет правило по индексу (сохраняя позицию). Err — индекс вне диапазона.
+pub fn update_rule(index: usize, info: RuleInfo) -> Result<(), String> {
+    let rule = info_to_rule(&info)?;
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    if index >= cfg.rules.len() {
+        return Err(format!("индекс правила вне диапазона: {index}"));
+    }
+    cfg.rules[index] = rule;
+    save_config(&path, &cfg, store.as_ref())
+}
+
+/// Удаляет правило по индексу (чистая логика): было ли удалено.
+fn apply_remove_rule(cfg: &mut AppConfig, index: usize) -> bool {
+    if index < cfg.rules.len() {
+        cfg.rules.remove(index);
+        true
+    } else {
+        false
+    }
+}
+
+/// Удаляет правило по индексу. `Ok(false)` — индекс вне диапазона.
+pub fn remove_rule(index: usize) -> Result<bool, String> {
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    let removed = apply_remove_rule(&mut cfg, index);
+    if removed {
+        save_config(&path, &cfg, store.as_ref())?;
+    }
+    Ok(removed)
+}
+
+/// Перемещает правило вверх/вниз (меняет порядок применения; чистая логика).
+fn apply_move_rule(cfg: &mut AppConfig, index: usize, up: bool) -> bool {
+    let n = cfg.rules.len();
+    if index >= n {
+        return false;
+    }
+    let target = if up {
+        if index == 0 {
+            return false;
+        }
+        index - 1
+    } else {
+        if index + 1 >= n {
+            return false;
+        }
+        index + 1
+    };
+    cfg.rules.swap(index, target);
+    true
+}
+
+/// Перемещает правило вверх (`up=true`) или вниз. `Ok(false)` — двигать некуда.
+pub fn move_rule(index: usize, up: bool) -> Result<bool, String> {
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    let moved = apply_move_rule(&mut cfg, index, up);
+    if moved {
+        save_config(&path, &cfg, store.as_ref())?;
+    }
+    Ok(moved)
+}
+
 /// Строит движок для запуска прокси: `server` — весь трафик через узел, иначе —
 /// маршрутизация по правилам конфига (с fail-closed-проверкой geo-баз).
 pub fn build_engine(cfg: &AppConfig, server: Option<&str>) -> Result<Engine, String> {
@@ -512,6 +713,90 @@ mod tests {
         assert!(st.geoip_path.is_some());
 
         let _ = std::fs::remove_file(&present);
+    }
+
+    #[test]
+    fn rule_info_roundtrip() {
+        let rule = Rule {
+            domains: vec![
+                DomainRule::Suffix("example.com".into()),
+                DomainRule::Keyword("ads".into()),
+                DomainRule::Full("exact.host".into()),
+            ],
+            ip_cidrs: vec![IpCidr::parse("10.0.0.0/8").unwrap()],
+            processes: vec![
+                AppMatcher::ProcessName("app.exe".into()),
+                AppMatcher::ExePath("C:\\app.exe".into()),
+            ],
+            ports: vec![443, 80],
+            geosite: vec!["google".into()],
+            geoip: vec!["ru".into()],
+            action: RouteAction::Proxy(Some("node".into())),
+        };
+        let info = rule_to_info(&rule);
+        assert_eq!(info.action, "proxy");
+        assert_eq!(info.proxy_tag.as_deref(), Some("node"));
+        assert_eq!(info.domains[0], "suffix:example.com");
+        assert_eq!(info.processes[1], "exe:C:\\app.exe");
+        // обратно совпадает побайтово.
+        assert_eq!(info_to_rule(&info).unwrap(), rule);
+    }
+
+    #[test]
+    fn info_to_rule_validates_and_defaults() {
+        // плохой CIDR → ошибка.
+        let bad = RuleInfo {
+            ip_cidrs: vec!["not-a-cidr".into()],
+            action: "direct".into(),
+            ..Default::default()
+        };
+        assert!(info_to_rule(&bad).is_err());
+        // неизвестное действие → ошибка.
+        let bada = RuleInfo {
+            action: "nope".into(),
+            ..Default::default()
+        };
+        assert!(info_to_rule(&bada).is_err());
+        // bare домен → Suffix, bare процесс → ProcessName, пустые отброшены.
+        let info = RuleInfo {
+            domains: vec!["example.com".into(), "  ".into()],
+            processes: vec!["app.exe".into()],
+            action: "block".into(),
+            ..Default::default()
+        };
+        let rule = info_to_rule(&info).unwrap();
+        assert_eq!(rule.domains, vec![DomainRule::Suffix("example.com".into())]);
+        assert_eq!(rule.processes, vec![AppMatcher::ProcessName("app.exe".into())]);
+        assert_eq!(rule.action, RouteAction::Block);
+        // proxy без тега → Proxy(None).
+        let p = RuleInfo {
+            action: "proxy".into(),
+            proxy_tag: Some("  ".into()),
+            ..Default::default()
+        };
+        assert_eq!(info_to_rule(&p).unwrap().action, RouteAction::Proxy(None));
+    }
+
+    #[test]
+    fn apply_rule_reorder_and_remove() {
+        let mut cfg = AppConfig::default();
+        let mk = |t: &str| Rule {
+            domains: vec![DomainRule::Suffix(format!("{t}.com"))],
+            action: RouteAction::Direct,
+            ..Default::default()
+        };
+        cfg.rules = vec![mk("a"), mk("b"), mk("c")];
+        // move b (index 1) вверх → [b, a, c].
+        assert!(apply_move_rule(&mut cfg, 1, true));
+        assert_eq!(cfg.rules[0].domains, vec![DomainRule::Suffix("b.com".into())]);
+        // первый вверх — некуда (false); последний вниз — некуда (false).
+        assert!(!apply_move_rule(&mut cfg, 0, true));
+        assert!(!apply_move_rule(&mut cfg, 2, false));
+        assert!(!apply_move_rule(&mut cfg, 9, true));
+        // remove index 1 (a) → [b, c]; вне диапазона → false.
+        assert!(apply_remove_rule(&mut cfg, 1));
+        assert_eq!(cfg.rules.len(), 2);
+        assert!(!apply_remove_rule(&mut cfg, 9));
     }
 
     #[test]
