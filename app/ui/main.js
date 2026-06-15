@@ -288,6 +288,77 @@ async function toggleAutostart() {
   }
 }
 
+// --- Раздельное туннелирование (split) ---
+
+function setSplitState(active) {
+  const el = $("split-state");
+  el.textContent = active ? "применено" : "снято";
+  el.className = "split-state " + (active ? "on" : "off");
+}
+
+function buildSplitInfo() {
+  return {
+    mode: $("sp-mode").value,
+    apps: splitList($("sp-apps").value),
+    inherit_children: $("sp-inherit").checked,
+    kill_switch: $("sp-kill").checked,
+    force_direct: splitList($("sp-fd").value),
+    force_tunnel: splitList($("sp-ft").value),
+    endpoints: splitList($("sp-ep").value),
+  };
+}
+
+async function loadSplit() {
+  const s = await invoke("get_split");
+  $("sp-mode").value = s.mode || "inclusive";
+  $("sp-apps").value = (s.apps || []).join(", ");
+  $("sp-inherit").checked = !!s.inherit_children;
+  $("sp-kill").checked = !!s.kill_switch;
+  $("sp-fd").value = (s.force_direct || []).join(", ");
+  $("sp-ft").value = (s.force_tunnel || []).join(", ");
+  $("sp-ep").value = (s.endpoints || []).join(", ");
+  setSplitState(await invoke("split_status"));
+}
+
+async function saveSplit() {
+  const msg = $("split-msg");
+  try {
+    await invoke("set_split", { split: buildSplitInfo() });
+    msg.textContent = "сохранено";
+    msg.className = "hint ok";
+  } catch (e) {
+    msg.textContent = "ошибка: " + e;
+    msg.className = "hint err";
+  }
+}
+
+async function applySplit() {
+  const msg = $("split-msg");
+  try {
+    await invoke("set_split", { split: buildSplitInfo() }); // сохраняем перед применением
+    await invoke("split_apply");
+    setSplitState(true);
+    msg.textContent = "split применён";
+    msg.className = "hint ok";
+  } catch (e) {
+    msg.textContent = "не удалось применить: " + e;
+    msg.className = "hint err";
+  }
+}
+
+async function clearSplit() {
+  const msg = $("split-msg");
+  try {
+    await invoke("split_clear");
+    setSplitState(false);
+    msg.textContent = "split снят";
+    msg.className = "hint ok";
+  } catch (e) {
+    msg.textContent = "не удалось снять: " + e;
+    msg.className = "hint err";
+  }
+}
+
 // --- Правила маршрутизации ---
 
 let rulesCache = [];
@@ -477,6 +548,9 @@ async function init() {
   $("r-action").addEventListener("change", updateTagVisibility);
   $("rules-body").addEventListener("click", onRulesClick);
   $("autostart").addEventListener("change", toggleAutostart);
+  $("btn-split-save").addEventListener("click", saveSplit);
+  $("btn-split-apply").addEventListener("click", applySplit);
+  $("btn-split-clear").addEventListener("click", clearSplit);
   $("import-arg").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doImport();
   });
@@ -492,6 +566,7 @@ async function init() {
   await refreshRules();
   resetRuleForm();
   await loadAutostart();
+  await loadSplit();
   setStatus(await invoke("proxy_status"));
 }
 

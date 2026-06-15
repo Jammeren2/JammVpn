@@ -8,7 +8,9 @@
 
 use jammvpn_core::routing::DomainRule;
 use jammvpn_core::split::{AppMatcher, IpCidr};
-use jammvpn_core::{parse_link, AppConfig, RouteAction, Rule, SecretStore, Subscription};
+use jammvpn_core::{
+    parse_link, AppConfig, RouteAction, Rule, SecretStore, SplitConfig, SplitMode, Subscription,
+};
 use jammvpn_net::{outbound_from_profile, serve_socks_routed, subscription, urltest, Engine};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -581,6 +583,116 @@ pub fn set_autostart(_enabled: bool) -> Result<(), String> {
     Err("автозапуск поддерживается только на Windows".into())
 }
 
+// --- Раздельное туннелирование (split): конфиг + применение через драйвер ---
+
+/// Порт локального транспарент-прокси, куда драйвер перенаправляет соединения
+/// выбранных приложений (read original-dst → outbound).
+pub const SPLIT_REDIRECT_PORT: u16 = 39001;
+
+/// Конфигурация split в плоском UI-представлении.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SplitInfo {
+    /// Режим: `inclusive` (в тоннель только выбранные) | `exclusive` (всё, кроме них).
+    pub mode: String,
+    /// Приложения: `exe:C:\\app.exe` / `name:app.exe`.
+    pub apps: Vec<String>,
+    /// Наследовать решение дочерними процессами.
+    pub inherit_children: bool,
+    /// Kill-switch: не выпускать перенаправляемый трафик при неготовом тоннеле.
+    pub kill_switch: bool,
+    /// «Всегда напрямую» (CIDR).
+    pub force_direct: Vec<String>,
+    /// «Всегда в тоннель» (CIDR).
+    pub force_tunnel: Vec<String>,
+    /// Адреса VPN-сервера для hairpin-исключения (`ip` или `host:port`).
+    pub endpoints: Vec<String>,
+}
+
+/// [`SplitConfig`] → плоский [`SplitInfo`].
+fn split_to_info(s: &SplitConfig) -> SplitInfo {
+    SplitInfo {
+        mode: match s.mode {
+            SplitMode::Inclusive => "inclusive".into(),
+            SplitMode::Exclusive => "exclusive".into(),
+        },
+        apps: s.apps.iter().map(process_to_string).collect(),
+        inherit_children: s.inherit_children,
+        kill_switch: s.kill_switch,
+        force_direct: s.force_direct_cidrs.clone(),
+        force_tunnel: s.force_tunnel_cidrs.clone(),
+        endpoints: s.server_endpoints.clone(),
+    }
+}
+
+/// Плоский [`SplitInfo`] → [`SplitConfig`] (валидирует режим и force-CIDR).
+fn info_to_split(info: &SplitInfo) -> Result<SplitConfig, String> {
+    let mode = match info.mode.trim() {
+        "inclusive" => SplitMode::Inclusive,
+        "exclusive" => SplitMode::Exclusive,
+        other => return Err(format!("неизвестный режим split: «{other}»")),
+    };
+    let cidrs = |list: &[String], label: &str| -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        for s in clean_list(list) {
+            IpCidr::parse(&s).map_err(|e| format!("{label}: неверный CIDR «{s}»: {e}"))?;
+            out.push(s);
+        }
+        Ok(out)
+    };
+    Ok(SplitConfig {
+        mode,
+        apps: clean_list(&info.apps).iter().map(|s| parse_process(s)).collect(),
+        inherit_children: info.inherit_children,
+        kill_switch: info.kill_switch,
+        force_direct_cidrs: cidrs(&info.force_direct, "force_direct")?,
+        force_tunnel_cidrs: cidrs(&info.force_tunnel, "force_tunnel")?,
+        server_endpoints: clean_list(&info.endpoints),
+    })
+}
+
+/// Текущая конфигурация split.
+pub fn get_split() -> SplitInfo {
+    split_to_info(&load().split)
+}
+
+/// Сохраняет конфигурацию split (валидирует).
+pub fn set_split(info: SplitInfo) -> Result<(), String> {
+    let split = info_to_split(&info)?;
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    cfg.split = split;
+    save_config(&path, &cfg, store.as_ref())
+}
+
+/// Применяет split к драйверу (`redirect_port` — порт транспарент-прокси).
+/// Требует загруженного WFP-драйвера и прав администратора.
+#[cfg(windows)]
+pub fn apply_split(redirect_port: u16) -> Result<(), String> {
+    use jammvpn_platform_windows::wfp::WfpDriverController;
+    use jammvpn_platform_windows::split::SplitController;
+    let cfg = load();
+    let mut ctrl = WfpDriverController::new(redirect_port);
+    ctrl.apply(&cfg.split).map_err(|e| e.to_string())
+}
+#[cfg(not(windows))]
+pub fn apply_split(_redirect_port: u16) -> Result<(), String> {
+    Err("split-туннелирование поддерживается только на Windows".into())
+}
+
+/// Снимает split-правила в драйвере.
+#[cfg(windows)]
+pub fn clear_split() -> Result<(), String> {
+    use jammvpn_platform_windows::wfp::WfpDriverController;
+    use jammvpn_platform_windows::split::SplitController;
+    let mut ctrl = WfpDriverController::new(0);
+    ctrl.clear().map_err(|e| e.to_string())
+}
+#[cfg(not(windows))]
+pub fn clear_split() -> Result<(), String> {
+    Err("split-туннелирование поддерживается только на Windows".into())
+}
+
 /// Строит движок для запуска прокси: `server` — весь трафик через узел, иначе —
 /// маршрутизация по правилам конфига (с fail-closed-проверкой geo-баз).
 pub fn build_engine(cfg: &AppConfig, server: Option<&str>) -> Result<Engine, String> {
@@ -802,6 +914,42 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(info_to_rule(&p).unwrap().action, RouteAction::Proxy(None));
+    }
+
+    #[test]
+    fn split_info_roundtrip_and_validation() {
+        let split = SplitConfig {
+            mode: SplitMode::Exclusive,
+            apps: vec![
+                AppMatcher::ProcessName("game.exe".into()),
+                AppMatcher::ExePath("C:\\app.exe".into()),
+            ],
+            inherit_children: false,
+            kill_switch: true,
+            force_direct_cidrs: vec!["1.1.1.1/32".into()],
+            force_tunnel_cidrs: vec!["10.0.0.0/8".into()],
+            server_endpoints: vec!["198.51.100.7:443".into()],
+        };
+        let info = split_to_info(&split);
+        assert_eq!(info.mode, "exclusive");
+        assert!(info.kill_switch);
+        assert_eq!(info.apps[0], "name:game.exe");
+        // обратно совпадает.
+        assert_eq!(info_to_split(&info).unwrap(), split);
+
+        // плохой режим → ошибка.
+        let bad_mode = SplitInfo {
+            mode: "nope".into(),
+            ..Default::default()
+        };
+        assert!(info_to_split(&bad_mode).is_err());
+        // плохой force-CIDR → ошибка.
+        let bad_cidr = SplitInfo {
+            mode: "inclusive".into(),
+            force_direct: vec!["not-a-cidr".into()],
+            ..Default::default()
+        };
+        assert!(info_to_split(&bad_cidr).is_err());
     }
 
     #[test]

@@ -13,6 +13,10 @@ use tauri::{Manager, State, WindowEvent};
 #[derive(Default)]
 struct ProxyState(Mutex<Option<ctl::ProxyController>>);
 
+/// Активно ли сейчас раздельное туннелирование (правила применены к драйверу).
+#[derive(Default)]
+struct SplitState(Mutex<bool>);
+
 #[tauri::command]
 fn list_nodes() -> Vec<ctl::NodeInfo> {
     ctl::list_nodes()
@@ -166,6 +170,40 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
     ctl::set_autostart(enabled)
 }
 
+/// Текущая конфигурация раздельного туннелирования.
+#[tauri::command]
+fn get_split() -> ctl::SplitInfo {
+    ctl::get_split()
+}
+
+/// Сохранить конфигурацию split.
+#[tauri::command]
+fn set_split(split: ctl::SplitInfo) -> Result<(), String> {
+    ctl::set_split(split)
+}
+
+/// Применить split к драйверу (требует загруженного WFP-драйвера и админ-прав).
+#[tauri::command]
+fn split_apply(state: State<'_, SplitState>) -> Result<(), String> {
+    ctl::apply_split(ctl::SPLIT_REDIRECT_PORT)?;
+    *state.0.lock().unwrap() = true;
+    Ok(())
+}
+
+/// Снять split-правила в драйвере.
+#[tauri::command]
+fn split_clear(state: State<'_, SplitState>) -> Result<(), String> {
+    ctl::clear_split()?;
+    *state.0.lock().unwrap() = false;
+    Ok(())
+}
+
+/// Активно ли сейчас раздельное туннелирование.
+#[tauri::command]
+fn split_status(state: State<'_, SplitState>) -> bool {
+    *state.0.lock().unwrap()
+}
+
 /// Показать главное окно и вывести его на передний план.
 fn show_main(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
@@ -209,6 +247,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 fn main() {
     tauri::Builder::default()
         .manage(ProxyState::default())
+        .manage(SplitState::default())
         .setup(|app| {
             setup_tray(app)?;
             // Автозапуск (флаг --minimized) — стартуем сразу в трей, без окна.
@@ -250,6 +289,11 @@ fn main() {
             move_rule,
             autostart_status,
             set_autostart,
+            get_split,
+            set_split,
+            split_apply,
+            split_clear,
+            split_status,
         ])
         .run(tauri::generate_context!())
         .expect("ошибка запуска приложения Tauri");
