@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "jammvpn_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "jammvpn"
 path = "src/main.rs"
@@ -17,6 +21,7 @@ all = "warn"
 [dependencies]
 jammvpn-core = { path = "../core" }
 jammvpn-net = { path = "../net" }
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "net",
