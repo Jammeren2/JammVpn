@@ -6,6 +6,7 @@
 use super::obfs::AwgObfs;
 use super::tunnel::Stack;
 use boringtun::noise::{Tunn, TunnResult};
+use smoltcp::socket::tcp;
 use smoltcp::time::Instant as SmolInstant;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant};
@@ -33,8 +34,10 @@ pub(super) async fn run(
     let mut ticker = tokio::time::interval(TIMER_TICK);
 
     // Инициируем handshake сразу: encapsulate(&[]) → MessageInitiation.
-    if let TunnResult::WriteToNetwork(b) = tunn.encapsulate(&[], &mut scratch) {
-        send_datagrams(&udp, obfs.wrap(b)).await;
+    match tunn.encapsulate(&[], &mut scratch) {
+        TunnResult::WriteToNetwork(b) => send_datagrams(&udp, obfs.wrap(b)).await,
+        TunnResult::Err(e) => log::error!("wg: initial handshake failed: {e:?}"),
+        other => log::debug!("wg: initial encapsulate → {}", variant(&other)),
     }
 
     loop {
@@ -46,8 +49,20 @@ pub(super) async fn run(
                 iface,
                 device,
                 sockets,
+                abandoned,
             } = &mut *st;
             iface.poll(now, device, sockets);
+
+            // GC: удаляем брошенные сокеты, достигшие Closed (FIN завершён, буфер
+            // дослан). До этого smoltcp успевает отправить данные и FIN.
+            abandoned.retain(|&h| {
+                if sockets.get::<tcp::Socket>(h).state() == tcp::State::Closed {
+                    sockets.remove(h);
+                    false
+                } else {
+                    true
+                }
+            });
 
             let mut outbox: Vec<Vec<u8>> = Vec::new();
             while let Some(ip_pkt) = device.tx.pop_front() {
@@ -129,5 +144,16 @@ async fn sleep_opt(d: Option<Duration>) {
     match d {
         Some(d) => tokio::time::sleep(d).await,
         None => std::future::pending::<()>().await,
+    }
+}
+
+/// Имя варианта `TunnResult` для диагностики (тип не реализует Debug удобно).
+fn variant(r: &TunnResult) -> &'static str {
+    match r {
+        TunnResult::Done => "Done",
+        TunnResult::Err(_) => "Err",
+        TunnResult::WriteToNetwork(_) => "WriteToNetwork",
+        TunnResult::WriteToTunnelV4(_, _) => "WriteToTunnelV4",
+        TunnResult::WriteToTunnelV6(_, _) => "WriteToTunnelV6",
     }
 }

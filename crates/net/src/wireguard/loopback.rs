@@ -29,6 +29,7 @@ fn pubkey(priv_bytes: [u8; 32]) -> [u8; 32] {
 
 /// Echo-сервер: WG-пир (responder) + smoltcp-стек, слушающий `listen_port` на
 /// `iface_ip`; всё принятое отправляет обратно.
+#[allow(clippy::too_many_arguments)]
 async fn echo_server(
     udp: Arc<UdpSocket>,
     server_priv: [u8; 32],
@@ -37,6 +38,7 @@ async fn echo_server(
     iface_ip: Ipv4Addr,
     prefix: u8,
     listen_port: u16,
+    n_listeners: usize,
 ) {
     let mut tunn = Tunn::new(
         StaticSecret::from(server_priv),
@@ -59,12 +61,18 @@ async fn echo_server(
         let _ = a.push(IpCidr::new(IpAddress::from(IpAddr::V4(iface_ip)), prefix));
     });
     let mut sockets = SocketSet::new(Vec::new());
-    let mut sock = tcp::Socket::new(
-        tcp::SocketBuffer::new(vec![0u8; 65536]),
-        tcp::SocketBuffer::new(vec![0u8; 65536]),
-    );
-    sock.listen(listen_port).unwrap();
-    let handle = sockets.add(sock);
+    // Несколько слушающих сокетов на одном порту — backlog для параллельных
+    // соединений (smoltcp раздаёт входящие SYN свободным listen-сокетам).
+    let handles: Vec<_> = (0..n_listeners)
+        .map(|_| {
+            let mut sock = tcp::Socket::new(
+                tcp::SocketBuffer::new(vec![0u8; 65536]),
+                tcp::SocketBuffer::new(vec![0u8; 65536]),
+            );
+            sock.listen(listen_port).unwrap();
+            sockets.add(sock)
+        })
+        .collect();
 
     let mut scratch = vec![0u8; 65535];
     let mut udp_buf = vec![0u8; 65535];
@@ -75,8 +83,8 @@ async fn echo_server(
         let now = SmolInstant::from_micros(base.elapsed().as_micros() as i64);
         iface.poll(now, &mut device, &mut sockets);
 
-        // Эхо: что приняли — то и отправили обратно.
-        {
+        // Эхо: что приняли — то и отправили обратно (на каждом сокете).
+        for &handle in &handles {
             let s = sockets.get_mut::<tcp::Socket>(handle);
             if s.can_recv() && s.can_send() {
                 let mut tmp = [0u8; 4096];
@@ -167,6 +175,7 @@ async fn run_echo(awg: Option<AwgObfuscation>) {
         server_iface,
         24,
         listen_port,
+        1,
     ));
 
     let cfg = WgConfig::new(WgParams {
@@ -194,6 +203,61 @@ async fn run_echo(awg: Option<AwgObfuscation>) {
 #[tokio::test]
 async fn loopback_echo_plain_wireguard() {
     tokio::time::timeout(Duration::from_secs(20), run_echo(None))
+        .await
+        .expect("тест не должен зависнуть");
+}
+
+/// Два соединения через ОДИН [`WgConfig`]: второй коннект переиспользует туннель
+/// (один handshake/netstack — общий `Arc<WgTunnel>` через `OnceCell`).
+async fn run_two_conns() {
+    let client_priv = [11u8; 32];
+    let server_priv = [22u8; 32];
+    let server_iface = Ipv4Addr::new(10, 0, 0, 1);
+    let client_iface = Ipv4Addr::new(10, 0, 0, 2);
+    let listen_port = 8080;
+
+    let server_udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let server_addr = server_udp.local_addr().unwrap();
+    tokio::spawn(echo_server(
+        server_udp,
+        server_priv,
+        pubkey(client_priv),
+        None,
+        server_iface,
+        24,
+        listen_port,
+        2,
+    ));
+
+    let cfg = WgConfig::new(WgParams {
+        endpoint: server_addr.to_string(),
+        private_key: client_priv,
+        peer_public_key: pubkey(server_priv),
+        preshared_key: None,
+        address: vec![(IpAddr::V4(client_iface), 24)],
+        dns: vec![],
+        persistent_keepalive: None,
+        awg: None,
+    });
+    let target = Target::Socket(format!("{server_iface}:{listen_port}").parse().unwrap());
+
+    let mut s1 = wireguard_connect(&cfg, &target).await.expect("connect 1");
+    let mut s2 = wireguard_connect(&cfg, &target).await.expect("connect 2");
+
+    s1.write_all(b"first").await.unwrap();
+    s2.write_all(b"second").await.unwrap();
+
+    let mut b1 = [0u8; 5];
+    let mut b2 = [0u8; 6];
+    s1.read_exact(&mut b1).await.unwrap();
+    s2.read_exact(&mut b2).await.unwrap();
+    assert_eq!(&b1, b"first");
+    assert_eq!(&b2, b"second");
+}
+
+#[tokio::test]
+async fn loopback_two_connections_share_tunnel() {
+    tokio::time::timeout(Duration::from_secs(20), run_two_conns())
         .await
         .expect("тест не должен зависнуть");
 }

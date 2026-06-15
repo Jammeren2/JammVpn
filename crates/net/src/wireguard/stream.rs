@@ -49,6 +49,8 @@ impl AsyncRead for WgTcpStream {
             return Poll::Ready(Ok(()));
         }
         socket.register_recv_waker(cx.waker());
+        drop(st);
+        me.tunnel.kick(); // подтолкнуть driver к немедленному poll
         Poll::Pending
     }
 }
@@ -78,11 +80,16 @@ impl AsyncWrite for WgTcpStream {
             return Poll::Ready(Ok(n));
         }
         socket.register_send_waker(cx.waker());
+        drop(st);
+        me.tunnel.kick(); // подтолкнуть driver освободить место в tx-буфере
         Poll::Pending
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // smoltcp отправляет данные сам; flush сводится к пробуждению драйвера.
+        // Данные, переданные в `poll_write`, уже лежат в tx-буфере smoltcp
+        // (аналог kernel-буфера TCP-сокета) и доставляются driver-задачей; как и
+        // `TcpStream::poll_flush` в tokio, это по сути no-op. Грациозный Drop
+        // (`abandon_socket`) гарантирует досыл последних байт. Будим driver.
         self.tunnel.kick();
         Poll::Ready(Ok(()))
     }
@@ -100,7 +107,9 @@ impl AsyncWrite for WgTcpStream {
 
 impl Drop for WgTcpStream {
     fn drop(&mut self) {
-        // Удаляем сокет из стека (v0: без ожидания graceful close).
-        self.tunnel.remove_socket(self.handle);
+        // Грациозное закрытие: инициируем FIN и передаём сокет driver'у на
+        // отложенное удаление — буферизованные данные и FIN будут отправлены,
+        // сокет удалится по достижении Closed (без потери последних байт).
+        self.tunnel.abandon_socket(self.handle);
     }
 }

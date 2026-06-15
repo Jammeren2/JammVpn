@@ -36,6 +36,9 @@ pub(crate) struct Stack {
     pub iface: Interface,
     pub device: WgDevice,
     pub sockets: SocketSet<'static>,
+    /// Сокеты «брошенных» потоков: закрыты (FIN инициирован), ждут, пока
+    /// driver дошлёт буфер и удалит их по достижении `Closed`.
+    pub abandoned: Vec<SocketHandle>,
 }
 
 /// Запущенный WG-туннель.
@@ -62,10 +65,22 @@ impl WgTunnel {
         PORT_BASE + (n % PORT_SPAN) as u16
     }
 
-    /// Удаляет сокет из стека (при ошибке connect или Drop потока).
+    /// Немедленно удаляет сокет (путь ошибки connect: соединение не
+    /// установлено, грациозное закрытие не требуется).
     pub(crate) fn remove_socket(&self, handle: SocketHandle) {
         if let Ok(mut st) = self.stack.lock() {
             st.sockets.remove(handle);
+        }
+        self.kick();
+    }
+
+    /// Грациозно закрывает сокет брошенного потока: инициирует FIN и помечает
+    /// сокет на отложенное удаление — driver дошлёт буферизованные данные и
+    /// удалит сокет, когда тот достигнет `Closed` (без потери последних байт).
+    pub(crate) fn abandon_socket(&self, handle: SocketHandle) {
+        if let Ok(mut st) = self.stack.lock() {
+            st.sockets.get_mut::<tcp::Socket>(handle).close();
+            st.abandoned.push(handle);
         }
         self.kick();
     }
@@ -111,6 +126,7 @@ impl WgTunnel {
             iface,
             device,
             sockets,
+            abandoned: Vec::new(),
         }));
         let notify = Arc::new(Notify::new());
         let (wake_tx, wake_rx) = mpsc::unbounded_channel();
