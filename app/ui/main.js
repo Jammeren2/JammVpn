@@ -263,6 +263,31 @@ async function saveGeo() {
   }
 }
 
+async function loadAutostart() {
+  try {
+    $("autostart").checked = await invoke("autostart_status");
+  } catch (e) {
+    $("autostart").checked = false;
+    $("autostart-msg").textContent = "не удалось прочитать статус: " + e;
+    $("autostart-msg").className = "hint err";
+  }
+}
+
+async function toggleAutostart() {
+  const enabled = $("autostart").checked;
+  const msg = $("autostart-msg");
+  try {
+    await invoke("set_autostart", { enabled });
+    msg.textContent = enabled ? "автозапуск включён" : "автозапуск выключен";
+    msg.className = "hint ok";
+  } catch (e) {
+    // Откат чекбокса к фактическому состоянию.
+    await loadAutostart();
+    msg.textContent = "ошибка: " + e;
+    msg.className = "hint err";
+  }
+}
+
 // --- Правила маршрутизации ---
 
 let rulesCache = [];
@@ -451,6 +476,7 @@ async function init() {
   $("btn-rule-cancel").addEventListener("click", resetRuleForm);
   $("r-action").addEventListener("change", updateTagVisibility);
   $("rules-body").addEventListener("click", onRulesClick);
+  $("autostart").addEventListener("change", toggleAutostart);
   $("import-arg").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doImport();
   });
@@ -465,6 +491,7 @@ async function init() {
   await loadGeo();
   await refreshRules();
   resetRuleForm();
+  await loadAutostart();
   setStatus(await invoke("proxy_status"));
 }
 

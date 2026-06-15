@@ -554,6 +554,33 @@ pub fn move_rule(index: usize, up: bool) -> Result<bool, String> {
     Ok(moved)
 }
 
+// --- Автозапуск при входе в систему (Windows: реестр Run) ---
+
+/// Включён ли автозапуск приложения при входе (на не-Windows — всегда `false`).
+#[cfg(windows)]
+pub fn autostart_status() -> Result<bool, String> {
+    jammvpn_platform_windows::autostart::is_enabled()
+}
+#[cfg(not(windows))]
+pub fn autostart_status() -> Result<bool, String> {
+    Ok(false)
+}
+
+/// Включает/выключает автозапуск (пишет путь к текущему exe в `HKCU\…\Run`).
+#[cfg(windows)]
+pub fn set_autostart(enabled: bool) -> Result<(), String> {
+    if enabled {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        jammvpn_platform_windows::autostart::enable(&exe.to_string_lossy())
+    } else {
+        jammvpn_platform_windows::autostart::disable()
+    }
+}
+#[cfg(not(windows))]
+pub fn set_autostart(_enabled: bool) -> Result<(), String> {
+    Err("автозапуск поддерживается только на Windows".into())
+}
+
 /// Строит движок для запуска прокси: `server` — весь трафик через узел, иначе —
 /// маршрутизация по правилам конфига (с fail-closed-проверкой geo-баз).
 pub fn build_engine(cfg: &AppConfig, server: Option<&str>) -> Result<Engine, String> {

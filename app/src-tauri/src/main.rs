@@ -154,6 +154,18 @@ fn move_rule(index: usize, up: bool) -> Result<bool, String> {
     ctl::move_rule(index, up)
 }
 
+/// Включён ли автозапуск приложения при входе в систему.
+#[tauri::command]
+fn autostart_status() -> Result<bool, String> {
+    ctl::autostart_status()
+}
+
+/// Включить/выключить автозапуск при входе в систему.
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    ctl::set_autostart(enabled)
+}
+
 /// Показать главное окно и вывести его на передний план.
 fn show_main(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
@@ -199,6 +211,12 @@ fn main() {
         .manage(ProxyState::default())
         .setup(|app| {
             setup_tray(app)?;
+            // Автозапуск (флаг --minimized) — стартуем сразу в трей, без окна.
+            if std::env::args().any(|a| a == "--minimized") {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.hide();
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -230,6 +248,8 @@ fn main() {
             update_rule,
             remove_rule,
             move_rule,
+            autostart_status,
+            set_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("ошибка запуска приложения Tauri");
