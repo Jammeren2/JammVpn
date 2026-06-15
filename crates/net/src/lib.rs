@@ -26,6 +26,7 @@ mod sync_adapter;
 pub mod target;
 pub mod trojan;
 pub mod tuic;
+pub mod urltest;
 mod util;
 #[allow(dead_code, clippy::all)]
 mod vision;

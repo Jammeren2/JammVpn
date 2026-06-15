@@ -56,6 +56,12 @@ impl Engine {
         }
     }
 
+    /// Именованные исходящие (тег → исходящий) — для тестирования задержек
+    /// ([`crate::urltest::test_outbounds`]) и выбора узла.
+    pub fn outbounds(&self) -> &HashMap<String, Outbound> {
+        &self.outbounds
+    }
+
     /// Движок, тунелирующий ВЕСЬ трафик через единственный исходящий.
     pub fn single_proxy(outbound: Outbound) -> Self {
         let mut outbounds = HashMap::new();
