@@ -8,7 +8,7 @@
 
 use jammvpn_core::split::{AppMatcher, IpCidr, SplitConfig, SplitMode, ALWAYS_BYPASS_CIDRS};
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Путь к устройству со стороны user-mode (`CreateFile`).
 pub const USER_MODE_DEVICE_PATH: &str = r"\\.\JammVpnSplit";
@@ -144,6 +144,49 @@ fn endpoint_ip(e: &str) -> Option<IpAddr> {
     }
     e.rsplit_once(':')
         .and_then(|(h, _)| h.parse::<IpAddr>().ok())
+}
+
+/// Длина redirect-context в байтах: family(1) + addr(16) + port(2, big-endian).
+pub const REDIRECT_CONTEXT_LEN: usize = 19;
+
+/// Сериализует оригинальный адрес назначения в redirect-context.
+///
+/// При перенаправлении соединения драйвер сохраняет original-dst в этом формате
+/// (WFP redirect-context), а локальный транспарент-прокси читает его через
+/// `WSAIoctl(SIO_QUERY_WFP_CONNECTION_REDIRECT_CONTEXT)`, чтобы знать, куда
+/// соединение шло на самом деле. Единый источник истины для драйвера и прокси.
+pub fn encode_redirect_context(dst: SocketAddr) -> [u8; REDIRECT_CONTEXT_LEN] {
+    let mut b = [0u8; REDIRECT_CONTEXT_LEN];
+    match dst.ip() {
+        IpAddr::V4(a) => {
+            b[0] = 4;
+            b[1..5].copy_from_slice(&a.octets());
+        }
+        IpAddr::V6(a) => {
+            b[0] = 6;
+            b[1..17].copy_from_slice(&a.octets());
+        }
+    }
+    b[17..19].copy_from_slice(&dst.port().to_be_bytes());
+    b
+}
+
+/// Разбирает redirect-context обратно в адрес назначения.
+pub fn decode_redirect_context(buf: &[u8]) -> Result<SocketAddr, IpcError> {
+    if buf.len() < REDIRECT_CONTEXT_LEN {
+        return Err(IpcError::Truncated);
+    }
+    let ip = match buf[0] {
+        4 => IpAddr::V4(Ipv4Addr::new(buf[1], buf[2], buf[3], buf[4])),
+        6 => {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&buf[1..17]);
+            IpAddr::V6(Ipv6Addr::from(a))
+        }
+        _ => return Err(IpcError::Truncated),
+    };
+    let port = u16::from_be_bytes([buf[17], buf[18]]);
+    Ok(SocketAddr::new(ip, port))
 }
 
 /// Сериализует конфиг в байты для `IOCTL_JAMM_SET_CONFIG`.
@@ -395,5 +438,17 @@ mod tests {
     fn ioctl_codes_are_distinct() {
         assert_ne!(IOCTL_JAMM_SET_CONFIG, IOCTL_JAMM_CLEAR);
         assert_ne!(IOCTL_JAMM_SET_CONFIG, IOCTL_JAMM_GET_STATS);
+    }
+
+    #[test]
+    fn redirect_context_roundtrip() {
+        for s in ["1.2.3.4:443", "[2001:db8::1]:8080", "0.0.0.0:0"] {
+            let a: SocketAddr = s.parse().unwrap();
+            let b = encode_redirect_context(a);
+            assert_eq!(b.len(), REDIRECT_CONTEXT_LEN);
+            assert_eq!(decode_redirect_context(&b).unwrap(), a);
+        }
+        // усечённый буфер — ошибка.
+        assert_eq!(decode_redirect_context(&[4u8, 1, 2]), Err(IpcError::Truncated));
     }
 }

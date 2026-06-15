@@ -3,9 +3,13 @@
 Kernel-mode WFP callout-драйвер, реализующий per-app connect-redirect для
 раздельного туннелирования (ТЗ, раздел 3, `SPL-*`).
 
-> **Статус: скелет.** Каркас (`src/driver.{c,h}`) задаёт структуру и точки
-> расширения, но **ещё не реализован полностью и не компилировался** — требует
-> WDK. Бизнес-логика классификации зеркалит `jammvpn_core::split::decide`.
+> **Статус: логика реализована, не собрана.** `src/driver.{c,h}` содержат разбор
+> конфига (формат `ipc.rs`), лестницу решений (зеркало `jammvpn_core::split::decide`),
+> connect-redirect и регистрацию каллаутов. **Драйвер не компилировался и не
+> загружался** — в среде разработки нет WDK (только user-mode SDK), а kernel-драйвер
+> в любом случае нельзя загрузить без админ-прав/test-signing/перезагрузки. Сборку,
+> подпись и загрузку выполняйте на машине с WDK (ниже). Места, требующие сверки с
+> WDK при сборке, помечены в коде комментарием `СВЕРИТЬ:`.
 
 ## Зачем драйвер
 
@@ -31,9 +35,36 @@ Kernel-mode WFP callout-драйвер, реализующий per-app connect-r
 
 1. Установить **Visual Studio** + **Windows Driver Kit (WDK)** соответствующей
    версии (или **EWDK**).
-2. Создать проект «Kernel Mode Driver, Empty (KMDF/WDM)», добавить `src/*.c`,
+2. Создать проект «Kernel Mode Driver, Empty (WDM)», добавить `src/*.c`,
    слинковать с `fwpkclnt.lib`, `ntoskrnl.lib`, `uuid.lib`.
    (Сборка из VS/MSBuild; CMake для kernel-драйверов не используется.)
+3. Сверить помеченные `СВЕРИТЬ:` места с актуальным WDK (имена полей
+   `FWPS_CONNECT_REQUEST0`, владение redirect-context, доступность
+   `RtlUTF8ToUnicodeN`) — компилятор/анализатор драйвера их проверит.
+
+### Что уже реализовано в `driver.c`
+
+- Разбор `IOCTL_SET_CONFIG` в `JAMM_CONFIG` (порядок полей/типы строго по
+  `encode_config` из `ipc.rs`), атомарная замена под `FAST_MUTEX`, `CLEAR`.
+- Лестница `JammDecide`: hairpin (endpoints) → bypass(LAN) → force_direct →
+  force_tunnel → решение по приложению (inclusive/exclusive). Совпадение
+  приложения — по имени (хвост `\name`) или по exe-пути (хвост без буквы диска;
+  `ALE_APP_ID` — NT-путь).
+- Сопоставление CIDR/IP (зеркало `IpCidr::contains`), порядок байт V4 host→network.
+- `connect-redirect` на `127.0.0.1:redirect_port` + сохранение original-dst в
+  redirect-context (19 байт, формат `encode_redirect_context`); защита от
+  повторного перенаправления своего сокета (`FwpsQueryConnectionRedirectState0`).
+- Регистрация provider/sublayer/callouts(V4/V6)/filters в одной транзакции
+  (`FWPM_SESSION_FLAG_DYNAMIC` — авто-очистка от «сирот»), снятие в `Unload`.
+
+### Что осталось/проверить на машине с WDK
+
+- Отдельные WFP-фильтры hairpin/LAN большого веса и kill-switch block-фильтры
+  (сейчас исключения покрыты лестницей `JammDecide` → PERMIT).
+- `IOCTL_GET_STATS` (счётчики).
+- Реальный прогон: загрузить драйвер, поднять локальный редирект-прокси на
+  `redirect_port` (читает original-dst через
+  `SIO_QUERY_WFP_CONNECTION_REDIRECT_CONTEXT`), проверить per-app редирект.
 
 ## Тест-подпись и загрузка (для разработки)
 
