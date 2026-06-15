@@ -19,6 +19,7 @@ use std::io;
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
@@ -446,15 +447,42 @@ fn dns_server_from_config(c: &DnsServerConfig) -> Option<DnsServer> {
     }
 }
 
+/// Предел одновременных клиентских соединений (анти-DoS).
+const MAX_CONNECTIONS: usize = 1024;
+/// Таймаут на SOCKS5-рукопожатие: висящий клиент не должен держать ресурсы.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// SOCKS5-сервер с маршрутизацией: на каждое соединение применяет правила
-/// движка и проксирует через выбранный исходящий (либо блокирует).
+/// движка и проксирует через выбранный исходящий (либо блокирует). Число
+/// одновременных соединений ограничено ([`MAX_CONNECTIONS`]), рукопожатие — под
+/// таймаутом ([`HANDSHAKE_TIMEOUT`]).
 pub async fn serve_socks_routed(listener: TcpListener, engine: Arc<Engine>) -> io::Result<()> {
+    serve_routed(listener, engine, MAX_CONNECTIONS).await
+}
+
+async fn serve_routed(
+    listener: TcpListener,
+    engine: Arc<Engine>,
+    max_conns: usize,
+) -> io::Result<()> {
+    let sem = Arc::new(tokio::sync::Semaphore::new(max_conns));
     loop {
         let (mut client, _) = listener.accept().await?;
+        // Лимит исчерпан → отклоняем (закрываем) новое соединение, а не копим задачи.
+        let permit = match Arc::clone(&sem).try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
         let eng = Arc::clone(&engine);
         tokio::spawn(async move {
-            match socks_handshake(&mut client).await {
-                Ok(SocksRequest::Connect(target)) => {
+            let _permit = permit; // держим до конца обработки соединения
+            let req =
+                match tokio::time::timeout(HANDSHAKE_TIMEOUT, socks_handshake(&mut client)).await {
+                    Ok(Ok(r)) => r,
+                    _ => return, // таймаут рукопожатия или ошибка
+                };
+            match req {
+                SocksRequest::Connect(target) => {
                     let routed = eng.route(&target).await;
                     match routed.decision {
                         Decision::Connect(ob) => {
@@ -465,10 +493,9 @@ pub async fn serve_socks_routed(listener: TcpListener, engine: Arc<Engine>) -> i
                         }
                     }
                 }
-                Ok(SocksRequest::UdpAssociate) => {
+                SocksRequest::UdpAssociate => {
                     let _ = crate::udp::udp_associate(client, eng).await;
                 }
-                Err(_) => {}
             }
         });
     }
@@ -529,6 +556,36 @@ mod tests {
             }
         });
         addr
+    }
+
+    #[tokio::test]
+    async fn connection_limit_rejects_excess() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpStream;
+        let engine = Arc::new(Engine::new(
+            HashMap::new(),
+            None,
+            Vec::new(),
+            RouteAction::Direct,
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_routed(listener, engine, 2)); // лимит = 2
+
+        // Два «висящих» соединения (не шлём рукопожатие → держат permit в handshake).
+        let c1 = TcpStream::connect(addr).await.unwrap();
+        let c2 = TcpStream::connect(addr).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 3-е: сервер примет, permit нет → закроет; read вернёт EOF (0).
+        let mut c3 = TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0u8; 1];
+        let r = tokio::time::timeout(Duration::from_secs(2), c3.read(&mut buf)).await;
+        assert!(
+            matches!(r, Ok(Ok(0))),
+            "сверхлимитное соединение должно быть закрыто (EOF)"
+        );
+        drop((c1, c2));
     }
 
     #[tokio::test]
