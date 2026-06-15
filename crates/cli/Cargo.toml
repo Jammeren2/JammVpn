@@ -1,0 +1,31 @@
+[package]
+name = "jammvpn-cli"
+version = "0.1.0"
+description = "JammVPN CLI — управление узлами и локальный прокси"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "jammvpn"
+path = "src/main.rs"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+jammvpn-core = { path = "../core" }
+jammvpn-net = { path = "../net" }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "macros",
+    "signal",
+    "time",
+] }
+
+# DPAPI-шифрование секретов конфига — только Windows.
+[target.'cfg(windows)'.dependencies]
+jammvpn-platform-windows = { path = "../platform-windows" }
