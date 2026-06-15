@@ -235,6 +235,7 @@ async fn spawn_flow(
                 },
             }
         }
+        session.close().await; // для TUIC — Dissociate + снятие регистрации
     });
     let _ = tx.try_send(first.to_vec());
     Some(tx)

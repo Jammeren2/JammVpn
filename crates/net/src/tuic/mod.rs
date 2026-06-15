@@ -13,11 +13,13 @@ mod proto;
 mod stream;
 mod tls;
 mod tunnel;
+mod udp;
 
 #[cfg(test)]
 mod loopback;
 
 pub use config::{TuicConfig, TuicParams};
+pub use udp::TuicUdp;
 
 use crate::target::Target;
 use crate::BoxedStream;

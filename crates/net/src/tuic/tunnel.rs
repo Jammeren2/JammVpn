@@ -77,6 +77,12 @@ impl TuicTunnel {
         }))
     }
 
+    /// Клон общего QUIC-соединения (для UDP-менеджера). `quinn::Connection`
+    /// дешёвый в клонировании (внутри Arc).
+    pub(crate) fn connection(&self) -> quinn::Connection {
+        self.conn.clone()
+    }
+
     /// Открывает bidi-стрим, шлёт Connect(target); далее — сырой канал к цели.
     ///
     /// Цель-домен передаётся серверу КАК ЕСТЬ (сервер сам резолвит — нет утечки

@@ -65,6 +65,30 @@ async fn run_server(endpoint: Endpoint, expected_pw: String, addr_tx: mpsc::Send
                 }
             });
 
+            // Датаграммный эхо (UDP relay): декодируем Packet, шлём обратно тем же
+            // assoc_id/адресом + payload (как будто цель ответила).
+            let conn_dg = conn.clone();
+            tokio::spawn(async move {
+                while let Ok(dg) = conn_dg.read_datagram().await {
+                    if let Ok((head, payload)) = proto::decode_packet(&dg) {
+                        if let Some(addr) = head.addr {
+                            let max = conn_dg.max_datagram_size().unwrap_or(1200);
+                            if let Ok(dgs) = proto::encode_packets(
+                                head.assoc_id,
+                                head.pkt_id,
+                                &addr,
+                                payload,
+                                max,
+                            ) {
+                                for d in dgs {
+                                    let _ = conn_dg.send_datagram(bytes::Bytes::from(d));
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
             // Connect-стримы: эхо (достижимы только если соединение не закрыто).
             while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                 let addr_tx = addr_tx.clone();
@@ -144,6 +168,41 @@ async fn loopback_two_connections_reuse() {
         s2.read_exact(&mut b2).await.unwrap();
         assert_eq!(&b1, b"first");
         assert_eq!(&b2, b"second");
+    })
+    .await
+    .expect("тест не должен зависнуть");
+}
+
+#[tokio::test]
+async fn loopback_udp_echo() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let (endpoint, port) = server_endpoint();
+        let (addr_tx, _addr_rx) = mpsc::channel(8);
+        tokio::spawn(run_server(endpoint, "pw".to_string(), addr_tx));
+
+        // UDP через TUIC: общий QUIC-conn + Authenticate (в udp()), затем Packet
+        // в QUIC-датаграммах. Сервер эхо-ит.
+        let cfg = client_config(port, "pw");
+        let ob = crate::outbound::Outbound::Tuic(cfg);
+        let target = Target::Domain("udp.test".to_string(), 5353);
+        let session = ob.connect_udp(&target).await.expect("udp session");
+
+        session.send(b"hello-tuic-udp").await.expect("send");
+        let got = tokio::time::timeout(Duration::from_secs(5), session.recv())
+            .await
+            .expect("recv не уложился в таймаут")
+            .expect("recv");
+        assert_eq!(got, b"hello-tuic-udp", "эхо UDP через TUIC совпадает");
+
+        // Второй пакет по той же сессии (assoc_id переиспользуется).
+        session.send(b"second").await.unwrap();
+        let got2 = tokio::time::timeout(Duration::from_secs(5), session.recv())
+            .await
+            .expect("recv2 таймаут")
+            .expect("recv2");
+        assert_eq!(got2, b"second");
+
+        session.close().await;
     })
     .await
     .expect("тест не должен зависнуть");

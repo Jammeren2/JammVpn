@@ -130,8 +130,10 @@ impl Outbound {
     ///   (ядро отбрасывает чужие источники — нет off-path инъекции).
     /// - `Shadowsocks` (legacy AEAD): `connect()`-ит сокет на SS-сервер; адрес
     ///   цели идёт в каждом пакете (домен резолвит сервер — remote DNS).
+    /// - `Tuic`: поток поверх общего QUIC-соединения (мультиплекс по assoc_id,
+    ///   QUIC-датаграммы; домен резолвит сервер).
     ///
-    /// Прочие исходящие (SS-2022/Trojan/TUIC/…) UDP пока не поддерживают.
+    /// Прочие исходящие (SS-2022/Trojan/VLESS/…) UDP пока не поддерживают.
     pub async fn connect_udp(&self, target: &Target) -> io::Result<UdpSession> {
         match self {
             Outbound::Direct => {
@@ -150,13 +152,26 @@ impl Outbound {
                     target: target.clone(),
                 })
             }
+            Outbound::Tuic(cfg) => {
+                let manager = cfg.udp().await?;
+                let (assoc_id, rx) = manager
+                    .register()
+                    .await
+                    .ok_or_else(|| proto_err("tuic: исчерпаны assoc_id (UDP)"))?;
+                Ok(UdpSession::Tuic {
+                    manager,
+                    assoc_id,
+                    target: target.clone(),
+                    rx: tokio::sync::Mutex::new(rx),
+                })
+            }
             _ => Err(proto_err("udp: данный исходящий пока не поддерживает UDP")),
         }
     }
 }
 
 /// UDP-сессия исходящего к одной цели (Direct — connected на адресат; SS —
-/// connected на сервер с per-packet AEAD).
+/// connected на сервер с per-packet AEAD; TUIC — поток поверх QUIC-соединения).
 pub enum UdpSession {
     /// Прямая отправка через connected UDP-сокет.
     Direct(tokio::net::UdpSocket),
@@ -166,6 +181,13 @@ pub enum UdpSession {
         method: Method,
         master: Vec<u8>,
         target: Target,
+    },
+    /// Через TUIC: assoc_id поверх общего QUIC-соединения; ответы — из канала.
+    Tuic {
+        manager: std::sync::Arc<crate::tuic::TuicUdp>,
+        assoc_id: u16,
+        target: Target,
+        rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>,
     },
 }
 
@@ -185,11 +207,20 @@ impl UdpSession {
                 let pkt = crate::shadowsocks::encrypt_packet(*method, master, target, payload)?;
                 sock.send(&pkt).await?;
             }
+            UdpSession::Tuic {
+                manager,
+                assoc_id,
+                target,
+                ..
+            } => {
+                manager.send(*assoc_id, target, payload).await?;
+            }
         }
         Ok(())
     }
 
-    /// Принимает следующий ответ от цели сессии (для SS — расшифрованный payload).
+    /// Принимает следующий ответ от цели сессии (для SS/TUIC — payload без
+    /// заголовка протокола).
     pub async fn recv(&self) -> io::Result<Vec<u8>> {
         match self {
             UdpSession::Direct(sock) => {
@@ -212,6 +243,22 @@ impl UdpSession {
                     crate::shadowsocks::decrypt_packet(*method, master, &buf[..n])?;
                 Ok(payload)
             }
+            UdpSession::Tuic { rx, .. } => rx
+                .lock()
+                .await
+                .recv()
+                .await
+                .ok_or_else(|| proto_err("tuic udp: канал закрыт")),
+        }
+    }
+
+    /// Завершает сессию (для TUIC — снимает регистрацию и шлёт Dissociate).
+    pub async fn close(&self) {
+        if let UdpSession::Tuic {
+            manager, assoc_id, ..
+        } = self
+        {
+            manager.dissociate(*assoc_id).await;
         }
     }
 }

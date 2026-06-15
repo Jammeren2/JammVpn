@@ -5,6 +5,7 @@
 //! каждая цель получает свой bidi-стрим, мультиплексируемый поверх соединения).
 
 use super::tunnel::TuicTunnel;
+use super::udp::TuicUdp;
 use crate::target::Target;
 use crate::BoxedStream;
 use std::io;
@@ -48,6 +49,7 @@ pub struct TuicConfig {
 struct TuicInner {
     params: TuicParams,
     tunnel: OnceCell<Arc<TuicTunnel>>,
+    udp: OnceCell<Arc<TuicUdp>>,
 }
 
 impl TuicConfig {
@@ -57,6 +59,7 @@ impl TuicConfig {
             inner: Arc::new(TuicInner {
                 params,
                 tunnel: OnceCell::new(),
+                udp: OnceCell::new(),
             }),
         }
     }
@@ -74,6 +77,20 @@ impl TuicConfig {
     /// Открывает TCP-поток до `target` (новый bidi-стрим + команда Connect).
     pub(crate) async fn connect_tcp(&self, target: &Target) -> io::Result<BoxedStream> {
         self.tunnel().await?.connect(target).await
+    }
+
+    /// Общий UDP-менеджер узла (лениво: поднимает туннель и запускает
+    /// демультиплексор датаграмм при первом UDP-потоке).
+    pub(crate) async fn udp(&self) -> io::Result<Arc<TuicUdp>> {
+        let m = self
+            .inner
+            .udp
+            .get_or_try_init(|| async {
+                let tunnel = self.tunnel().await?;
+                io::Result::Ok(TuicUdp::start(tunnel.connection()))
+            })
+            .await?;
+        Ok(Arc::clone(m))
     }
 
     /// Параметры узла (для диагностики/тестов).
