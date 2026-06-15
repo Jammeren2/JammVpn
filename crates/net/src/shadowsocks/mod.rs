@@ -11,7 +11,9 @@
 mod crypto;
 mod ss2022;
 mod stream;
+pub mod udp;
 
 pub use crypto::{evp_bytes_to_key, Method};
 pub use ss2022::Ss2022Stream;
 pub use stream::ShadowsocksStream;
+pub use udp::{decrypt_packet, encrypt_packet};

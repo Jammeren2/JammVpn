@@ -170,26 +170,28 @@ pub async fn udp_associate(mut control: TcpStream, engine: Arc<Engine>) -> io::R
                     }
                     flows.remove(&key); // задача потока завершилась — пересоздаём ниже
                 }
-                // Новый поток: маршрутизируем DST.
+                // Новый поток: маршрутизируем DST → выбранный исходящий.
                 let routed = engine.route(&target).await;
-                match routed.decision {
-                    Decision::Connect(Outbound::Direct) => {}
-                    Decision::Connect(_) => {
-                        if !warned_proxy {
+                let outbound = match routed.decision {
+                    Decision::Connect(ob) => ob,
+                    Decision::Block => continue, // намеренный дроп
+                };
+                match spawn_flow(&relay, src, &target, &outbound, &routed.target, &cbuf[off..n])
+                    .await
+                {
+                    Some(tx) => {
+                        flows.insert(key, tx);
+                    }
+                    None => {
+                        // connect_udp не удался: резолв либо неподдержанный прокси-UDP.
+                        if !matches!(outbound, Outbound::Direct) && !warned_proxy {
                             warned_proxy = true;
                             eprintln!(
-                                "предупреждение: UDP через прокси пока не поддерживается — \
-                                 датаграммы к проксируемым целям отбрасываются"
+                                "предупреждение: UDP через этот исходящий пока не поддержан — \
+                                 датаграммы отбрасываются (поддержаны: Direct, Shadowsocks legacy)"
                             );
                         }
-                        continue;
                     }
-                    Decision::Block => continue, // намеренный дроп
-                }
-                if let Some(tx) =
-                    spawn_flow(&relay, src, &target, &routed.target, &cbuf[off..n]).await
-                {
-                    flows.insert(key, tx);
                 }
             }
         }
@@ -197,44 +199,36 @@ pub async fn udp_associate(mut control: TcpStream, engine: Arc<Engine>) -> io::R
     Ok(())
 }
 
-/// Создаёт per-flow задачу для адресата `dst` (resolved цель маршрутизации) с
-/// ответами под адресом `client_dst` (как слал клиент). Возвращает отправитель
-/// исходящих датаграмм или `None`, если резолв/connect не удался.
+/// Создаёт per-flow задачу: открывает UDP-сессию выбранного `outbound` к `dst`
+/// (resolved цель маршрутизации), ответы заворачивает адресом `client_dst` (как
+/// слал клиент). `None` — если резолв/connect/протокол не поддержан.
 async fn spawn_flow(
     relay: &Arc<UdpSocket>,
     client: SocketAddr,
     client_dst: &Target,
+    outbound: &Outbound,
     dst: &Target,
     first: &[u8],
 ) -> Option<mpsc::Sender<Vec<u8>>> {
-    // Резолвим адресата один раз на поток (фиксируем адрес — без скачков между пакетами).
-    let peer = match dst {
-        Target::Socket(a) => *a,
-        Target::Domain(h, p) => tokio::net::lookup_host((h.as_str(), *p))
-            .await
-            .ok()?
-            .next()?,
-    };
-    let session = Outbound::Direct.connect_udp(peer).await.ok()?;
+    let session = outbound.connect_udp(dst).await.ok()?;
 
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE);
     let relay = Arc::clone(relay);
     let reply_dst = client_dst.clone();
     tokio::spawn(async move {
-        let mut buf = vec![0u8; MAX_DATAGRAM];
         loop {
             tokio::select! {
-                // Исходящие от клиента → адресату.
+                // Исходящие от клиента → цели.
                 p = rx.recv() => match p {
                     Some(payload) => {
                         if session.send(&payload).await.is_err() { break; }
                     }
                     None => break, // ассоциация закрылась (отправитель удалён)
                 },
-                // Ответы адресата → клиенту (заголовок с DST, который слал клиент).
-                r = session.recv(&mut buf) => match r {
-                    Ok(n) => {
-                        let dg = encode_udp_datagram(&reply_dst, &buf[..n]);
+                // Ответы цели → клиенту (заголовок с DST, который слал клиент).
+                r = session.recv() => match r {
+                    Ok(payload) => {
+                        let dg = encode_udp_datagram(&reply_dst, &payload);
                         if relay.send_to(&dg, client).await.is_err() { break; }
                     }
                     Err(_) => break,
@@ -372,6 +366,76 @@ mod tests {
         timeout(Duration::from_secs(5), run)
             .await
             .expect("UDP relay не уложился в таймаут");
+    }
+
+    #[tokio::test]
+    async fn udp_associate_relays_through_shadowsocks() {
+        use crate::outbound::{Outbound, ShadowsocksConfig};
+        use crate::shadowsocks::{decrypt_packet, encrypt_packet, evp_bytes_to_key, Method};
+
+        let method = Method::Aes256Gcm;
+        let master = evp_bytes_to_key(b"testpass", method.key_len());
+
+        // Mock SS-UDP сервер: расшифровывает пакет клиента, «эхит» payload обратно
+        // (как будто цель ответила), зашифровав адресом цели как источником.
+        let ss_master = master.clone();
+        let ss_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ss_addr = ss_sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            while let Ok((n, src)) = ss_sock.recv_from(&mut buf).await {
+                if let Ok((target, payload)) = decrypt_packet(method, &ss_master, &buf[..n]) {
+                    if let Ok(resp) = encrypt_packet(method, &ss_master, &target, &payload) {
+                        let _ = ss_sock.send_to(&resp, src).await;
+                    }
+                }
+            }
+        });
+
+        // Движок: весь трафик через Shadowsocks-узел (mock).
+        let engine = Arc::new(Engine::single_proxy(Outbound::Shadowsocks(
+            ShadowsocksConfig {
+                server: ss_addr.to_string(),
+                method,
+                password: "testpass".into(),
+            },
+        )));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks = listener.local_addr().unwrap();
+        tokio::spawn(serve_socks_routed(listener, engine));
+
+        let run = async {
+            let mut ctl = TcpStream::connect(socks).await.unwrap();
+            ctl.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+            let mut m = [0u8; 2];
+            ctl.read_exact(&mut m).await.unwrap();
+            ctl.write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            let mut rep = [0u8; 10];
+            ctl.read_exact(&mut rep).await.unwrap();
+            let relay = SocketAddr::from((
+                [rep[4], rep[5], rep[6], rep[7]],
+                u16::from_be_bytes([rep[8], rep[9]]),
+            ));
+
+            // DST произвольный (mock SS не форвардит — просто эхо). Домен — чтобы
+            // проверить, что адрес уходит в SS-заголовок как есть (remote DNS).
+            let dst = Target::Domain("echo.test".into(), 5353);
+            let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            cli.send_to(&encode_udp_datagram(&dst, b"via-ss"), relay)
+                .await
+                .unwrap();
+            let mut buf = [0u8; 2048];
+            let (n, _) = cli.recv_from(&mut buf).await.unwrap();
+            let (_, target, off) = parse_udp_datagram(&buf[..n]).unwrap();
+            assert_eq!(target, dst, "ответ под доменным DST, который слал клиент");
+            assert_eq!(&buf[off..n], b"via-ss");
+            drop(ctl);
+        };
+        timeout(Duration::from_secs(5), run)
+            .await
+            .expect("SS-UDP relay не уложился в таймаут");
     }
 
     #[tokio::test]

@@ -124,50 +124,124 @@ impl Outbound {
         }
     }
 
-    /// Открывает UDP-сессию исходящего к КОНКРЕТНОМУ адресату `peer` (SOCKS5 UDP
-    /// ASSOCIATE). Сокет `connect()`-ится на peer, поэтому ядро отбрасывает
-    /// датаграммы от чужих источников (защита от off-path инъекции). Пока
-    /// поддержан только `Direct`; UDP через прокси добавляется отдельно.
-    pub async fn connect_udp(&self, peer: SocketAddr) -> io::Result<UdpSession> {
+    /// Открывает UDP-сессию исходящего к цели `target` (SOCKS5 UDP ASSOCIATE).
+    ///
+    /// - `Direct`: резолвит `target` локально и `connect()`-ит сокет на адресат
+    ///   (ядро отбрасывает чужие источники — нет off-path инъекции).
+    /// - `Shadowsocks` (legacy AEAD): `connect()`-ит сокет на SS-сервер; адрес
+    ///   цели идёт в каждом пакете (домен резолвит сервер — remote DNS).
+    ///
+    /// Прочие исходящие (SS-2022/Trojan/TUIC/…) UDP пока не поддерживают.
+    pub async fn connect_udp(&self, target: &Target) -> io::Result<UdpSession> {
         match self {
             Outbound::Direct => {
-                let bind: SocketAddr = if peer.is_ipv4() {
-                    "0.0.0.0:0".parse().unwrap()
-                } else {
-                    "[::]:0".parse().unwrap()
-                };
-                let sock = tokio::net::UdpSocket::bind(bind).await?;
-                sock.connect(peer).await?;
+                let peer = resolve_target(target).await?;
+                let sock = bind_connected(peer).await?;
                 Ok(UdpSession::Direct(sock))
             }
-            _ => Err(proto_err(
-                "udp: данный исходящий пока не поддерживает UDP (только Direct)",
-            )),
+            Outbound::Shadowsocks(cfg) if !cfg.method.is_2022() => {
+                let server = resolve_host(&cfg.server).await?;
+                let sock = bind_connected(server).await?;
+                let master = evp_bytes_to_key(cfg.password.as_bytes(), cfg.method.key_len());
+                Ok(UdpSession::Shadowsocks {
+                    sock,
+                    method: cfg.method,
+                    master,
+                    target: target.clone(),
+                })
+            }
+            _ => Err(proto_err("udp: данный исходящий пока не поддерживает UDP")),
         }
     }
 }
 
-/// UDP-сессия исходящего к одному адресату (сокет `connect()`-нут на peer).
-#[derive(Debug)]
+/// UDP-сессия исходящего к одной цели (Direct — connected на адресат; SS —
+/// connected на сервер с per-packet AEAD).
 pub enum UdpSession {
     /// Прямая отправка через connected UDP-сокет.
     Direct(tokio::net::UdpSocket),
+    /// Через Shadowsocks (legacy AEAD): пакеты шифруются с адресом цели внутри.
+    Shadowsocks {
+        sock: tokio::net::UdpSocket,
+        method: Method,
+        master: Vec<u8>,
+        target: Target,
+    },
 }
 
 impl UdpSession {
-    /// Отправляет датаграмму `payload` адресату сессии.
+    /// Отправляет `payload` к цели сессии.
     pub async fn send(&self, payload: &[u8]) -> io::Result<()> {
-        let UdpSession::Direct(sock) = self;
-        sock.send(payload).await?;
+        match self {
+            UdpSession::Direct(sock) => {
+                sock.send(payload).await?;
+            }
+            UdpSession::Shadowsocks {
+                sock,
+                method,
+                master,
+                target,
+            } => {
+                let pkt = crate::shadowsocks::encrypt_packet(*method, master, target, payload)?;
+                sock.send(&pkt).await?;
+            }
+        }
         Ok(())
     }
 
-    /// Принимает следующую датаграмму от адресата сессии (чужие источники ядро
-    /// уже отбросило благодаря `connect()`).
-    pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let UdpSession::Direct(sock) = self;
-        sock.recv(buf).await
+    /// Принимает следующий ответ от цели сессии (для SS — расшифрованный payload).
+    pub async fn recv(&self) -> io::Result<Vec<u8>> {
+        match self {
+            UdpSession::Direct(sock) => {
+                let mut buf = vec![0u8; 65_535];
+                let n = sock.recv(&mut buf).await?;
+                buf.truncate(n);
+                Ok(buf)
+            }
+            UdpSession::Shadowsocks {
+                sock,
+                method,
+                master,
+                ..
+            } => {
+                let mut buf = vec![0u8; 65_535];
+                let n = sock.recv(&mut buf).await?;
+                // Адрес-источник из пакета игнорируем — relay завернёт ответ
+                // адресом, который слал клиент.
+                let (_src, payload) =
+                    crate::shadowsocks::decrypt_packet(*method, master, &buf[..n])?;
+                Ok(payload)
+            }
+        }
     }
+}
+
+/// Резолвит `target` в один сокет-адрес (для Direct UDP).
+async fn resolve_target(target: &Target) -> io::Result<SocketAddr> {
+    match target {
+        Target::Socket(a) => Ok(*a),
+        Target::Domain(h, p) => resolve_host(&format!("{h}:{p}")).await,
+    }
+}
+
+/// Резолвит `host:port` в один сокет-адрес.
+async fn resolve_host(hostport: &str) -> io::Result<SocketAddr> {
+    tokio::net::lookup_host(hostport)
+        .await?
+        .next()
+        .ok_or_else(|| proto_err("udp: резолв не дал адреса"))
+}
+
+/// Биндит локальный UDP-сокет нужного семейства и `connect()`-ит на `peer`.
+async fn bind_connected(peer: SocketAddr) -> io::Result<tokio::net::UdpSocket> {
+    let bind: SocketAddr = if peer.is_ipv4() {
+        "0.0.0.0:0".parse().unwrap()
+    } else {
+        "[::]:0".parse().unwrap()
+    };
+    let sock = tokio::net::UdpSocket::bind(bind).await?;
+    sock.connect(peer).await?;
+    Ok(sock)
 }
 
 fn proto_err(msg: &str) -> io::Error {
