@@ -14,6 +14,9 @@ mod obfs;
 mod stream;
 mod tunnel;
 
+#[cfg(test)]
+mod loopback;
+
 pub use config::{decode_key, parse_addresses, parse_ip_list, AwgObfuscation, WgConfig, WgParams};
 
 use crate::target::Target;
