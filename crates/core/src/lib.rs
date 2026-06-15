@@ -10,6 +10,7 @@
 pub mod base64;
 pub mod config;
 pub mod error;
+pub mod geo;
 pub mod json;
 pub mod model;
 pub mod parse;
@@ -22,6 +23,7 @@ pub use config::{
     AppConfig, ConfigError, DnsConfig, DnsServerConfig, FakeIpConfig, Settings, Subscription,
 };
 pub use error::ParseError;
+pub use geo::{GeoIpDb, GeoSiteDb};
 pub use json::JsonValue;
 pub use model::{ProtocolKind, ServerProfile};
 pub use parse::{

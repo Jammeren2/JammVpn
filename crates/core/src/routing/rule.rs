@@ -33,6 +33,14 @@ pub struct Rule {
     pub processes: Vec<AppMatcher>,
     /// Порты назначения.
     pub ports: Vec<u16>,
+    /// Категории geosite (`google`, `cn`, …) — домен по базе. Вычисляются
+    /// geo-aware движком с загруженной базой; нативным матчером игнорируются.
+    #[serde(default)]
+    pub geosite: Vec<String>,
+    /// Коды стран geoip (`ru`, `us`, …) — IP по базе. Вычисляются geo-aware
+    /// движком; нативным матчером игнорируются.
+    #[serde(default)]
+    pub geoip: Vec<String>,
     /// Действие при срабатывании.
     pub action: RouteAction,
 }
@@ -52,7 +60,14 @@ pub struct RouteRequest<'a> {
 
 impl Rule {
     /// Совпадает ли правило с запросом.
+    ///
+    /// Нативный матчер: домен/IP-CIDR/процесс/порт. Geo-критерии (`geosite`/`geoip`)
+    /// он подтвердить не может (нужна загруженная база) — правило с ними считается
+    /// несовпавшим; такие правила вычисляет geo-aware движок.
     pub fn matches(&self, req: &RouteRequest) -> bool {
+        if !self.geosite.is_empty() || !self.geoip.is_empty() {
+            return false;
+        }
         if !self.domains.is_empty() {
             match req.domain {
                 Some(h) if self.domains.iter().any(|d| d.matches(h)) => {}
@@ -82,6 +97,9 @@ impl Rule {
     /// (и geoip) правила срабатывают и для доменных целей, не резолвя там, где
     /// решает доменное правило раньше по списку (без утечки DNS).
     pub fn matches_sans_ip(&self, req: &RouteRequest) -> bool {
+        if !self.geosite.is_empty() || !self.geoip.is_empty() {
+            return false;
+        }
         if !self.domains.is_empty() {
             match req.domain {
                 Some(h) if self.domains.iter().any(|d| d.matches(h)) => {}
