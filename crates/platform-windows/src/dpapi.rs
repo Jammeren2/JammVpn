@@ -30,10 +30,13 @@ impl SecretStore for DpapiStore {
 
 /// Общая обёртка над `CryptProtectData`/`CryptUnprotectData`.
 fn crypt(data: &[u8], protect: bool) -> Result<Vec<u8>, SecretError> {
-    // Входной блоб передаётся как `*const` (DPAPI его не изменяет).
+    // Копируем вход в собственный буфер: поле `pbData` имеет тип `*mut u8`, а
+    // приведение `*const`→`*mut` к заимствованным `data` нарушало бы инварианты
+    // алиасинга Rust (DPAPI вход не изменяет, но компилятор это не гарантирует).
+    let mut owned = data.to_vec();
     let input = CRYPT_INTEGER_BLOB {
-        cbData: data.len() as u32,
-        pbData: data.as_ptr() as *mut u8,
+        cbData: owned.len() as u32,
+        pbData: owned.as_mut_ptr(),
     };
     let mut out = CRYPT_INTEGER_BLOB {
         cbData: 0,

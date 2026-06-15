@@ -15,6 +15,7 @@ const ENC_PREFIX: &str = "enc:";
 /// Ключи параметров профиля, считающиеся секретными.
 pub const SECRET_PARAM_KEYS: &[&str] = &[
     "password",
+    "username", // учётка SOCKS5/HTTP-прокси — тоже секрет
     "uuid",
     "private_key",
     "preshared_key",
@@ -63,39 +64,63 @@ pub fn is_protected(value: &str) -> bool {
     value.starts_with(ENC_PREFIX)
 }
 
-/// Шифрует все секретные значения параметров серверов на месте
-/// (`plaintext` → `enc:<base64>`). Уже зашифрованные пропускаются (идемпотентно).
+/// Шифрует все секретные значения параметров серверов (`plaintext` →
+/// `enc:<base64>`). Уже зашифрованные пропускаются (идемпотентно).
+///
+/// **Атомарно:** значения сначала шифруются во временный список, и применяются к
+/// конфигу только если ВСЕ операции успешны — при ошибке конфиг не изменяется.
+///
+/// Ограничение: секретное значение, само начинающееся с `enc:`, будет принято за
+/// уже зашифрованное и пропущено. Для паролей/ключей/UUID это патологический
+/// случай (UUID — hex, ключи — base64, не начинаются с `enc:`).
 pub fn protect_config(cfg: &mut AppConfig, store: &dyn SecretStore) -> Result<(), SecretError> {
-    for server in &mut cfg.servers {
+    let mut updates: Vec<(usize, &str, String)> = Vec::new();
+    for (i, server) in cfg.servers.iter().enumerate() {
         for key in SECRET_PARAM_KEYS {
-            if let Some(val) = server.params.get_mut(*key) {
+            if let Some(val) = server.params.get(*key) {
                 if !is_protected(val) {
                     let blob = store.protect(val.as_bytes())?;
-                    *val = format!("{ENC_PREFIX}{}", base64::encode_standard(&blob));
+                    let enc = format!("{ENC_PREFIX}{}", base64::encode_standard(&blob));
+                    updates.push((i, key, enc));
                 }
             }
         }
     }
+    apply(cfg, updates);
     Ok(())
 }
 
-/// Расшифровывает все секретные значения (`enc:<base64>` → `plaintext`) на месте.
-/// Незашифрованные значения пропускаются.
+/// Расшифровывает все секретные значения (`enc:<base64>` → `plaintext`).
+/// Незашифрованные пропускаются. **Атомарно** (см. [`protect_config`]).
+///
+/// Значения параметров — строки UTF-8 (тип `params` — `BTreeMap<String, String>`),
+/// поэтому корректно зашифрованный секрет всегда расшифровывается обратно в UTF-8;
+/// ошибка `utf8` означает повреждение шифртекста или неверное хранилище.
 pub fn unprotect_config(cfg: &mut AppConfig, store: &dyn SecretStore) -> Result<(), SecretError> {
-    for server in &mut cfg.servers {
+    let mut updates: Vec<(usize, &str, String)> = Vec::new();
+    for (i, server) in cfg.servers.iter().enumerate() {
         for key in SECRET_PARAM_KEYS {
-            if let Some(val) = server.params.get_mut(*key) {
+            if let Some(val) = server.params.get(*key) {
                 if let Some(b64) = val.strip_prefix(ENC_PREFIX) {
                     let blob = base64::decode_loose(b64)
                         .map_err(|e| SecretError(format!("base64: {e}")))?;
                     let plain = store.unprotect(&blob)?;
-                    *val =
+                    let s =
                         String::from_utf8(plain).map_err(|e| SecretError(format!("utf8: {e}")))?;
+                    updates.push((i, key, s));
                 }
             }
         }
     }
+    apply(cfg, updates);
     Ok(())
+}
+
+/// Применяет накопленные изменения значений параметров (после успеха всех операций).
+fn apply(cfg: &mut AppConfig, updates: Vec<(usize, &str, String)>) {
+    for (i, key, new_val) in updates {
+        cfg.servers[i].params.insert(key.to_string(), new_val);
+    }
 }
 
 #[cfg(test)]
@@ -172,5 +197,42 @@ mod tests {
         // NoopStore не шифрует, но префикс enc: + base64 всё равно навешивается.
         unprotect_config(&mut cfg, &NoopStore).unwrap();
         assert_eq!(cfg.servers[0].params.get("password").unwrap(), "pw");
+    }
+
+    #[test]
+    fn username_is_protected() {
+        let mut cfg = cfg_with_secret("pw");
+        cfg.servers[0]
+            .params
+            .insert("username".into(), "alice".into());
+        protect_config(&mut cfg, &FakeStore).unwrap();
+        assert!(is_protected(cfg.servers[0].params.get("username").unwrap()));
+        unprotect_config(&mut cfg, &FakeStore).unwrap();
+        assert_eq!(cfg.servers[0].params.get("username").unwrap(), "alice");
+    }
+
+    #[test]
+    fn unprotect_failure_leaves_config_unchanged() {
+        // Стор, всегда падающий на unprotect.
+        struct FailStore;
+        impl SecretStore for FailStore {
+            fn protect(&self, p: &[u8]) -> Result<Vec<u8>, SecretError> {
+                Ok(p.to_vec())
+            }
+            fn unprotect(&self, _: &[u8]) -> Result<Vec<u8>, SecretError> {
+                Err(SecretError("fail".into()))
+            }
+        }
+        let mut cfg = cfg_with_secret("pw");
+        cfg.servers[0]
+            .params
+            .insert("password".into(), "enc:AAAA".into());
+        let before = cfg.clone();
+        let res = unprotect_config(&mut cfg, &FailStore);
+        assert!(res.is_err());
+        assert_eq!(
+            cfg, before,
+            "при ошибке конфиг остаётся неизменным (атомарность)"
+        );
     }
 }
