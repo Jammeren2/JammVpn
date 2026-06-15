@@ -32,6 +32,20 @@ pub struct AwgObfuscation {
     pub h4: u32,
 }
 
+impl AwgObfuscation {
+    /// `true`, если параметры эквивалентны чистому WireGuard (нет junk/префиксов,
+    /// заголовки канонические 1..4) — тогда обфускация тождественна.
+    pub fn is_identity(&self) -> bool {
+        self.jc == 0
+            && self.s1 == 0
+            && self.s2 == 0
+            && self.h1 == 1
+            && self.h2 == 2
+            && self.h3 == 3
+            && self.h4 == 4
+    }
+}
+
 /// Разобранные параметры WG-узла (готовы к поднятию туннеля).
 #[derive(Clone)]
 pub struct WgParams {

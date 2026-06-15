@@ -8,6 +8,11 @@
 //! соединении и разделяется всеми коннектами (см. [`config::WgConfig`]).
 
 mod config;
+// Задействуются драйвером в WG-C; временно глушим dead_code до подключения.
+#[allow(dead_code)]
+mod device;
+#[allow(dead_code)]
+mod obfs;
 mod tunnel;
 
 pub use config::{decode_key, parse_addresses, parse_ip_list, AwgObfuscation, WgConfig, WgParams};

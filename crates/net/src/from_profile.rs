@@ -135,17 +135,20 @@ pub fn outbound_from_profile(p: &ServerProfile) -> Result<Outbound, ProfileError
             // AWG-обфускация — только для AmneziaWg (парсер уже различил протокол
             // по наличию обфускационных ключей). Отсутствующие/нечисловые → 0.
             let awg = (p.protocol == ProtocolKind::AmneziaWg).then(|| {
-                let g = |k: &str| p.param(k).and_then(|v| v.parse().ok()).unwrap_or(0u32);
+                let g = |k: &str, default: u32| {
+                    p.param(k).and_then(|v| v.parse().ok()).unwrap_or(default)
+                };
+                // Отсутствующие H1..H4 → канонические 1..4 (без перезаписи типа).
                 AwgObfuscation {
-                    jc: g("jc"),
-                    jmin: g("jmin"),
-                    jmax: g("jmax"),
-                    s1: g("s1"),
-                    s2: g("s2"),
-                    h1: g("h1"),
-                    h2: g("h2"),
-                    h3: g("h3"),
-                    h4: g("h4"),
+                    jc: g("jc", 0),
+                    jmin: g("jmin", 0),
+                    jmax: g("jmax", 0),
+                    s1: g("s1", 0),
+                    s2: g("s2", 0),
+                    h1: g("h1", 1),
+                    h2: g("h2", 2),
+                    h3: g("h3", 3),
+                    h4: g("h4", 4),
                 }
             });
             Ok(Outbound::Wireguard(WgConfig::new(WgParams {
