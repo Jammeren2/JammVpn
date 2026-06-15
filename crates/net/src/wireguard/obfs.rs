@@ -43,11 +43,6 @@ impl AwgObfs {
         Self { params }
     }
 
-    /// `true`, если трансформация тождественна (чистый WG).
-    pub fn is_identity(&self) -> bool {
-        self.params.is_none()
-    }
-
     fn h_for(a: &AwgObfuscation, t: u32) -> u32 {
         match t {
             T_INIT => a.h1,
@@ -177,8 +172,8 @@ mod tests {
     #[test]
     fn identity_when_default() {
         let o = AwgObfs::new(None);
-        assert!(o.is_identity());
         let pkt = fake(T_DATA, 64);
+        // Тождественность: wrap не меняет пакет, unwrap возвращает его же.
         assert_eq!(o.wrap(&pkt), vec![pkt.clone()]);
         assert_eq!(o.unwrap(&pkt), Some(pkt));
     }
@@ -196,7 +191,11 @@ mod tests {
             h3: 3,
             h4: 4,
         };
-        assert!(AwgObfs::new(Some(id)).is_identity());
+        let o = AwgObfs::new(Some(id));
+        // Дефолтные AWG-параметры ⇒ тождественное преобразование.
+        let pkt = fake(T_INIT, LEN_INIT);
+        assert_eq!(o.wrap(&pkt), vec![pkt.clone()]);
+        assert_eq!(o.unwrap(&pkt), Some(pkt));
     }
 
     #[test]

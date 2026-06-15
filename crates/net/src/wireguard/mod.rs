@@ -8,11 +8,10 @@
 //! соединении и разделяется всеми коннектами (см. [`config::WgConfig`]).
 
 mod config;
-// Задействуются драйвером в WG-C; временно глушим dead_code до подключения.
-#[allow(dead_code)]
 mod device;
-#[allow(dead_code)]
+mod driver;
 mod obfs;
+mod stream;
 mod tunnel;
 
 pub use config::{decode_key, parse_addresses, parse_ip_list, AwgObfuscation, WgConfig, WgParams};
@@ -20,8 +19,27 @@ pub use config::{decode_key, parse_addresses, parse_ip_list, AwgObfuscation, WgC
 use crate::target::Target;
 use crate::BoxedStream;
 use std::io;
+use std::net::IpAddr;
 
 /// Точка входа: TCP-соединение до `target` через WG-туннель (лениво поднимаемый).
 pub async fn wireguard_connect(cfg: &WgConfig, target: &Target) -> io::Result<BoxedStream> {
     cfg.connect_tcp(target).await
+}
+
+/// Резолвит цель в `(IpAddr, port)`.
+///
+/// v0: домены разрешаются СИСТЕМНЫМ резолвером (вне туннеля) — известное
+/// ограничение (утечка DNS); in-tunnel DNS (smoltcp `socket-dns` против
+/// `params.dns`) — следующий шаг. IP-цели проходят без резолва.
+pub(crate) async fn resolve_target(target: &Target) -> io::Result<(IpAddr, u16)> {
+    match target {
+        Target::Socket(addr) => Ok((addr.ip(), addr.port())),
+        Target::Domain(host, port) => {
+            let addr = tokio::net::lookup_host((host.as_str(), *port))
+                .await?
+                .next()
+                .ok_or_else(|| io::Error::other(format!("wg: DNS: пусто для {host}")))?;
+            Ok((addr.ip(), addr.port()))
+        }
+    }
 }

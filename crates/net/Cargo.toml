@@ -44,6 +44,7 @@ smoltcp = { version = "0.13.1", default-features = false, features = [
     "socket-tcp",
     "socket-udp",
     "socket-dns",
+    "async",
     "log",
 ] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
