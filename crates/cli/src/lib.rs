@@ -760,6 +760,44 @@ impl ProxyController {
     }
 }
 
+/// Локальный транспарент-прокси для split-редиректа: принимает перенаправленные
+/// драйвером соединения, восстанавливает original-dst и маршрутизирует движком.
+pub struct SplitProxyController {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl SplitProxyController {
+    /// Поднимает транспарент-сервер на `listen` (обычно `127.0.0.1:SPLIT_REDIRECT_PORT`).
+    /// Маршрутизация — по правилам конфига. Только Windows (нужен redirect-context).
+    #[cfg(windows)]
+    pub async fn start(listen: &str) -> Result<Self, String> {
+        use jammvpn_net::serve_transparent_redirect;
+        use std::os::windows::io::AsRawSocket;
+        let cfg = load();
+        let engine = Arc::new(build_engine(&cfg, None)?);
+        let listener = TcpListener::bind(listen).await.map_err(|e| e.to_string())?;
+        let handle = tokio::spawn(async move {
+            let _ = serve_transparent_redirect(listener, engine, |s: &tokio::net::TcpStream| {
+                jammvpn_platform_windows::wfp::redirect::query_original_dst(
+                    s.as_raw_socket() as usize,
+                )
+                .map_err(std::io::Error::other)
+            })
+            .await;
+        });
+        Ok(Self { handle })
+    }
+    #[cfg(not(windows))]
+    pub async fn start(_listen: &str) -> Result<Self, String> {
+        Err("split-редирект поддерживается только на Windows".into())
+    }
+
+    /// Останавливает транспарент-сервер.
+    pub fn stop(self) {
+        self.handle.abort();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

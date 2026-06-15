@@ -38,7 +38,7 @@ mod vision;
 pub mod vless;
 pub mod wireguard;
 
-pub use engine::{serve_socks_routed, Decision, Engine, Routed};
+pub use engine::{serve_socks_routed, serve_transparent_redirect, Decision, Engine, Routed};
 pub use fakeip::FakeIp;
 pub use from_profile::{outbound_from_profile, ProfileError};
 pub use outbound::{

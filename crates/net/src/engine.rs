@@ -16,12 +16,12 @@ use jammvpn_core::routing::{RouteAction, Rule};
 use jammvpn_core::split::ConnApp;
 use std::collections::HashMap;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 /// Решение для соединения.
 #[derive(Debug, Clone)]
@@ -501,11 +501,92 @@ async fn serve_routed(
     }
 }
 
+/// Транспарентный сервер для split-редиректа.
+///
+/// Драйвер WFP перенаправляет соединения выбранных приложений на этот локальный
+/// порт. `original_dst` восстанавливает истинный адрес назначения (из
+/// redirect-context драйвера — на Windows через `SIO_QUERY_WFP_CONNECTION_
+/// REDIRECT_CONTEXT`), далее соединение маршрутизируется движком как обычно.
+/// Лимит соединений — [`MAX_CONNECTIONS`]; `Block` → закрытие.
+pub async fn serve_transparent_redirect<F>(
+    listener: TcpListener,
+    engine: Arc<Engine>,
+    original_dst: F,
+) -> io::Result<()>
+where
+    F: Fn(&TcpStream) -> io::Result<SocketAddr> + Send + Sync + 'static,
+{
+    let original_dst = Arc::new(original_dst);
+    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    loop {
+        let (mut client, _) = listener.accept().await?;
+        // Лимит исчерпан → закрываем новое соединение, не копим задачи.
+        let permit = match Arc::clone(&sem).try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let eng = Arc::clone(&engine);
+        let odf = Arc::clone(&original_dst);
+        tokio::spawn(async move {
+            let _permit = permit; // держим до конца обработки
+            let dst = match odf(&client) {
+                Ok(d) => d,
+                Err(_) => return, // нет redirect-context (не наше соединение) → закрыть
+            };
+            let routed = eng.route(&Target::Socket(dst)).await;
+            // Транспарентный redirect: клиентского протокола нет (в отличие от
+            // SOCKS), поэтому подключаем исходящий и копируем напрямую, без
+            // относящегося к SOCKS ответа.
+            if let Decision::Connect(ob) = routed.decision {
+                if let Ok(mut upstream) = ob.connect_tcp(&routed.target).await {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                }
+            }
+            // Decision::Block → просто закрываем соединение.
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::outbound::Socks5Config;
     use jammvpn_core::routing::DomainRule;
+
+    #[tokio::test]
+    async fn transparent_redirect_relays_to_original_dst() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Эхо-сервер играет роль «оригинального» пункта назначения.
+        let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = echo.accept().await {
+                let mut buf = [0u8; 5];
+                if s.read_exact(&mut buf).await.is_ok() {
+                    let _ = s.write_all(&buf).await;
+                }
+            }
+        });
+
+        // Движок с Direct-маршрутизацией (пустой конфиг).
+        let engine = Arc::new(Engine::from_config(&AppConfig::default()));
+
+        // Транспарентный сервер: original_dst всегда возвращает адрес эхо-сервера
+        // (в бою его отдаёт redirect-context драйвера).
+        let redir = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redir_addr = redir.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = serve_transparent_redirect(redir, engine, move |_| Ok(echo_addr)).await;
+        });
+
+        // Клиент подключается к редирект-серверу; ожидаем эхо через relay.
+        let mut c = TcpStream::connect(redir_addr).await.unwrap();
+        c.write_all(b"hello").await.unwrap();
+        let mut out = [0u8; 5];
+        c.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"hello");
+    }
 
     fn engine_with(rules: Vec<Rule>, default_proxy: Option<String>) -> Engine {
         let mut obs = HashMap::new();

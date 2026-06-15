@@ -10,4 +10,6 @@ pub mod ipc;
 #[cfg(windows)]
 pub mod controller;
 #[cfg(windows)]
+pub mod redirect;
+#[cfg(windows)]
 pub use controller::WfpDriverController;

@@ -13,9 +13,10 @@ use tauri::{Manager, State, WindowEvent};
 #[derive(Default)]
 struct ProxyState(Mutex<Option<ctl::ProxyController>>);
 
-/// Активно ли сейчас раздельное туннелирование (правила применены к драйверу).
+/// Активный split: работающий локальный редирект-прокси (или его отсутствие).
+/// `Some` ⇔ split применён (конфиг в драйвере + прокси поднят).
 #[derive(Default)]
-struct SplitState(Mutex<bool>);
+struct SplitState(Mutex<Option<ctl::SplitProxyController>>);
 
 #[tauri::command]
 fn list_nodes() -> Vec<ctl::NodeInfo> {
@@ -182,26 +183,38 @@ fn set_split(split: ctl::SplitInfo) -> Result<(), String> {
     ctl::set_split(split)
 }
 
-/// Применить split к драйверу (требует загруженного WFP-драйвера и админ-прав).
+/// Применить split: поднять локальный редирект-прокси и передать правила
+/// драйверу (требует загруженного WFP-драйвера и админ-прав).
 #[tauri::command]
-fn split_apply(state: State<'_, SplitState>) -> Result<(), String> {
-    ctl::apply_split(ctl::SPLIT_REDIRECT_PORT)?;
-    *state.0.lock().unwrap() = true;
+async fn split_apply(state: State<'_, SplitState>) -> Result<(), String> {
+    if state.0.lock().unwrap().is_some() {
+        return Err("split уже применён".into());
+    }
+    let listen = format!("127.0.0.1:{}", ctl::SPLIT_REDIRECT_PORT);
+    let proxy = ctl::SplitProxyController::start(&listen).await?;
+    // Конфиг в драйвер; при ошибке откатываем поднятый прокси.
+    if let Err(e) = ctl::apply_split(ctl::SPLIT_REDIRECT_PORT) {
+        proxy.stop();
+        return Err(e);
+    }
+    *state.0.lock().unwrap() = Some(proxy);
     Ok(())
 }
 
-/// Снять split-правила в драйвере.
+/// Снять split: очистить правила в драйвере и остановить редирект-прокси.
 #[tauri::command]
 fn split_clear(state: State<'_, SplitState>) -> Result<(), String> {
-    ctl::clear_split()?;
-    *state.0.lock().unwrap() = false;
+    let _ = ctl::clear_split();
+    if let Some(proxy) = state.0.lock().unwrap().take() {
+        proxy.stop();
+    }
     Ok(())
 }
 
 /// Активно ли сейчас раздельное туннелирование.
 #[tauri::command]
 fn split_status(state: State<'_, SplitState>) -> bool {
-    *state.0.lock().unwrap()
+    state.0.lock().unwrap().is_some()
 }
 
 /// Показать главное окно и вывести его на передний план.
