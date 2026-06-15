@@ -187,8 +187,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for Ss2022Stream<S> {
                         Ok(p) => p,
                         Err(e) => return Poll::Ready(Err(e)),
                     };
+                    // Защита: AEAD-open даёт ровно `hdr` байт, но проверяем явно.
+                    if pt.len() != hdr {
+                        return Poll::Ready(Err(io::Error::other("ss2022: размер заголовка")));
+                    }
                     if pt[0] != TYPE_RESPONSE {
                         return Poll::Ready(Err(io::Error::other("ss2022: не ответ (type)")));
+                    }
+                    // Защита от replay: timestamp ответа в окне ±30с (SIP022).
+                    let ts = u64::from_be_bytes(pt[1..9].try_into().unwrap());
+                    if now_unix().abs_diff(ts) > 30 {
+                        return Poll::Ready(Err(io::Error::other("ss2022: timestamp вне окна")));
                     }
                     let sl = me.method.salt_len();
                     let req_salt = &pt[9..9 + sl];
