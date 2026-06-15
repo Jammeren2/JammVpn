@@ -39,7 +39,10 @@ impl std::error::Error for SecretError {}
 ///
 /// `protect`/`unprotect` оперируют сырыми байтами; привязка к пользователю/машине
 /// — на усмотрение реализации (DPAPI: к учётной записи пользователя).
-pub trait SecretStore {
+///
+/// `Send + Sync` — чтобы `Box<dyn SecretStore>` можно было держать в async-коде
+/// (Tauri-команды требуют `Send`-фьючерсы).
+pub trait SecretStore: Send + Sync {
     /// Шифрует байты.
     fn protect(&self, plaintext: &[u8]) -> Result<Vec<u8>, SecretError>;
     /// Расшифровывает байты, ранее зашифрованные [`Self::protect`].

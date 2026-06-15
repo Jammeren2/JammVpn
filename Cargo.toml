@@ -8,6 +8,15 @@ members = [
     "crates/net",
     "crates/platform-windows",
     "crates/cli",
+    "app/src-tauri",
+]
+# Рутинные cargo build/test/clippy (без --workspace) идут по этим крейтам, не
+# тянут тяжёлые Tauri-зависимости. GUI собирается явно: cargo build -p jammvpn-app.
+default-members = [
+    "crates/core",
+    "crates/net",
+    "crates/platform-windows",
+    "crates/cli",
 ]
 
 [workspace.package]

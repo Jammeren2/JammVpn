@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JammVPN</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>JammVPN</h1>
+      <div id="status" class="status off">прокси остановлен</div>
+    </header>
+
+    <section class="panel">
+      <h2>Локальный прокси (SOCKS5)</h2>
+      <div class="row">
+        <label>Адрес <input id="listen" type="text" value="127.0.0.1:1080" /></label>
+        <label>Через узел
+          <select id="server">
+            <option value="">— по правилам конфига —</option>
+          </select>
+        </label>
+        <button id="btn-start">Запустить</button>
+        <button id="btn-stop" disabled>Остановить</button>
+      </div>
+      <p class="hint" id="proxy-hint"></p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Узлы</h2>
+        <div>
+          <button id="btn-test">Тест задержек</button>
+          <button id="btn-refresh" class="ghost">Обновить</button>
+        </div>
+      </div>
+      <table id="nodes">
+        <thead>
+          <tr><th>#</th><th>Имя</th><th>Протокол</th><th>Адрес</th><th>Задержка</th></tr>
+        </thead>
+        <tbody id="nodes-body"></tbody>
+      </table>
+      <p class="hint" id="nodes-empty">Узлов нет — импортируйте ссылку или подписку ниже.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Импорт</h2>
+      <div class="row">
+        <input id="import-arg" type="text" placeholder="vless://… / ss://… / https://подписка" />
+        <button id="btn-import">Импортировать</button>
+        <button id="btn-update" class="ghost">Обновить подписки</button>
+      </div>
+      <p class="hint" id="import-msg"></p>
+    </section>
+
+    <footer>
+      <span id="config-path"></span>
+    </footer>
+
+    <script src="main.js"></script>
+  </body>
+</html>

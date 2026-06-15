@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Возможности основного окна JammVPN",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
