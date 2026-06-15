@@ -11,11 +11,13 @@ use crate::inbound::{relay_through, reply, socks_handshake};
 use crate::outbound::Outbound;
 use crate::target::Target;
 use jammvpn_core::config::{AppConfig, DnsServerConfig};
-use jammvpn_core::routing::{evaluate, RouteAction, RouteRequest, Rule};
+use jammvpn_core::geo::{GeoIpDb, GeoSiteDb};
+use jammvpn_core::routing::{RouteAction, Rule};
 use jammvpn_core::split::ConnApp;
 use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -53,6 +55,8 @@ pub struct Engine {
     default_action: RouteAction,
     resolver: Option<DnsResolver>,
     fakeip: Option<Arc<FakeIp>>,
+    geosite: Option<Arc<GeoSiteDb>>,
+    geoip: Option<Arc<GeoIpDb>>,
 }
 
 impl Engine {
@@ -75,6 +79,8 @@ impl Engine {
             default_action,
             resolver: None,
             fakeip: None,
+            geosite: None,
+            geoip: None,
         }
     }
 
@@ -91,6 +97,18 @@ impl Engine {
         self
     }
 
+    /// Добавляет базу geosite (правила `geosite:категория` по доменам).
+    pub fn with_geosite(mut self, db: Arc<GeoSiteDb>) -> Self {
+        self.geosite = Some(db);
+        self
+    }
+
+    /// Добавляет базу geoip (правила `geoip:страна` по IP).
+    pub fn with_geoip(mut self, db: Arc<GeoIpDb>) -> Self {
+        self.geoip = Some(db);
+        self
+    }
+
     /// FakeIP-аллокатор движка (для DNS-сервера, отвечающего поддельными IP).
     pub fn fakeip(&self) -> Option<&Arc<FakeIp>> {
         self.fakeip.as_ref()
@@ -100,6 +118,32 @@ impl Engine {
     /// ([`crate::urltest::test_outbounds`]) и выбора узла.
     pub fn outbounds(&self) -> &HashMap<String, Outbound> {
         &self.outbounds
+    }
+
+    /// Описания правил, ссылающихся на geo-категории, базы для которых НЕ
+    /// загружены (`geosite`/`geoip` == None). Непустой результат означает, что
+    /// набор правил не может быть выполнен: geo-критерий тогда никогда не
+    /// совпадает, и `Block`-правило молча выродилось бы в пропуск (fail-open).
+    /// Фронтенд должен отказаться от запуска, а не выпускать трафик мимо правил.
+    pub fn missing_geo_refs(&self) -> Vec<String> {
+        let mut missing = Vec::new();
+        for (i, rule) in self.rules.iter().enumerate() {
+            if !rule.geosite.is_empty() && self.geosite.is_none() {
+                missing.push(format!(
+                    "правило #{}: geosite {:?} — база geosite не загружена",
+                    i + 1,
+                    rule.geosite
+                ));
+            }
+            if !rule.geoip.is_empty() && self.geoip.is_none() {
+                missing.push(format!(
+                    "правило #{}: geoip {:?} — база geoip не загружена",
+                    i + 1,
+                    rule.geoip
+                ));
+            }
+        }
+        missing
     }
 
     /// Движок, тунелирующий ВЕСЬ трафик через единственный исходящий.
@@ -147,6 +191,19 @@ impl Engine {
                 Err(e) => eprintln!("предупреждение: FakeIP отключён ({e})"),
             }
         }
+        // Базы geosite/geoip: загружаем при заданных путях (сбой → предупреждение).
+        if let Some(p) = &cfg.geo.geosite_path {
+            match GeoSiteDb::load(Path::new(p)) {
+                Ok(db) => engine.geosite = Some(Arc::new(db)),
+                Err(e) => eprintln!("предупреждение: geosite не загружен ({e})"),
+            }
+        }
+        if let Some(p) = &cfg.geo.geoip_path {
+            match GeoIpDb::load(Path::new(p)) {
+                Ok(db) => engine.geoip = Some(Arc::new(db)),
+                Err(e) => eprintln!("предупреждение: geoip не загружен ({e})"),
+            }
+        }
         engine
     }
 
@@ -154,23 +211,36 @@ impl Engine {
     ///
     /// Процесс-инициатор на уровне SOCKS5 неизвестен, поэтому правила по
     /// приложению здесь не срабатывают (их применяет драйвер до редиректа).
-    /// IP-CIDR правила для доменных целей срабатывают только если домен сам —
-    /// литеральный IP; полноценный резолв доступен через [`Engine::route`].
+    /// IP-критерии (`ip_cidrs`/`geoip`) для доменной цели срабатывают только если
+    /// домен сам — литеральный IP; полный резолв — через [`Engine::route`].
+    /// Доменные критерии (`domains`/`geosite`) работают всегда.
     pub fn resolve_target(&self, target: &Target) -> Decision {
         let app = ConnApp::default();
+        let port = target.port();
         let (domain, ip) = match target {
             // Литеральный IP, закодированный как домен (легальный SOCKS5 ATYP=3),
             // тоже подаём IP-правилам — иначе IP-CIDR Block/Proxy тривиально обходятся.
-            Target::Domain(host, _) => (Some(host.as_str()), host.parse::<IpAddr>().ok()),
+            Target::Domain(host, _) => (Some(host.as_str()), literal_ip(host)),
             Target::Socket(addr) => (None, Some(addr.ip())),
         };
-        let req = RouteRequest {
-            domain,
-            ip,
-            port: target.port(),
-            app: &app,
-        };
-        self.act(&evaluate(&self.rules, &req, &self.default_action))
+        let mut action = self.default_action.clone();
+        for rule in &self.rules {
+            if !self.non_ip_ok(rule, domain, port, &app) {
+                continue;
+            }
+            if !has_ip_crit(rule) {
+                action = rule.action.clone();
+                break;
+            }
+            // Есть IP-критерий: без резолва сверяем только известный IP.
+            if let Some(i) = ip {
+                if self.ip_in_rule(rule, i) {
+                    action = rule.action.clone();
+                    break;
+                }
+            }
+        }
+        self.act(&action)
     }
 
     /// Маршрутизирует цель с учётом DNS (FakeIP-реверс + ленивый резолв доменов
@@ -194,7 +264,7 @@ impl Engine {
         let app = ConnApp::default();
         let port = target.port();
         let (mut domain, mut ip) = match target {
-            Target::Domain(host, _) => (Some(host.clone()), host.parse::<IpAddr>().ok()),
+            Target::Domain(host, _) => (Some(host.clone()), literal_ip(host)),
             Target::Socket(addr) => (None, Some(addr.ip())),
         };
 
@@ -211,7 +281,7 @@ impl Engine {
             }
         }
 
-        // Проход по правилам (first-match) с ленивым резолвом для IP-CIDR.
+        // Проход по правилам (first-match) с ленивым резолвом для IP-критериев.
         // `resolved`: None — ещё не резолвили; Some(Ok) — адреса; Some(Err) — сбой
         // (различаем явно, чтобы сбой DNS не маскировался под «нет совпадения»).
         let mut resolved: Option<Result<Vec<IpAddr>, ()>> = None;
@@ -219,43 +289,45 @@ impl Engine {
         let mut matched = false;
         let mut pending_block = false;
         for rule in &self.rules {
-            let req = RouteRequest {
-                domain: domain.as_deref(),
-                ip,
-                port,
-                app: &app,
-            };
-            if rule.matches(&req) {
+            // Не-IP критерии: домен (domains+geosite), порт, процесс.
+            if !self.non_ip_ok(rule, domain.as_deref(), port, &app) {
+                continue;
+            }
+            // Нет IP-критерия → правило сработало.
+            if !has_ip_crit(rule) {
                 action = rule.action.clone();
                 matched = true;
                 break;
             }
-            // Правило различается только по IP, цель — домен, IP ещё нет,
-            // резолвер задан → резолвим (единожды на домен) и сверяем с ip_cidrs.
-            if !rule.ip_cidrs.is_empty() && ip.is_none() && rule.matches_sans_ip(&req) {
-                if let Some(r) = &self.resolver {
-                    if resolved.is_none() {
-                        let name = domain.as_deref().unwrap_or_default();
-                        resolved = Some(r.resolve(name).await.map_err(|_| ()));
-                    }
-                    match resolved.as_ref() {
-                        Some(Ok(ips)) => {
-                            let hit = ips
-                                .iter()
-                                .any(|rip| rule.ip_cidrs.iter().any(|c| c.contains(*rip)));
-                            if hit {
-                                action = rule.action.clone();
-                                matched = true;
-                                break;
-                            }
+            // IP известен — сверяем напрямую (ip_cidrs + geoip).
+            if let Some(i) = ip {
+                if self.ip_in_rule(rule, i) {
+                    action = rule.action.clone();
+                    matched = true;
+                    break;
+                }
+                continue;
+            }
+            // Домен без IP: резолвим (единожды) и сверяем адреса с ip_cidrs+geoip.
+            if let Some(r) = &self.resolver {
+                if resolved.is_none() {
+                    let name = domain.as_deref().unwrap_or_default();
+                    resolved = Some(r.resolve(name).await.map_err(|_| ()));
+                }
+                match resolved.as_ref() {
+                    Some(Ok(ips)) => {
+                        if ips.iter().any(|rip| self.ip_in_rule(rule, *rip)) {
+                            action = rule.action.clone();
+                            matched = true;
+                            break;
                         }
-                        // Сбой резолва + Block-правило: IP не подтвердить, но молча
-                        // пропускать нельзя — помечаем для fail-closed (см. ниже).
-                        Some(Err(())) if matches!(rule.action, RouteAction::Block) => {
-                            pending_block = true;
-                        }
-                        _ => {}
                     }
+                    // Сбой резолва + Block-правило: IP не подтвердить, но молча
+                    // пропускать нельзя — помечаем для fail-closed (см. ниже).
+                    Some(Err(())) if matches!(rule.action, RouteAction::Block) => {
+                        pending_block = true;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -269,6 +341,42 @@ impl Engine {
             decision: self.act(&action),
             target: effective,
         }
+    }
+
+    /// Совпали ли НЕ-IP критерии правила: домен (`domains`/`geosite`), порт, процесс.
+    fn non_ip_ok(&self, rule: &Rule, domain: Option<&str>, port: u16, app: &ConnApp) -> bool {
+        if !rule.domains.is_empty() || !rule.geosite.is_empty() {
+            match domain {
+                Some(h) if self.domain_in_rule(rule, h) => {}
+                _ => return false,
+            }
+        }
+        if !rule.ports.is_empty() && !rule.ports.contains(&port) {
+            return false;
+        }
+        if !rule.processes.is_empty() && !rule.processes.iter().any(|m| m.matches(app)) {
+            return false;
+        }
+        true
+    }
+
+    /// Совпадает ли домен с правилом: явные `domains` ИЛИ категории `geosite`.
+    fn domain_in_rule(&self, rule: &Rule, host: &str) -> bool {
+        rule.domains.iter().any(|d| d.matches(host))
+            || rule.geosite.iter().any(|cat| {
+                self.geosite
+                    .as_ref()
+                    .is_some_and(|db| db.matches(cat, host))
+            })
+    }
+
+    /// Входит ли IP в правило: явные `ip_cidrs` ИЛИ страны `geoip`.
+    fn ip_in_rule(&self, rule: &Rule, ip: IpAddr) -> bool {
+        rule.ip_cidrs.iter().any(|c| c.contains(ip))
+            || rule
+                .geoip
+                .iter()
+                .any(|cc| self.geoip.as_ref().is_some_and(|db| db.matches(cc, ip)))
     }
 
     /// Превращает действие правила в решение (резолвит тег прокси).
@@ -285,6 +393,23 @@ impl Engine {
             }
         }
     }
+}
+
+/// Есть ли у правила IP-критерий (`ip_cidrs` или `geoip`).
+fn has_ip_crit(rule: &Rule) -> bool {
+    !rule.ip_cidrs.is_empty() || !rule.geoip.is_empty()
+}
+
+/// Парсит `host` как литеральный IP, нормализуя завершающую точку и обрамляющие
+/// скобки. Без этого `"1.1.1.9."` или `"[::1]"` дали бы `ip=None` и обошли
+/// IP-CIDR/geoip-правила (трафик ушёл бы в default вместо Block/Proxy).
+fn literal_ip(host: &str) -> Option<IpAddr> {
+    let h = host.strip_suffix('.').unwrap_or(host);
+    let h = h
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(h);
+    h.parse::<IpAddr>().ok()
 }
 
 /// Преобразует описание DNS-сервера из конфига в транспорт `net` (None — если
@@ -427,6 +552,175 @@ mod tests {
             matches!(r.decision, Decision::Connect(Outbound::Socks5(_))),
             "доменное правило решает раньше IP-CIDR/резолва"
         );
+    }
+
+    // Мини-энкодер protobuf для синтетических geo-баз (core::geo::tests_support под
+    // cfg(test) недоступен из net).
+    fn pb_varint(out: &mut Vec<u8>, mut v: u64) {
+        loop {
+            let mut b = (v & 0x7F) as u8;
+            v >>= 7;
+            if v != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if v == 0 {
+                break;
+            }
+        }
+    }
+    fn pb_len(out: &mut Vec<u8>, field: u32, data: &[u8]) {
+        pb_varint(out, (u64::from(field) << 3) | 2);
+        pb_varint(out, data.len() as u64);
+        out.extend_from_slice(data);
+    }
+    fn pb_vint(out: &mut Vec<u8>, field: u32, v: u64) {
+        pb_varint(out, u64::from(field) << 3);
+        pb_varint(out, v);
+    }
+
+    /// Синтетические geo-базы: категория google (суффикс google.com), страна ru
+    /// (1.1.1.0/24).
+    fn geo_dbs() -> (Arc<jammvpn_core::GeoSiteDb>, Arc<jammvpn_core::GeoIpDb>) {
+        // geosite: GeoSiteList{ GeoSite{ code="google", Domain{type=2,value="google.com"} } }
+        let mut domain = Vec::new();
+        pb_vint(&mut domain, 1, 2); // type=Domain(suffix)
+        pb_len(&mut domain, 2, b"google.com");
+        let mut gsite = Vec::new();
+        pb_len(&mut gsite, 1, b"google");
+        pb_len(&mut gsite, 2, &domain);
+        let mut site = Vec::new();
+        pb_len(&mut site, 1, &gsite);
+
+        // geoip: GeoIPList{ GeoIP{ code="ru", CIDR{ ip=[1,1,1,0], prefix=24 } } }
+        let mut cidr = Vec::new();
+        pb_len(&mut cidr, 1, &[1, 1, 1, 0]);
+        pb_vint(&mut cidr, 2, 24);
+        let mut gip = Vec::new();
+        pb_len(&mut gip, 1, b"ru");
+        pb_len(&mut gip, 2, &cidr);
+        let mut ip = Vec::new();
+        pb_len(&mut ip, 1, &gip);
+
+        (
+            Arc::new(jammvpn_core::GeoSiteDb::parse(&site).unwrap()),
+            Arc::new(jammvpn_core::GeoIpDb::parse(&ip).unwrap()),
+        )
+    }
+
+    #[tokio::test]
+    async fn route_geosite_matches_domain() {
+        let (site, _) = geo_dbs();
+        let rule = Rule {
+            geosite: vec!["google".into()],
+            action: RouteAction::Proxy(Some("ss".into())),
+            ..Default::default()
+        };
+        let e = engine_with(vec![rule], None).with_geosite(site);
+        // домен в категории → Proxy
+        let r = e.route(&domain("www.google.com")).await;
+        assert!(matches!(r.decision, Decision::Connect(Outbound::Socks5(_))));
+        // вне категории → Direct
+        let r = e.route(&domain("example.org")).await;
+        assert!(matches!(r.decision, Decision::Connect(Outbound::Direct)));
+    }
+
+    #[tokio::test]
+    async fn route_geoip_matches_after_resolve() {
+        let (_, ip) = geo_dbs();
+        let dns = mock_dns(Ipv4Addr::new(1, 1, 1, 7)).await; // 1.1.1.7 ∈ ru
+        let rule = Rule {
+            geoip: vec!["ru".into()],
+            action: RouteAction::Block,
+            ..Default::default()
+        };
+        // С резолвером: домен → 1.1.1.7 ∈ geoip:ru → Block.
+        let e = engine_with(vec![rule.clone()], None)
+            .with_geoip(ip.clone())
+            .with_resolver(DnsResolver::new(DnsServer::Udp(dns)));
+        let r = e.route(&domain("ru.example")).await;
+        assert!(matches!(r.decision, Decision::Block));
+        // Литеральный IP вне ru → Direct (geoip не совпал).
+        let e2 = engine_with(vec![rule], None).with_geoip(ip);
+        let r = e2
+            .route(&Target::Socket(SocketAddr::from(([8, 8, 8, 8], 443))))
+            .await;
+        assert!(matches!(r.decision, Decision::Connect(Outbound::Direct)));
+    }
+
+    #[tokio::test]
+    async fn route_literal_ip_with_trailing_dot_and_brackets() {
+        // "10.1.2.3." и "[10.1.2.3]" должны распознаваться как литеральный IP и
+        // подпадать под IP-CIDR правило (иначе обход через ATYP=domain).
+        let rule = Rule {
+            ip_cidrs: vec![IpCidr::parse("10.0.0.0/8").unwrap()],
+            action: RouteAction::Block,
+            ..Default::default()
+        };
+        let e = engine_with(vec![rule], None);
+        for host in ["10.1.2.3", "10.1.2.3.", "[10.1.2.3]"] {
+            let r = e.route(&domain(host)).await;
+            assert!(
+                matches!(r.decision, Decision::Block),
+                "{host} должен блокироваться"
+            );
+        }
+        // не-IP домен не затрагивается.
+        let r = e.route(&domain("example.com")).await;
+        assert!(matches!(r.decision, Decision::Connect(Outbound::Direct)));
+    }
+
+    #[test]
+    fn missing_geo_refs_flags_unloaded_db() {
+        let rules = vec![
+            Rule {
+                geosite: vec!["ads".into()],
+                action: RouteAction::Block,
+                ..Default::default()
+            },
+            Rule {
+                geoip: vec!["ru".into()],
+                action: RouteAction::Block,
+                ..Default::default()
+            },
+        ];
+        // Без баз: оба правила помечены.
+        let e = engine_with(rules.clone(), None);
+        assert_eq!(e.missing_geo_refs().len(), 2);
+        // С базами: пусто.
+        let (site, ip) = geo_dbs();
+        let e2 = engine_with(rules, None).with_geosite(site).with_geoip(ip);
+        assert!(e2.missing_geo_refs().is_empty());
+        // Правила без geo: пусто даже без баз.
+        let plain = engine_with(
+            vec![Rule {
+                domains: vec![DomainRule::Suffix("x.com".into())],
+                action: RouteAction::Block,
+                ..Default::default()
+            }],
+            None,
+        );
+        assert!(plain.missing_geo_refs().is_empty());
+    }
+
+    #[test]
+    fn resolve_target_geoip_on_literal_ip() {
+        // Синхронный путь: geoip по известному IP (без резолва).
+        let (_, ip) = geo_dbs();
+        let rule = Rule {
+            geoip: vec!["ru".into()],
+            action: RouteAction::Block,
+            ..Default::default()
+        };
+        let e = engine_with(vec![rule], None).with_geoip(ip);
+        assert!(matches!(
+            e.resolve_target(&Target::Socket(SocketAddr::from(([1, 1, 1, 9], 443)))),
+            Decision::Block
+        ));
+        assert!(matches!(
+            e.resolve_target(&Target::Socket(SocketAddr::from(([8, 8, 8, 8], 443)))),
+            Decision::Connect(Outbound::Direct)
+        ));
     }
 
     #[tokio::test]

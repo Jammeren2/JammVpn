@@ -226,7 +226,21 @@ async fn cmd_run(args: &[String]) -> R {
         Engine::single_proxy(outbound)
     } else {
         println!("[+] маршрутизация по правилам конфига");
-        Engine::from_config(&cfg)
+        let engine = Engine::from_config(&cfg);
+        // Fail-closed: правила ссылаются на geo-базы, которые не загрузились →
+        // geo-критерий никогда не совпал бы и Block молча выродился бы в пропуск.
+        // Не запускаем такой набор правил.
+        let missing = engine.missing_geo_refs();
+        if !missing.is_empty() {
+            return Err(format!(
+                "geo-базы не загружены для части правил:\n  {}\n\
+                 проверьте geo.geosite_path / geo.geoip_path в конфиге ({})",
+                missing.join("\n  "),
+                config_path().display()
+            )
+            .into());
+        }
+        engine
     };
 
     let listener = TcpListener::bind(&listen).await?;

@@ -88,16 +88,17 @@ fn parse_geoip(bytes: &[u8]) -> Result<(String, Vec<IpCidr>), GeoError> {
     Ok((code, cidrs))
 }
 
-/// Разбирает одно сообщение `CIDR` → подсеть (None — если адрес некорректной длины).
+/// Разбирает одно сообщение `CIDR` → подсеть (None — если запись некорректна:
+/// неверная длина IP, отсутствующий или выходящий за ширину семейства префикс).
 fn parse_cidr(bytes: &[u8]) -> Result<Option<IpCidr>, GeoError> {
     let mut ip_bytes: Option<Vec<u8>> = None;
-    let mut prefix: u64 = 0;
+    let mut prefix: Option<u64> = None;
     let mut r = Reader::new(bytes);
     while !r.eof() {
         let (field, wire) = r.read_tag()?;
         match (field, wire) {
             (1, WIRE_LEN) => ip_bytes = Some(r.read_bytes()?.to_vec()),
-            (2, WIRE_VARINT) => prefix = r.read_varint()?,
+            (2, WIRE_VARINT) => prefix = Some(r.read_varint()?),
             _ => r.skip(wire)?,
         }
     }
@@ -111,7 +112,15 @@ fn parse_cidr(bytes: &[u8]) -> Result<Option<IpCidr>, GeoError> {
         // некорректная или отсутствующая длина — пропускаем запись, не ломая базу
         _ => return Ok(None),
     };
-    Ok(IpCidr::new(ip, prefix as u8).ok())
+    // Префикс обязателен и должен укладываться в ширину адреса. Проверяем
+    // НЕУСЕЧЁННОЕ u64 ДО приведения: иначе `prefix as u8` превратил бы, например,
+    // 256 → 0 → ложный /0 (catch-all на всё семейство). Битая запись → пропуск.
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    let prefix = match prefix {
+        Some(p) if p <= max => p as u8,
+        _ => return Ok(None),
+    };
+    Ok(IpCidr::new(ip, prefix).ok())
 }
 
 #[cfg(test)]
@@ -155,6 +164,40 @@ mod tests {
         let bad = geoip_entry("xx", &[cidr_msg(&[1, 2, 3, 4, 5], 24)]);
         let db = GeoIpDb::parse(&list(1, &[bad])).unwrap();
         assert_eq!(db.country("xx").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn skips_bad_prefix() {
+        // prefix=256 (как u8 был бы 0 → ложный /0), prefix=33 для v4 (вне ширины),
+        // и валидный — должен остаться только валидный, без catch-all.
+        let entry = geoip_entry(
+            "yy",
+            &[
+                cidr_msg(&[1, 1, 1, 0], 256), // переполнение → пропуск (не /0!)
+                cidr_msg(&[2, 2, 2, 0], 33),  // вне ширины v4 → пропуск
+                cidr_msg(&[3, 3, 3, 0], 24),  // ок
+            ],
+        );
+        let db = GeoIpDb::parse(&list(1, &[entry])).unwrap();
+        assert_eq!(
+            db.country("yy").unwrap().len(),
+            1,
+            "остаётся только валидный CIDR"
+        );
+        // НЕ catch-all: посторонний адрес не матчится.
+        assert!(!db.matches("yy", "8.8.8.8".parse().unwrap()));
+        assert!(db.matches("yy", "3.3.3.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn skips_cidr_without_prefix() {
+        // Корректный IP, но prefix отсутствует → запись пропускается (не /0).
+        let mut cidr = Vec::new(); // CIDR{ ip=[5,5,5,0] } без поля prefix
+        super::super::protobuf::tests_support::pb_len(&mut cidr, 1, &[5, 5, 5, 0]);
+        let entry = geoip_entry("zz", &[cidr]);
+        let db = GeoIpDb::parse(&list(1, &[entry])).unwrap();
+        assert_eq!(db.country("zz").unwrap().len(), 0);
+        assert!(!db.matches("zz", "5.5.5.5".parse().unwrap()));
     }
 
     #[test]

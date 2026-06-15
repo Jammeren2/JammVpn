@@ -49,10 +49,12 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Читает тег поля: `(номер_поля, wire_type)`.
-    pub fn read_tag(&mut self) -> Result<(u32, u8), GeoError> {
+    /// Читает тег поля: `(номер_поля, wire_type)`. Номер поля — `u64` без
+    /// усечения, чтобы подделанный тег с большим номером не совпал по младшим
+    /// битам с обрабатываемым полем.
+    pub fn read_tag(&mut self) -> Result<(u64, u8), GeoError> {
         let key = self.read_varint()?;
-        let field = (key >> 3) as u32;
+        let field = key >> 3;
         let wire = (key & 0x07) as u8;
         if field == 0 {
             return Err(GeoError::Malformed("нулевой номер поля"));
@@ -133,10 +135,15 @@ pub mod tests_support {
         put_varint(out, v);
     }
 
-    fn field_bytes(out: &mut Vec<u8>, field: u32, data: &[u8]) {
+    /// Кодирует length-delimited поле (доступно тестам других модулей).
+    pub fn pb_len(out: &mut Vec<u8>, field: u32, data: &[u8]) {
         put_varint(out, tag(field, WIRE_LEN));
         put_varint(out, data.len() as u64);
         out.extend_from_slice(data);
+    }
+
+    fn field_bytes(out: &mut Vec<u8>, field: u32, data: &[u8]) {
+        pb_len(out, field, data);
     }
 
     /// `Domain { type, value }`.
@@ -228,6 +235,18 @@ mod tests {
         let (f, _) = r.read_tag().unwrap();
         assert_eq!(f, 2);
         assert_eq!(r.read_string().unwrap(), "ok");
+    }
+
+    #[test]
+    fn large_field_number_not_truncated() {
+        // Номер поля 2^32+2 не должен усечься до 2 (иначе спутался бы с полем 2).
+        let big = (1u64 << 32) + 2;
+        let mut b = Vec::new();
+        put_varint(&mut b, (big << 3) | u64::from(WIRE_VARINT));
+        put_varint(&mut b, 7);
+        let mut r = Reader::new(&b);
+        let (field, _) = r.read_tag().unwrap();
+        assert_eq!(field, big);
     }
 
     #[test]

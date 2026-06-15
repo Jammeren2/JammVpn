@@ -86,6 +86,16 @@ pub struct DnsConfig {
     pub fakeip: FakeIpConfig,
 }
 
+/// Пути к базам правил geosite/geoip (форматы v2ray/xray `.dat`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeoConfig {
+    /// Путь к `geosite.dat` (доменные категории для правил `geosite:*`).
+    pub geosite_path: Option<String>,
+    /// Путь к `geoip.dat` (страновые IP-диапазоны для правил `geoip:*`).
+    pub geoip_path: Option<String>,
+}
+
 /// Корневой конфиг приложения.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -102,6 +112,8 @@ pub struct AppConfig {
     pub settings: Settings,
     /// Конфигурация DNS (резолв для маршрутизации + FakeIP).
     pub dns: DnsConfig,
+    /// Пути к базам geosite/geoip.
+    pub geo: GeoConfig,
 }
 
 /// Ошибка загрузки/сохранения конфига.
