@@ -18,3 +18,5 @@ pub mod wfp;
 
 #[cfg(windows)]
 pub use dpapi::DpapiStore;
+#[cfg(windows)]
+pub use wfp::WfpDriverController;
