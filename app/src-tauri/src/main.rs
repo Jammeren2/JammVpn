@@ -5,7 +5,9 @@
 
 use jammvpn_cli as ctl;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Manager, State, WindowEvent};
 
 /// Состояние приложения: запущенный локальный прокси (или его отсутствие).
 #[derive(Default)]
@@ -70,9 +72,78 @@ fn proxy_status(state: State<'_, ProxyState>) -> Option<String> {
         .map(|p| p.addr().to_string())
 }
 
+/// Удалить узел по имени. `true` — удалён, `false` — не найден.
+#[tauri::command]
+fn remove_node(name: String) -> Result<bool, String> {
+    ctl::remove_node(&name)
+}
+
+/// Текущие настройки маршрутизации (для панели «Настройки»).
+#[tauri::command]
+fn get_settings() -> ctl::SettingsInfo {
+    ctl::get_settings()
+}
+
+/// Сохранить настройки маршрутизации.
+#[tauri::command]
+fn set_settings(default_to_proxy: bool, default_proxy: Option<String>) -> Result<(), String> {
+    ctl::set_settings(default_to_proxy, default_proxy)
+}
+
+/// Показать главное окно и вывести его на передний план.
+fn show_main(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
+/// Собрать иконку в системном трее: меню «Показать / Выход», клик по иконке —
+/// показать окно. Закрытие окна прячет его в трей (`prevent_close`).
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Показать", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+
+    TrayIconBuilder::new()
+        .icon(app.default_window_icon().unwrap().clone())
+        .tooltip("JammVPN")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_main(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(ProxyState::default())
+        .setup(|app| {
+            setup_tray(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Крестик окна прячет в трей вместо завершения процесса.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_nodes,
             config_path,
@@ -82,6 +153,9 @@ fn main() {
             proxy_start,
             proxy_stop,
             proxy_status,
+            remove_node,
+            get_settings,
+            set_settings,
         ])
         .run(tauri::generate_context!())
         .expect("ошибка запуска приложения Tauri");

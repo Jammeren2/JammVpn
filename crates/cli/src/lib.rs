@@ -42,6 +42,15 @@ pub struct SubUpdate {
     pub error: Option<String>,
 }
 
+/// Настройки маршрутизации (для UI).
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsInfo {
+    /// Трафик без совпавшего правила: `true` — в прокси, иначе — напрямую.
+    pub default_to_proxy: bool,
+    /// Узел по умолчанию (для `Proxy(None)` и default-прокси).
+    pub default_proxy: Option<String>,
+}
+
 /// Путь к конфигу: `%APPDATA%/jammvpn/config.json` (или `$HOME/.config/...`).
 pub fn config_path() -> PathBuf {
     let base = std::env::var_os("APPDATA")
@@ -184,6 +193,49 @@ pub async fn update_subscriptions() -> Result<Vec<SubUpdate>, String> {
     Ok(out)
 }
 
+/// Удаляет узел по имени из конфига (чистая логика, для тестов): возвращает,
+/// был ли он. Если удалили узел, назначенный default-прокси, — сбрасывает его.
+fn apply_remove(cfg: &mut AppConfig, name: &str) -> bool {
+    let before = cfg.servers.len();
+    cfg.servers.retain(|s| s.name != name);
+    let removed = cfg.servers.len() != before;
+    if removed && cfg.settings.default_proxy.as_deref() == Some(name) {
+        cfg.settings.default_proxy = None;
+    }
+    removed
+}
+
+/// Удаляет узел по имени (с сохранением конфига). `Ok(false)` — узла не было.
+pub fn remove_node(name: &str) -> Result<bool, String> {
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    let removed = apply_remove(&mut cfg, name);
+    if removed {
+        save_config(&path, &cfg, store.as_ref())?;
+    }
+    Ok(removed)
+}
+
+/// Текущие настройки маршрутизации.
+pub fn get_settings() -> SettingsInfo {
+    let cfg = load();
+    SettingsInfo {
+        default_to_proxy: cfg.settings.default_to_proxy,
+        default_proxy: cfg.settings.default_proxy.clone(),
+    }
+}
+
+/// Сохраняет настройки маршрутизации.
+pub fn set_settings(default_to_proxy: bool, default_proxy: Option<String>) -> Result<(), String> {
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    cfg.settings.default_to_proxy = default_to_proxy;
+    cfg.settings.default_proxy = default_proxy.filter(|s| !s.is_empty());
+    save_config(&path, &cfg, store.as_ref())
+}
+
 /// Строит движок для запуска прокси: `server` — весь трафик через узел, иначе —
 /// маршрутизация по правилам конфига (с fail-closed-проверкой geo-баз).
 pub fn build_engine(cfg: &AppConfig, server: Option<&str>) -> Result<Engine, String> {
@@ -283,6 +335,26 @@ mod tests {
             Some("11111111-2222-3333-4444-555555555555")
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_remove_node() {
+        let mut cfg = AppConfig::default();
+        cfg.servers
+            .push(parse_link("ss://YWVzLTI1Ni1nY206cGFzcw==@1.2.3.4:8388#A").unwrap());
+        cfg.servers
+            .push(parse_link("ss://YWVzLTI1Ni1nY206cGFzcw==@5.6.7.8:8388#B").unwrap());
+        cfg.settings.default_proxy = Some("B".to_string());
+
+        // удаление несуществующего — false, ничего не меняет.
+        assert!(!apply_remove(&mut cfg, "нет"));
+        assert_eq!(cfg.servers.len(), 2);
+
+        // удаление узла-default — сбрасывает default_proxy.
+        assert!(apply_remove(&mut cfg, "B"));
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.servers[0].name, "A");
+        assert_eq!(cfg.settings.default_proxy, None);
     }
 
     #[test]

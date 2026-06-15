@@ -20,25 +20,68 @@ async function refreshNodes() {
   const body = $("nodes-body");
   body.innerHTML = "";
   const sel = $("server");
-  // сохраняем выбранное значение
+  const dsel = $("default-proxy");
+  // сохраняем выбранные значения
   const prev = sel.value;
+  const prevDefault = dsel ? dsel.value : "";
   sel.innerHTML = '<option value="">— по правилам конфига —</option>';
+  if (dsel) dsel.innerHTML = '<option value="">— первый доступный —</option>';
   for (const [i, n] of nodes.entries()) {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${i + 1}</td><td>${esc(n.name)}</td><td>${esc(
       n.protocol
     )}</td><td>${esc(n.address)}:${n.port}</td><td class="lat" data-name="${esc(
       n.name
-    )}">—</td>`;
+    )}">—</td><td class="del"><button class="x" title="Удалить" data-name="${esc(
+      n.name
+    )}">✕</button></td>`;
     body.appendChild(tr);
 
     const opt = document.createElement("option");
     opt.value = n.name;
     opt.textContent = n.name;
     sel.appendChild(opt);
+    if (dsel) dsel.appendChild(opt.cloneNode(true));
   }
   sel.value = prev;
+  if (dsel) dsel.value = prevDefault;
+  for (const btn of body.querySelectorAll("button.x")) {
+    btn.addEventListener("click", () => removeNode(btn.dataset.name));
+  }
   $("nodes-empty").style.display = nodes.length ? "none" : "block";
+}
+
+async function removeNode(name) {
+  if (!confirm(`Удалить узел «${name}»?`)) return;
+  try {
+    await invoke("remove_node", { name });
+    await refreshNodes();
+    await loadSettings();
+  } catch (e) {
+    $("settings-msg").textContent = "ошибка удаления: " + e;
+    $("settings-msg").className = "hint err";
+  }
+}
+
+async function loadSettings() {
+  const s = await invoke("get_settings");
+  $("default-to-proxy").checked = !!s.default_to_proxy;
+  $("default-proxy").value = s.default_proxy || "";
+}
+
+async function saveSettings() {
+  const msg = $("settings-msg");
+  try {
+    await invoke("set_settings", {
+      defaultToProxy: $("default-to-proxy").checked,
+      defaultProxy: $("default-proxy").value || null,
+    });
+    msg.textContent = "сохранено";
+    msg.className = "hint ok";
+  } catch (e) {
+    msg.textContent = "ошибка: " + e;
+    msg.className = "hint err";
+  }
 }
 
 async function testLatencies() {
@@ -129,12 +172,14 @@ async function init() {
   $("btn-test").addEventListener("click", testLatencies);
   $("btn-import").addEventListener("click", doImport);
   $("btn-update").addEventListener("click", updateSubs);
+  $("btn-save-settings").addEventListener("click", saveSettings);
   $("import-arg").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doImport();
   });
 
   $("config-path").textContent = await invoke("config_path");
   await refreshNodes();
+  await loadSettings();
   setStatus(await invoke("proxy_status"));
 }
 

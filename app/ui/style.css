@@ -157,6 +157,39 @@ th {
   color: var(--err);
 }
 
+td.del {
+  width: 1%;
+  text-align: center;
+}
+button.x {
+  padding: 2px 8px;
+  font-size: 13px;
+  line-height: 1;
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+}
+button.x:hover:not(:disabled) {
+  background: #3a2030;
+  border-color: var(--err);
+  color: var(--err);
+}
+
+label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+label.check input {
+  min-width: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
 .hint {
   margin: 8px 0 0;
   font-size: 12px;

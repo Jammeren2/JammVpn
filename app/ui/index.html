@@ -37,11 +37,30 @@
       </div>
       <table id="nodes">
         <thead>
-          <tr><th>#</th><th>Имя</th><th>Протокол</th><th>Адрес</th><th>Задержка</th></tr>
+          <tr><th>#</th><th>Имя</th><th>Протокол</th><th>Адрес</th><th>Задержка</th><th></th></tr>
         </thead>
         <tbody id="nodes-body"></tbody>
       </table>
       <p class="hint" id="nodes-empty">Узлов нет — импортируйте ссылку или подписку ниже.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Настройки маршрутизации</h2>
+      <div class="row">
+        <label class="check">
+          <input id="default-to-proxy" type="checkbox" />
+          Трафик без правил — через прокси (иначе напрямую)
+        </label>
+      </div>
+      <div class="row">
+        <label>Узел по умолчанию
+          <select id="default-proxy">
+            <option value="">— первый доступный —</option>
+          </select>
+        </label>
+        <button id="btn-save-settings">Сохранить</button>
+      </div>
+      <p class="hint" id="settings-msg"></p>
     </section>
 
     <section class="panel">
