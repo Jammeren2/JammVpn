@@ -11,6 +11,7 @@
 // dead_code (часть API ещё не подключена) и clippy (стиль апстрима). См. ATTRIBUTION.md.
 #[allow(dead_code, clippy::all)]
 mod buf_reader;
+pub mod dns;
 pub mod engine;
 pub mod from_profile;
 pub mod inbound;
@@ -25,6 +26,7 @@ pub mod subscription;
 #[allow(dead_code, clippy::all)]
 mod sync_adapter;
 pub mod target;
+mod tlsutil;
 pub mod trojan;
 pub mod tuic;
 pub mod urltest;

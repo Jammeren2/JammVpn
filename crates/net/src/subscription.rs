@@ -4,10 +4,10 @@
 //! Mozilla через `webpki-roots`), парсит его [`jammvpn_core::parse_subscription`]
 //! и вливает серверы в конфиг (по тегу подписки).
 
+use crate::tlsutil::verified_client_config;
 use jammvpn_core::{parse_subscription, AppConfig, ServerProfile, Subscription};
 use rustls::pki_types::ServerName;
 use std::io;
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -70,7 +70,7 @@ async fn fetch_inner(url: &str) -> io::Result<String> {
     match scheme {
         Scheme::Http => http_exchange(tcp, &host, &path).await,
         Scheme::Https => {
-            let connector = TlsConnector::from(tls_config());
+            let connector = TlsConnector::from(verified_client_config());
             let name = ServerName::try_from(host.clone())
                 .map_err(|_| io::Error::other("подписка: некорректный SNI"))?;
             let tls = connector.connect(name, tcp).await?;
@@ -155,25 +155,6 @@ fn dechunk(mut data: &[u8]) -> io::Result<Vec<u8>> {
         }
     }
     Ok(out)
-}
-
-/// Общий rustls-конфиг для HTTPS (aws-lc-rs + корни Mozilla), строится один раз.
-fn tls_config() -> Arc<rustls::ClientConfig> {
-    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let mut roots = rustls::RootCertStore::empty();
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .expect("протоколы по умолчанию")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-            Arc::new(config)
-        })
-        .clone()
 }
 
 /// Разбирает `http(s)://host[:port][/path]`.
