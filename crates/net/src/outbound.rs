@@ -165,6 +165,27 @@ impl Outbound {
                     rx: tokio::sync::Mutex::new(rx),
                 })
             }
+            Outbound::Trojan(cfg) => {
+                // UDP поверх потока Trojan (TCP/Reality): заголовок CMD=0x03, затем
+                // length-framed пакеты. Поток делим на чтение/запись.
+                let mut stream: BoxedStream = match &cfg.transport {
+                    Transport::Tcp => Box::new(TcpStream::connect(&cfg.server).await?),
+                    Transport::Reality(rt) => {
+                        let tcp = TcpStream::connect(&cfg.server).await?;
+                        Box::new(reality_connect(tcp, rt).await?)
+                    }
+                };
+                stream
+                    .write_all(&crate::trojan::encode_request_udp(&cfg.password, target))
+                    .await?;
+                stream.flush().await?;
+                let (read, write) = tokio::io::split(stream);
+                Ok(UdpSession::Trojan {
+                    read: tokio::sync::Mutex::new(read),
+                    write: tokio::sync::Mutex::new(write),
+                    target: target.clone(),
+                })
+            }
             _ => Err(proto_err("udp: данный исходящий пока не поддерживает UDP")),
         }
     }
@@ -188,6 +209,12 @@ pub enum UdpSession {
         assoc_id: u16,
         target: Target,
         rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    },
+    /// Через Trojan: length-framed UDP-пакеты поверх потока (TCP/Reality/TLS).
+    Trojan {
+        read: tokio::sync::Mutex<tokio::io::ReadHalf<BoxedStream>>,
+        write: tokio::sync::Mutex<tokio::io::WriteHalf<BoxedStream>>,
+        target: Target,
     },
 }
 
@@ -214,6 +241,12 @@ impl UdpSession {
                 ..
             } => {
                 manager.send(*assoc_id, target, payload).await?;
+            }
+            UdpSession::Trojan { write, target, .. } => {
+                let pkt = crate::trojan::encode_udp_packet(target, payload);
+                let mut w = write.lock().await;
+                w.write_all(&pkt).await?;
+                w.flush().await?;
             }
         }
         Ok(())
@@ -249,6 +282,11 @@ impl UdpSession {
                 .recv()
                 .await
                 .ok_or_else(|| proto_err("tuic udp: канал закрыт")),
+            UdpSession::Trojan { read, .. } => {
+                let mut r = read.lock().await;
+                let (_addr, payload) = crate::trojan::read_udp_packet(&mut *r).await?;
+                Ok(payload)
+            }
         }
     }
 

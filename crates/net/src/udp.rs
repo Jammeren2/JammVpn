@@ -440,6 +440,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn udp_associate_relays_through_trojan() {
+        use crate::outbound::{Outbound, Transport, TrojanConfig};
+
+        let echo = udp_echo().await;
+
+        // Mock Trojan-сервер (raw TCP): читает заголовок (CMD=0x03 UDP), затем
+        // length-framed пакеты — форвардит на цель и заворачивает ответ.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tj_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut hdr = [0u8; 58]; // 56 hash + CRLF
+                    if sock.read_exact(&mut hdr).await.is_err() {
+                        return;
+                    }
+                    if sock.read_u8().await.is_err() {
+                        return; // CMD
+                    }
+                    if crate::trojan::read_address(&mut sock).await.is_err() {
+                        return;
+                    }
+                    let mut crlf = [0u8; 2];
+                    if sock.read_exact(&mut crlf).await.is_err() {
+                        return;
+                    }
+                    // Форвардим каждый UDP-пакет на реальную цель, ответ — обратно.
+                    let fwd = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                    loop {
+                        let (t, payload) = match crate::trojan::read_udp_packet(&mut sock).await {
+                            Ok(v) => v,
+                            Err(_) => break,
+                        };
+                        if let Target::Socket(a) = t {
+                            let _ = fwd.send_to(&payload, a).await;
+                            let mut buf = [0u8; 2048];
+                            if let Ok((n, _)) = fwd.recv_from(&mut buf).await {
+                                let resp = crate::trojan::encode_udp_packet(&t, &buf[..n]);
+                                if sock.write_all(&resp).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        let engine = Arc::new(Engine::single_proxy(Outbound::Trojan(TrojanConfig {
+            server: tj_addr.to_string(),
+            password: "trojanpass".into(),
+            transport: Transport::Tcp,
+        })));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socks = listener.local_addr().unwrap();
+        tokio::spawn(serve_socks_routed(listener, engine));
+
+        let run = async {
+            let mut ctl = TcpStream::connect(socks).await.unwrap();
+            ctl.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+            let mut m = [0u8; 2];
+            ctl.read_exact(&mut m).await.unwrap();
+            ctl.write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            let mut rep = [0u8; 10];
+            ctl.read_exact(&mut rep).await.unwrap();
+            let relay = SocketAddr::from((
+                [rep[4], rep[5], rep[6], rep[7]],
+                u16::from_be_bytes([rep[8], rep[9]]),
+            ));
+            // DST = echo (IPv4 Socket — mock форвардит туда).
+            let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            cli.send_to(
+                &encode_udp_datagram(&Target::Socket(echo), b"via-trojan"),
+                relay,
+            )
+            .await
+            .unwrap();
+            let mut buf = [0u8; 2048];
+            let (n, _) = cli.recv_from(&mut buf).await.unwrap();
+            let (_, target, off) = parse_udp_datagram(&buf[..n]).unwrap();
+            assert_eq!(target, Target::Socket(echo));
+            assert_eq!(&buf[off..n], b"via-trojan");
+            drop(ctl);
+        };
+        timeout(Duration::from_secs(5), run)
+            .await
+            .expect("Trojan-UDP relay не уложился в таймаут");
+    }
+
+    #[tokio::test]
     async fn rejects_datagram_from_foreign_host() {
         // Датаграмма с IP, не совпадающим с управляющим соединением, игнорируется.
         // (control с 127.0.0.1; «чужой» источник эмулируем проверкой кода —
