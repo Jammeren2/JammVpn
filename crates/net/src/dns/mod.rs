@@ -283,6 +283,19 @@ mod tests {
         assert!(res.is_err());
     }
 
+    #[tokio::test]
+    #[ignore = "сеть: реальный резолв через 1.1.1.1:53"]
+    async fn live_resolve_cloudflare() {
+        let r = DnsResolver::new(DnsServer::Udp("1.1.1.1:53".parse().unwrap()));
+        let ips = r.resolve("one.one.one.one").await;
+        println!("resolve(one.one.one.one) = {ips:?}");
+        let ips = ips.expect("резолв должен вернуть адреса");
+        assert!(
+            ips.contains(&"1.1.1.1".parse().unwrap()),
+            "ожидали 1.1.1.1 среди {ips:?}"
+        );
+    }
+
     #[test]
     fn parse_doh_url() {
         assert_eq!(

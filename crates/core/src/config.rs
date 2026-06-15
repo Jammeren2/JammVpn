@@ -37,6 +37,55 @@ pub struct Settings {
     pub default_to_proxy: bool,
 }
 
+/// Описание DNS-сервера для движка (строки; `net` парсит в транспорт).
+///
+/// Резолв нужен движку, чтобы IP-CIDR правила (в т.ч. geoip) срабатывали и для
+/// доменных целей: домен резолвится в адрес перед проверкой диапазонов.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum DnsServerConfig {
+    /// Открытый UDP, `host:port` (обычно :53).
+    Udp { server: String },
+    /// DNS-over-TLS (RFC 7858): `host:port` (:853) + SNI.
+    Dot { server: String, sni: String },
+    /// DNS-over-HTTPS (RFC 8484): URL `https://host/dns-query`.
+    Doh { url: String },
+}
+
+/// Настройки FakeIP: подмена доменов синтетическими IP.
+///
+/// Позволяет маршрутизировать по домену там, где приложение само резолвит и
+/// подключается по IP (TUN-режим): DNS-сервер выдаёт поддельный IP из `range`,
+/// движок восстанавливает домен по нему и подключается по домену (без утечки DNS).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FakeIpConfig {
+    /// Включён ли режим.
+    pub enabled: bool,
+    /// Диапазон поддельных адресов (IPv4 CIDR).
+    pub range: String,
+}
+
+impl Default for FakeIpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            range: "198.18.0.0/15".to_string(),
+        }
+    }
+}
+
+/// Конфигурация DNS движка: серверы для резолва + FakeIP.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DnsConfig {
+    /// Серверы (по порядку; используется первый). Пусто → резолв в движке выключен
+    /// (поведение как раньше: только доменные правила и литеральные IP).
+    pub servers: Vec<DnsServerConfig>,
+    /// FakeIP.
+    pub fakeip: FakeIpConfig,
+}
+
 /// Корневой конфиг приложения.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -51,6 +100,8 @@ pub struct AppConfig {
     pub split: SplitConfig,
     /// Общие настройки.
     pub settings: Settings,
+    /// Конфигурация DNS (резолв для маршрутизации + FakeIP).
+    pub dns: DnsConfig,
 }
 
 /// Ошибка загрузки/сохранения конфига.

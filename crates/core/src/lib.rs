@@ -18,7 +18,9 @@ pub mod secret;
 pub mod split;
 pub mod util;
 
-pub use config::{AppConfig, ConfigError, Settings, Subscription};
+pub use config::{
+    AppConfig, ConfigError, DnsConfig, DnsServerConfig, FakeIpConfig, Settings, Subscription,
+};
 pub use error::ParseError;
 pub use json::JsonValue;
 pub use model::{ProtocolKind, ServerProfile};

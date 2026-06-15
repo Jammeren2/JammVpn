@@ -13,6 +13,7 @@
 mod buf_reader;
 pub mod dns;
 pub mod engine;
+pub mod fakeip;
 pub mod from_profile;
 pub mod inbound;
 pub mod outbound;
@@ -36,7 +37,8 @@ mod vision;
 pub mod vless;
 pub mod wireguard;
 
-pub use engine::{serve_socks_routed, Decision, Engine};
+pub use engine::{serve_socks_routed, Decision, Engine, Routed};
+pub use fakeip::FakeIp;
 pub use from_profile::{outbound_from_profile, ProfileError};
 pub use outbound::{
     HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, TrojanConfig, VlessConfig,

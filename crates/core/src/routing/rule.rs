@@ -73,6 +73,29 @@ impl Rule {
         }
         true
     }
+
+    /// Совпадает ли правило, **игнорируя** IP-критерий (домен/порт/процесс).
+    ///
+    /// Движок использует это для ленивого резолва: если у правила есть
+    /// `ip_cidrs`, цель — домен (IP ещё неизвестен), а всё прочее совпало, то
+    /// домен резолвится и адреса проверяются по `ip_cidrs` отдельно. Так IP-CIDR
+    /// (и geoip) правила срабатывают и для доменных целей, не резолвя там, где
+    /// решает доменное правило раньше по списку (без утечки DNS).
+    pub fn matches_sans_ip(&self, req: &RouteRequest) -> bool {
+        if !self.domains.is_empty() {
+            match req.domain {
+                Some(h) if self.domains.iter().any(|d| d.matches(h)) => {}
+                _ => return false,
+            }
+        }
+        if !self.processes.is_empty() && !self.processes.iter().any(|m| m.matches(req.app)) {
+            return false;
+        }
+        if !self.ports.is_empty() && !self.ports.contains(&req.port) {
+            return false;
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +159,24 @@ mod tests {
             ..Default::default()
         };
         assert!(rule.matches(&req(None, None, 1, &a)));
+    }
+
+    #[test]
+    fn matches_sans_ip_ignores_ip_criterion() {
+        let a = app();
+        // Правило: домен-суффикс + IP-CIDR. Полное matches требует и IP.
+        let rule = Rule {
+            domains: vec![DomainRule::Suffix("example.com".into())],
+            ip_cidrs: vec![IpCidr::parse("10.0.0.0/8").unwrap()],
+            action: RouteAction::Block,
+            ..Default::default()
+        };
+        // IP неизвестен: полное matches не срабатывает, sans_ip — да (домен совпал).
+        let r = req(Some("a.example.com"), None, 443, &a);
+        assert!(!rule.matches(&r));
+        assert!(rule.matches_sans_ip(&r));
+        // Чужой домен: sans_ip тоже false (различие не только в IP).
+        assert!(!rule.matches_sans_ip(&req(Some("other.net"), None, 443, &a)));
     }
 
     #[test]
