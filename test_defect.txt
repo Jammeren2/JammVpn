@@ -1,0 +1,58 @@
+# DEFECT ANALYSIS: Stream operations lack timeouts
+
+## Location
+File: C:\Users\my\Desktop\py\vpn\crates\net\src\tuic\tunnel.rs
+Lines 70-73 (and also 53-57 for Authenticate)
+
+## Code
+```rust
+pub(crate) async fn connect(&self, target: &Target) -> io::Result<BoxedStream> {
+    let (mut send, recv) = self.conn.open_bi().await.map_err(io_other)?;  // LINE 70
+    send.write_all(&proto::encode_connect(target)?)
+        .await
+        .map_err(io_other)?;  // LINES 71-73
+    Ok(Box::new(TuicStream::new(send, recv)))
+}
+```
+
+## Threat Scenario
+1. Client initiates QUIC connection to TUIC server (handshake succeeds)
+2. Server accepts connection but employs a malicious strategy:
+   - Accept new bidi-streams but never read from them
+   - Limit initial flow control window to 0
+   - Or: Never grant more flow control credit
+3. Result:
+   - open_bi() may succeed (creates stream object)
+   - write_all() blocks forever waiting for flow control grant
+   - Client thread hangs indefinitely
+4. Since tunnel is shared (Arc), single malicious server freezes ALL clients
+
+## Root Cause
+Quinn's stream operations provide NO per-operation timeout:
+- open_bi().await - blocks if stream_id limit reached
+- write_all().await - blocks if flow_control_window is exhausted
+- Both only respect connection-level idle_timeout (default ~15-30s in QUIC)
+- But idle_timeout resets on ANY packet exchange, including keepalives
+
+## Current Mitigations (ABSENT)
+- NO tokio::time::timeout() wrapping in tunnel.rs lines 70-73
+- NO tokio::time::timeout() wrapping in tunnel.rs lines 53-57 (Authenticate)
+- Connection has NO explicit stream_idle_timeout
+
+## Severity
+HIGH: Single hostile server can DoS all clients sharing tunnel
+(violates QUIC fairness - other streams should not be affected)
+
+## Suggested Fix
+```rust
+let (mut send, recv) = tokio::time::timeout(
+    Duration::from_secs(10),
+    self.conn.open_bi()
+).await
+.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tuic: open_bi timeout"))?
+.map_err(io_other)?;
+
+send.write_all(&proto::encode_connect(target)?)
+    .await
+    .map_err(io_other)?;
+```
