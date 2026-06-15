@@ -59,6 +59,12 @@ static UINT16 JammU16(JAMM_READER* r)  /* little-endian, как push_u16 */
     return b ? (UINT16)(b[0] | ((UINT16)b[1] << 8)) : 0;
 }
 
+static UINT32 JammU32(JAMM_READER* r)  /* little-endian, как push_u32 */
+{
+    const UCHAR* b = JammTake(r, 4);
+    return b ? ((UINT32)b[0] | ((UINT32)b[1] << 8) | ((UINT32)b[2] << 16) | ((UINT32)b[3] << 24)) : 0;
+}
+
 /* Читает JAMM_IP: family(1) + 16 байт (v4 — в первых 4). */
 static JAMM_IP JammReadIp(JAMM_READER* r)
 {
@@ -133,12 +139,13 @@ NTSTATUS JammParseConfig(_In_reads_bytes_(len) const UCHAR* buf, _In_ SIZE_T len
     const UCHAR* magic = JammTake(&r, 4);
     if (!magic || magic[0] != 'J' || magic[1] != 'V' || magic[2] != 'P' || magic[3] != '1')
         return STATUS_INVALID_PARAMETER;
-    if (JammU16(&r) != 1)            /* версия формата */
+    if (JammU16(&r) != 2)            /* версия формата (ipc.rs VERSION) */
         return STATUS_REVISION_MISMATCH;
 
     outCfg->mode = JammU8(&r);
     outCfg->killSwitch = JammU8(&r) != 0;
     outCfg->redirectPort = JammU16(&r);
+    outCfg->redirectPid = JammU32(&r);
 
     /* приложения */
     UINT16 nApps = JammU16(&r);
@@ -375,7 +382,7 @@ static void NTAPI JammClassify(
         return;
 
     /* Не перенаправлять повторно собственный уже-перенаправленный сокет. */
-    if (FWPS_IS_METADATA_FIELD_PRESENT(inMetaValues, FWPS_METADATA_FIELD_REDIRECT_RECORDS)) {
+    if (FWPS_IS_METADATA_FIELD_PRESENT(inMetaValues, FWPS_METADATA_FIELD_REDIRECT_RECORD_HANDLE)) {
         FWPS_CONNECTION_REDIRECT_STATE st =
             FwpsQueryConnectionRedirectState0(inMetaValues->redirectRecords, gRedirectHandle, NULL);
         if (st == FWPS_CONNECTION_REDIRECTED_BY_SELF ||
@@ -389,7 +396,7 @@ static void NTAPI JammClassify(
     UNICODE_STRING appId = {0};
     UINT16 appIdField = isV4 ? FWPS_FIELD_ALE_CONNECT_REDIRECT_V4_ALE_APP_ID
                              : FWPS_FIELD_ALE_CONNECT_REDIRECT_V6_ALE_APP_ID;
-    if (FWPS_IS_FIELD_PRESENT(inFixedValues, appIdField)) {
+    if (inFixedValues->incomingValue[appIdField].value.type == FWP_BYTE_BLOB_TYPE) {
         FWP_BYTE_BLOB* blob = inFixedValues->incomingValue[appIdField].value.byteBlob;
         if (blob && blob->data) {
             appId.Buffer = (PWCH)blob->data;
@@ -413,7 +420,6 @@ static void NTAPI JammClassify(
     JammBuildDst(isV4, inFixedValues, &remote, &portHost, ctx);
 
     JAMM_DECISION decision;
-    FWP_ACTION_TYPE action = FWP_ACTION_PERMIT;
     UINT16 redirectPort;
     BOOLEAN killSwitch;
 
@@ -437,11 +443,21 @@ static void NTAPI JammClassify(
     }
 
     /* === ветка TUNNEL: connect-redirect на 127.0.0.1:redirectPort === */
+    /* Для записи решения на слое нужен classify-handle. */
+    UINT64 classifyHandle = 0;
+    NTSTATUS status = FwpsAcquireClassifyHandle0((void*)classifyContext, 0, &classifyHandle);
+    if (!NT_SUCCESS(status)) {
+        classifyOut->actionType = killSwitch ? FWP_ACTION_BLOCK : FWP_ACTION_PERMIT;
+        if (killSwitch) classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
+        return;
+    }
+
     void* writable = NULL;
-    NTSTATUS status = FwpsAcquireWritableLayerDataPointer0(
-        classifyContext, filter->filterId, 0, &writable, classifyOut);
+    status = FwpsAcquireWritableLayerDataPointer0(
+        classifyHandle, filter->filterId, 0, &writable, classifyOut);
     if (!NT_SUCCESS(status) || writable == NULL) {
         /* Не смогли перенаправить: kill-switch -> BLOCK, иначе пропускаем. */
+        FwpsReleaseClassifyHandle0(classifyHandle);
         classifyOut->actionType = killSwitch ? FWP_ACTION_BLOCK : FWP_ACTION_PERMIT;
         if (killSwitch) classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
         return;
@@ -449,8 +465,7 @@ static void NTAPI JammClassify(
 
     FWPS_CONNECT_REQUEST0* cr = (FWPS_CONNECT_REQUEST0*)writable;
 
-    /* Переписываем удалённый адрес на loopback:redirectPort. СВЕРИТЬ имена полей
-     * FWPS_CONNECT_REQUEST0 с WDK (remoteAddressAndPort / localRedirect*). */
+    /* Переписываем удалённый адрес на loopback:redirectPort. */
     if (isV4) {
         SOCKADDR_IN* sin = (SOCKADDR_IN*)&cr->remoteAddressAndPort;
         sin->sin_family = AF_INET;
@@ -463,6 +478,11 @@ static void NTAPI JammClassify(
         sin6->sin6_addr.u.Byte[15] = 1;                                /* ::1 */
         sin6->sin6_port = RtlUshortByteSwap(redirectPort);
     }
+
+    /* PID процесса, принимающего перенаправленное на localhost соединение
+     * (требование connect-redirect). TODO: пробросить реальный PID прокси через
+     * IOCTL-конфиг; сейчас прокси и драйвер-клиент — один процесс jammvpn-app. */
+    cr->localRedirectTargetPID = gConfig.redirectPid;
 
     /* redirect-context: original-dst (19 байт), который прокси прочитает через
      * SIO_QUERY_WFP_CONNECTION_REDIRECT_CONTEXT. WFP НЕ делает глубокую копию —
@@ -480,8 +500,9 @@ static void NTAPI JammClassify(
         cr->localRedirectContextSize = JAMM_REDIRECT_CONTEXT_LEN;
     }
 
-    FwpsApplyModifiedLayerData0(classifyContext, writable, 0);
-    /* ctxBuf НЕ освобождаем — см. комментарий выше. */
+    FwpsApplyModifiedLayerData0(classifyHandle, writable, 0);
+    FwpsReleaseClassifyHandle0(classifyHandle);
+    /* ctxBuf НЕ освобождаем — владение передано WFP. */
 
     classifyOut->actionType = FWP_ACTION_PERMIT;
     classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;

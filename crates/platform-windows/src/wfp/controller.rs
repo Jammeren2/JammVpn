@@ -107,7 +107,9 @@ impl WfpDriverController {
 
 impl SplitController for WfpDriverController {
     fn apply(&mut self, config: &SplitConfig) -> Result<(), SplitError> {
-        let dc = DriverConfig::from_split_config(config, self.redirect_port)
+        // PID процесса, принимающего перенаправленные соединения — это сам
+        // процесс с прокси (где работает WfpDriverController).
+        let dc = DriverConfig::from_split_config(config, self.redirect_port, std::process::id())
             .map_err(|e| SplitError::Backend(e.to_string()))?;
         let bytes = encode_config(&dc);
         let handle = Self::open_device()?;

@@ -38,7 +38,7 @@ pub const IOCTL_JAMM_GET_STATS: u32 =
     ctl_code(FILE_DEVICE_NETWORK, 0x802, METHOD_BUFFERED, FILE_READ_DATA);
 
 const MAGIC: [u8; 4] = *b"JVP1";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 
 /// Ошибка кодирования/декодирования контракта.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +87,9 @@ pub struct DriverConfig {
     pub kill_switch: bool,
     /// Локальный порт прокси, куда драйвер перенаправляет выбранные сокеты.
     pub redirect_port: u16,
+    /// PID процесса-прокси, принимающего перенаправленные соединения
+    /// (`localRedirectTargetPID` для connect-redirect на localhost).
+    pub redirect_pid: u32,
     /// Список приложений.
     pub apps: Vec<AppEntry>,
     /// Диапазоны «всегда напрямую» — LAN/системные (`SPL-23`).
@@ -100,8 +103,12 @@ pub struct DriverConfig {
 }
 
 impl DriverConfig {
-    /// Строит конфиг драйвера из [`SplitConfig`] и порта локального прокси.
-    pub fn from_split_config(cfg: &SplitConfig, redirect_port: u16) -> Result<Self, IpcError> {
+    /// Строит конфиг драйвера из [`SplitConfig`], порта и PID локального прокси.
+    pub fn from_split_config(
+        cfg: &SplitConfig,
+        redirect_port: u16,
+        redirect_pid: u32,
+    ) -> Result<Self, IpcError> {
         let apps = cfg
             .apps
             .iter()
@@ -120,6 +127,7 @@ impl DriverConfig {
             mode: cfg.mode,
             kill_switch: cfg.kill_switch,
             redirect_port,
+            redirect_pid,
             apps,
             bypass_cidrs: parse_cidrs(ALWAYS_BYPASS_CIDRS.iter().copied())?,
             force_direct: parse_cidrs(cfg.force_direct_cidrs.iter().map(String::as_str))?,
@@ -200,6 +208,7 @@ pub fn encode_config(cfg: &DriverConfig) -> Vec<u8> {
     });
     w.push(u8::from(cfg.kill_switch));
     push_u16(&mut w, cfg.redirect_port);
+    push_u32(&mut w, cfg.redirect_pid);
     push_u16(&mut w, cfg.apps.len() as u16);
     for a in &cfg.apps {
         w.push(u8::from(a.by_name));
@@ -232,6 +241,7 @@ pub fn decode_config(buf: &[u8]) -> Result<DriverConfig, IpcError> {
     };
     let kill_switch = r.u8()? != 0;
     let redirect_port = r.u16()?;
+    let redirect_pid = r.u32()?;
     let n_apps = r.u16()? as usize;
     let mut apps = Vec::with_capacity(n_apps);
     for _ in 0..n_apps {
@@ -251,6 +261,7 @@ pub fn decode_config(buf: &[u8]) -> Result<DriverConfig, IpcError> {
         mode,
         kill_switch,
         redirect_port,
+        redirect_pid,
         apps,
         bypass_cidrs,
         force_direct,
@@ -260,6 +271,10 @@ pub fn decode_config(buf: &[u8]) -> Result<DriverConfig, IpcError> {
 }
 
 fn push_u16(w: &mut Vec<u8>, v: u16) {
+    w.extend_from_slice(&v.to_le_bytes());
+}
+
+fn push_u32(w: &mut Vec<u8>, v: u32) {
     w.extend_from_slice(&v.to_le_bytes());
 }
 
@@ -319,6 +334,11 @@ impl<'a> Reader<'a> {
         Ok(u16::from_le_bytes([b[0], b[1]]))
     }
 
+    fn u32(&mut self) -> Result<u32, IpcError> {
+        let b = self.take(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
     fn string(&mut self) -> Result<String, IpcError> {
         let n = self.u16()? as usize;
         let b = self.take(n)?;
@@ -364,6 +384,7 @@ mod tests {
             mode: SplitMode::Exclusive,
             kill_switch: true,
             redirect_port: 39001,
+            redirect_pid: 4242,
             apps: vec![
                 AppEntry {
                     by_name: false,
@@ -405,10 +426,11 @@ mod tests {
             server_endpoints: vec!["198.51.100.7:443".into()],
             ..Default::default()
         };
-        let dc = DriverConfig::from_split_config(&split, 39001).unwrap();
+        let dc = DriverConfig::from_split_config(&split, 39001, 12345).unwrap();
         assert_eq!(dc.mode, SplitMode::Inclusive);
         assert!(dc.kill_switch);
         assert_eq!(dc.redirect_port, 39001);
+        assert_eq!(dc.redirect_pid, 12345);
         assert_eq!(dc.apps.len(), 2);
         assert!(!dc.apps[0].by_name);
         assert!(dc.apps[1].by_name);

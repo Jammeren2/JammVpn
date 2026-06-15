@@ -30,6 +30,10 @@ dist-ssr/
 *.zip
 /release/
 /out/
+# Артефакты сборки kernel-драйвера (cl/link).
+/wfp-driver/build/
+*.sys
+*.obj
 
 # ─── Секреты и пользовательские конфиги ────────────────────────
 .env

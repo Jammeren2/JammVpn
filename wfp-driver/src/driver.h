@@ -12,9 +12,12 @@
 #pragma once
 
 #include <ntddk.h>
+/* INITGUID до WFP-заголовков: DEFINE_GUID (FWPM_LAYER_* и JAMM_*_GUID ниже)
+ * создаёт реальные определения GUID в этом объектном файле, а не только
+ * объявления (иначе — неразрешённые внешние символы при линковке). */
+#include <initguid.h>
 #include <fwpsk.h>
 #include <fwpmk.h>
-#include <guiddef.h>
 
 #define JAMM_DEVICE_NAME   L"\\Device\\JammVpnSplit"
 #define JAMM_SYMLINK_NAME  L"\\DosDevices\\JammVpnSplit"
@@ -69,6 +72,7 @@ typedef struct _JAMM_CONFIG {
     UINT8      mode;          /* 0 inclusive, 1 exclusive */
     BOOLEAN    killSwitch;
     UINT16     redirectPort;  /* хостовый порядок байт */
+    UINT32     redirectPid;   /* PID процесса-прокси (localRedirectTargetPID) */
 
     UINT16     appCount;
     JAMM_APP*  apps;
