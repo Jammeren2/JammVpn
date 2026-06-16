@@ -28,7 +28,8 @@ pub use geo::{GeoIpDb, GeoSiteDb};
 pub use json::JsonValue;
 pub use model::{ProtocolKind, ServerProfile};
 pub use parse::{
-    parse_awg_conf, parse_link, parse_singbox_config, parse_subscription, parse_xray_config,
+    parse_awg_conf, parse_clash, parse_link, parse_singbox_config, parse_subscription,
+    parse_xray_config,
 };
 pub use routing::{evaluate, RouteAction, RouteRequest, Rule};
 pub use secret::{NoopStore, SecretError, SecretStore};

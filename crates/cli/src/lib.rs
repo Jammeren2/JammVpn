@@ -11,8 +11,8 @@ use jammvpn_core::model::ServerProfile;
 use jammvpn_core::routing::DomainRule;
 use jammvpn_core::split::{AppMatcher, IpCidr};
 use jammvpn_core::{
-    parse_awg_conf, parse_link, parse_singbox_config, parse_xray_config, AppConfig, RouteAction,
-    Rule, SecretStore, SplitConfig, SplitMode, Subscription,
+    parse_awg_conf, parse_clash, parse_link, parse_singbox_config, parse_xray_config, AppConfig,
+    RouteAction, Rule, SecretStore, SplitConfig, SplitMode, Subscription,
 };
 use jammvpn_net::{outbound_from_profile, serve_socks_routed, subscription, urltest, Engine};
 use serde::{Deserialize, Serialize};
@@ -206,6 +206,10 @@ fn parse_any_config(text: &str) -> (&'static str, Vec<Result<ServerProfile, Pars
     // AmneziaWG / WireGuard .conf.
     if text.contains("[Interface]") {
         return ("AmneziaWG .conf", vec![parse_awg_conf(text)]);
+    }
+    // Clash / Clash.Meta YAML (секция proxies:).
+    if text.contains("proxies:") {
+        return ("Clash YAML", parse_clash(text));
     }
     // Иначе — ссылки построчно (поддерживает вставку нескольких ссылок).
     let links = text
@@ -1081,6 +1085,13 @@ mod tests {
         // JSON — определяется по ведущей `{`.
         let (fmt, _) = parse_any_config("{ \"outbounds\": [] }");
         assert!(fmt == "JSON" || fmt == "sing-box JSON" || fmt == "Xray JSON");
+
+        // Clash YAML — определяется по секции proxies:.
+        let (fmt, r) = parse_any_config(
+            "proxies:\n  - {name: a, type: ss, server: s.com, port: 8388, cipher: aes-256-gcm, password: p}\n",
+        );
+        assert_eq!(fmt, "Clash YAML");
+        assert_eq!(r.iter().filter(|x| x.is_ok()).count(), 1);
     }
 
     #[test]
