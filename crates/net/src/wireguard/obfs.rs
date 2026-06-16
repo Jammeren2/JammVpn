@@ -14,7 +14,38 @@
 //! требует интероп-проверки против живого сервера. См. план (awg_transform).
 
 use super::config::AwgObfuscation;
+use blake2::digest::{consts::U16, KeyInit, Mac};
+use blake2::{Blake2s256, Blake2sMac, Digest};
 use rand::Rng;
+
+const LABEL_MAC1: &[u8] = b"mac1----";
+
+/// Ключ MAC1 = Blake2s-256(`mac1----` || статический публичный ключ получателя).
+fn mac1_key(receiver_pub: &[u8; 32]) -> [u8; 32] {
+    let mut h = Blake2s256::new();
+    Digest::update(&mut h, LABEL_MAC1);
+    Digest::update(&mut h, receiver_pub);
+    let mut k = [0u8; 32];
+    k.copy_from_slice(&Digest::finalize(h));
+    k
+}
+
+/// Пересчитывает MAC1 в handshake-пакете (INIT 148 / RESP 92) под ключ
+/// получателя: keyed-Blake2s (16 байт) над `msg[..len-32]`. Нужно после подмены
+/// типа на H-заголовок — иначе MAC1 (его считал boringtun над каноническим
+/// типом) не сойдётся на стороне-получателе.
+fn fix_mac1(msg: &mut [u8], receiver_pub: &[u8; 32]) {
+    let len = msg.len();
+    if len != LEN_INIT && len != LEN_RESP {
+        return;
+    }
+    let off = len - 32; // [..off] | mac1(16) | mac2(16)
+    let key = mac1_key(receiver_pub);
+    let mut mac = <Blake2sMac<U16> as KeyInit>::new_from_slice(&key).expect("blake2s key len");
+    Mac::update(&mut mac, &msg[..off]);
+    let tag = Mac::finalize(mac).into_bytes();
+    msg[off..off + 16].copy_from_slice(&tag);
+}
 
 // Канонические типы WG-сообщений.
 const T_INIT: u32 = 1;
@@ -34,13 +65,22 @@ const DATA_MIN: usize = DATA_HEADER + 16;
 /// Обфускатор AmneziaWG. `identity` (params=None) ⇒ чистый WireGuard.
 pub struct AwgObfs {
     params: Option<AwgObfuscation>,
+    /// Наш статический публичный ключ (получатель входящих от сервера).
+    our_public: [u8; 32],
+    /// Публичный ключ пира/сервера (получатель наших исходящих).
+    peer_public: [u8; 32],
 }
 
 impl AwgObfs {
     /// Строит обфускатор; дефолтные AWG-параметры сворачиваются в identity.
-    pub fn new(params: Option<AwgObfuscation>) -> Self {
+    /// `our_public`/`peer_public` нужны для пересчёта MAC1 под H-заголовок.
+    pub fn new(params: Option<AwgObfuscation>, our_public: [u8; 32], peer_public: [u8; 32]) -> Self {
         let params = params.filter(|a| !a.is_identity());
-        Self { params }
+        Self {
+            params,
+            our_public,
+            peer_public,
+        }
     }
 
     fn h_for(a: &AwgObfuscation, t: u32) -> u32 {
@@ -100,6 +140,11 @@ impl AwgObfs {
         }
         dg[s..].copy_from_slice(packet);
         dg[s..s + 4].copy_from_slice(&h.to_le_bytes());
+        // Исходящий handshake к серверу: MAC1 пересчитываем под H-заголовок,
+        // получатель — пир (его публичный ключ).
+        if t == T_INIT || t == T_RESP {
+            fix_mac1(&mut dg[s..], &self.peer_public);
+        }
         out.push(dg);
         out
     }
@@ -136,6 +181,12 @@ impl AwgObfs {
             // Совпало: снять S-префикс и восстановить канонический тип.
             let mut pkt = dg[pad..].to_vec();
             pkt[0..4].copy_from_slice(&t.to_le_bytes());
+            // Входящий handshake от сервера: MAC1 пересчитываем под канонический
+            // тип, получатель — мы (наш публичный ключ), чтобы прошла проверка
+            // boringtun.
+            if t == T_INIT || t == T_RESP {
+                fix_mac1(&mut pkt, &self.our_public);
+            }
             return Some(pkt);
         }
         None
@@ -171,7 +222,7 @@ mod tests {
 
     #[test]
     fn identity_when_default() {
-        let o = AwgObfs::new(None);
+        let o = AwgObfs::new(None, [0u8; 32], [0u8; 32]);
         let pkt = fake(T_DATA, 64);
         // Тождественность: wrap не меняет пакет, unwrap возвращает его же.
         assert_eq!(o.wrap(&pkt), vec![pkt.clone()]);
@@ -191,7 +242,7 @@ mod tests {
             h3: 3,
             h4: 4,
         };
-        let o = AwgObfs::new(Some(id));
+        let o = AwgObfs::new(Some(id), [0u8; 32], [0u8; 32]);
         // Дефолтные AWG-параметры ⇒ тождественное преобразование.
         let pkt = fake(T_INIT, LEN_INIT);
         assert_eq!(o.wrap(&pkt), vec![pkt.clone()]);
@@ -200,7 +251,7 @@ mod tests {
 
     #[test]
     fn wrap_unwrap_roundtrip_all_types() {
-        let o = AwgObfs::new(Some(awg()));
+        let o = AwgObfs::new(Some(awg()), [7u8; 32], [9u8; 32]);
         for (ty, len) in [
             (T_INIT, LEN_INIT),
             (T_RESP, LEN_RESP),
@@ -215,19 +266,20 @@ mod tests {
             let s = AwgObfs::s_for(&awg(), ty);
             let on_wire =
                 u32::from_le_bytes([wrapped[s], wrapped[s + 1], wrapped[s + 2], wrapped[s + 3]]);
-            assert_eq!(
-                on_wire,
-                AwgObfs::h_for(&awg(), ty),
-                "H-заголовок на проводе"
-            );
-            // разворот восстанавливает исходный пакет.
-            assert_eq!(o.unwrap(wrapped).as_deref(), Some(&pkt[..]), "type={ty}");
+            assert_eq!(on_wire, AwgObfs::h_for(&awg(), ty), "H-заголовок на проводе");
+            let back = o.unwrap(wrapped).expect("unwrap");
+            // Тип восстановлен.
+            assert_eq!(&back[0..4], &ty.to_le_bytes(), "type restored {ty}");
+            // Тело совпадает; для INIT/RESP хвост mac1/mac2 пересчитан, поэтому
+            // сравниваем без последних 32 байт.
+            let body = if ty == T_INIT || ty == T_RESP { len - 32 } else { len };
+            assert_eq!(&back[..body], &pkt[..body], "body type={ty}");
         }
     }
 
     #[test]
     fn init_emits_jc_junk_packets() {
-        let o = AwgObfs::new(Some(awg()));
+        let o = AwgObfs::new(Some(awg()), [7u8; 32], [9u8; 32]);
         let dgs = o.wrap(&fake(T_INIT, LEN_INIT));
         // Jc junk + 1 реальный.
         assert_eq!(dgs.len(), 3 + 1);
@@ -239,7 +291,7 @@ mod tests {
 
     #[test]
     fn random_junk_is_dropped() {
-        let o = AwgObfs::new(Some(awg()));
+        let o = AwgObfs::new(Some(awg()), [7u8; 32], [9u8; 32]);
         // Случайный мусор, не совпадающий ни с одним (size, header).
         assert!(o.unwrap(&[0xAB; 37]).is_none());
     }

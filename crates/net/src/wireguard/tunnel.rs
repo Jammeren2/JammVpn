@@ -130,7 +130,8 @@ impl WgTunnel {
         }));
         let notify = Arc::new(Notify::new());
         let (wake_tx, wake_rx) = mpsc::unbounded_channel();
-        let obfs = AwgObfs::new(params.awg.clone());
+        let our_public = PublicKey::from(&StaticSecret::from(params.private_key)).to_bytes();
+        let obfs = AwgObfs::new(params.awg.clone(), our_public, params.peer_public_key);
 
         let driver = tokio::spawn(driver::run(
             stack.clone(),

@@ -48,7 +48,7 @@ async fn echo_server(
         0,
         None,
     );
-    let obfs = AwgObfs::new(awg);
+    let obfs = AwgObfs::new(awg, pubkey(server_priv), client_pub);
 
     let mut device = WgDevice::new();
     let base = StdInstant::now();
