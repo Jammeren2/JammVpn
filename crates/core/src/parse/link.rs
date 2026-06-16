@@ -176,6 +176,10 @@ fn ss_from_parts(creds: &str, hostport: &str) -> Result<(String, String, String,
     let (method, password) = creds
         .split_once(':')
         .ok_or(ParseError::MissingField("method:password"))?;
+    // Отбрасываем путь после host:port (`host:port/?outline=1`, `host:port/path`):
+    // host:port не содержит `/` (IPv6 — в скобках `[..]`), поэтому первый сегмент
+    // до `/` — это и есть адрес. Без этого Outline-ссылки падали на InvalidPort.
+    let hostport = hostport.split('/').next().unwrap_or(hostport);
     let (host, port_opt) = split_host_port(hostport)?;
     let port = port_opt.ok_or(ParseError::MissingPort)?;
     Ok((method.to_string(), password.to_string(), host, port))
@@ -237,6 +241,19 @@ mod tests {
         assert_eq!(p.port, 8388);
         assert_eq!(p.param("method"), Some("aes-256-gcm"));
         assert_eq!(p.param("password"), Some("pass"));
+        assert_eq!(p.name, "ss-node");
+    }
+
+    #[test]
+    fn parse_ss_sip002_with_outline_path() {
+        // Outline-форма: путь `/?outline=1` после host:port не должен ломать порт.
+        let p = parse_link(
+            "ss://YWVzLTI1Ni1nY206cGFzcw==@1.2.3.4:8388/?outline=1#ss-node",
+        )
+        .unwrap();
+        assert_eq!(p.address, "1.2.3.4");
+        assert_eq!(p.port, 8388);
+        assert_eq!(p.param("method"), Some("aes-256-gcm"));
         assert_eq!(p.name, "ss-node");
     }
 
