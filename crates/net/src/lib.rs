@@ -37,6 +37,7 @@ mod util;
 #[allow(dead_code, clippy::all)]
 mod vision;
 pub mod vless;
+pub mod wgserver;
 pub mod wireguard;
 
 pub use conn::{snapshot as connection_snapshot, ConnInfo};
@@ -52,6 +53,9 @@ pub use shadowsocks::Method as ShadowsocksMethod;
 pub use target::Target;
 pub use tuic::{TuicConfig, TuicParams};
 pub use udp::{encode_udp_datagram, parse_udp_datagram, udp_associate};
+pub use wgserver::{
+    gen_preshared_key, gen_private_key, public_key as wg_public_key, WgServer, WgServerParams,
+};
 pub use wireguard::{AwgObfuscation, WgConfig, WgParams};
 
 use tokio::io::{AsyncRead, AsyncWrite};

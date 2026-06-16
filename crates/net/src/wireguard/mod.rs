@@ -8,7 +8,7 @@
 //! соединении и разделяется всеми коннектами (см. [`config::WgConfig`]).
 
 mod config;
-mod device;
+pub(crate) mod device;
 mod driver;
 mod obfs;
 mod stream;
