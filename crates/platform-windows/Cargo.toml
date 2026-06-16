@@ -22,5 +22,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_Networking_WinSock",
+    "Win32_Networking_WinInet",
     "Win32_Foundation",
 ] }

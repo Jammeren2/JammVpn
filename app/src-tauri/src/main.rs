@@ -18,6 +18,10 @@ struct ProxyState(Mutex<Option<ctl::ProxyController>>);
 #[derive(Default)]
 struct SplitState(Mutex<Option<ctl::SplitProxyController>>);
 
+/// Включён ли системный прокси Windows нами (для авто-снятия при остановке).
+#[derive(Default)]
+struct SysProxyState(Mutex<bool>);
+
 #[tauri::command]
 fn list_nodes() -> Vec<ctl::NodeInfo> {
     ctl::list_nodes()
@@ -66,10 +70,49 @@ async fn proxy_start(
 }
 
 #[tauri::command]
-fn proxy_stop(state: State<'_, ProxyState>) {
+fn proxy_stop(state: State<'_, ProxyState>, sysproxy: State<'_, SysProxyState>) {
     if let Some(proxy) = state.0.lock().unwrap().take() {
         proxy.stop();
     }
+    // Если мы включали системный прокси — снимаем, чтобы он не указывал на
+    // остановленный локальный прокси.
+    let mut on = sysproxy.0.lock().unwrap();
+    if *on {
+        let _ = ctl::clear_system_proxy();
+        *on = false;
+    }
+}
+
+/// Включить системный прокси Windows на работающий локальный прокси.
+#[tauri::command]
+fn set_system_proxy(
+    proxy: State<'_, ProxyState>,
+    sysproxy: State<'_, SysProxyState>,
+) -> Result<(), String> {
+    let port = proxy
+        .0
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.addr().port())
+        .ok_or("сначала запустите локальный прокси")?;
+    ctl::set_system_proxy(&format!("127.0.0.1:{port}"))?;
+    *sysproxy.0.lock().unwrap() = true;
+    Ok(())
+}
+
+/// Выключить системный прокси Windows.
+#[tauri::command]
+fn clear_system_proxy(sysproxy: State<'_, SysProxyState>) -> Result<(), String> {
+    ctl::clear_system_proxy()?;
+    *sysproxy.0.lock().unwrap() = false;
+    Ok(())
+}
+
+/// Текущее состояние системного прокси Windows.
+#[tauri::command]
+fn system_proxy_status() -> Result<ctl::SysProxyStatus, String> {
+    ctl::system_proxy_status()
 }
 
 /// Адрес работающего прокси (`None` — не запущен).
@@ -279,6 +322,7 @@ fn main() {
     tauri::Builder::default()
         .manage(ProxyState::default())
         .manage(SplitState::default())
+        .manage(SysProxyState::default())
         .setup(|app| {
             setup_tray(app)?;
             // Автозапуск (флаг --minimized) — стартуем сразу в трей, без окна.
@@ -321,6 +365,9 @@ fn main() {
             move_rule,
             list_presets,
             apply_preset,
+            set_system_proxy,
+            clear_system_proxy,
+            system_proxy_status,
             autostart_status,
             set_autostart,
             get_split,

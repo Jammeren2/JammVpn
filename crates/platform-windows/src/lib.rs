@@ -10,6 +10,9 @@
 /// Автозапуск при входе в систему (реестр `Run`; только Windows).
 #[cfg(windows)]
 pub mod autostart;
+/// Системный прокси Windows (WinINET; только Windows).
+#[cfg(windows)]
+pub mod sysproxy;
 /// DPAPI-хранилище секретов (реальная реализация; только Windows).
 #[cfg(windows)]
 pub mod dpapi;

@@ -691,6 +691,50 @@ pub fn set_autostart(_enabled: bool) -> Result<(), String> {
     Err("автозапуск поддерживается только на Windows".into())
 }
 
+// --- Системный прокси Windows (WinINET) ---
+
+/// Состояние системного прокси Windows (для UI).
+#[derive(Debug, Clone, Serialize)]
+pub struct SysProxyStatus {
+    pub enabled: bool,
+    pub server: Option<String>,
+}
+
+/// Включает системный прокси Windows на локальный `proxy` (`host:port`).
+#[cfg(windows)]
+pub fn set_system_proxy(proxy: &str) -> Result<(), String> {
+    use jammvpn_platform_windows::sysproxy;
+    sysproxy::set(proxy, sysproxy::DEFAULT_BYPASS)
+}
+#[cfg(not(windows))]
+pub fn set_system_proxy(_proxy: &str) -> Result<(), String> {
+    Err("системный прокси поддерживается только на Windows".into())
+}
+
+/// Выключает системный прокси Windows.
+#[cfg(windows)]
+pub fn clear_system_proxy() -> Result<(), String> {
+    jammvpn_platform_windows::sysproxy::clear()
+}
+#[cfg(not(windows))]
+pub fn clear_system_proxy() -> Result<(), String> {
+    Err("системный прокси поддерживается только на Windows".into())
+}
+
+/// Текущее состояние системного прокси (на не-Windows — выключен).
+#[cfg(windows)]
+pub fn system_proxy_status() -> Result<SysProxyStatus, String> {
+    let (enabled, server) = jammvpn_platform_windows::sysproxy::status()?;
+    Ok(SysProxyStatus { enabled, server })
+}
+#[cfg(not(windows))]
+pub fn system_proxy_status() -> Result<SysProxyStatus, String> {
+    Ok(SysProxyStatus {
+        enabled: false,
+        server: None,
+    })
+}
+
 // --- Раздельное туннелирование (split): конфиг + применение через драйвер ---
 
 /// Порт локального транспарент-прокси, куда драйвер перенаправляет соединения

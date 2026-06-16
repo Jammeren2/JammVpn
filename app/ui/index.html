@@ -197,11 +197,18 @@
         <section class="panel">
           <h2>Подключение</h2>
           <div class="row">
-            <label>Локальный адрес (SOCKS5)
+            <label>Локальный адрес (SOCKS5 / HTTP)
               <input id="listen" type="text" value="127.0.0.1:1080" />
             </label>
           </div>
-          <p class="hint">Локальный SOCKS5-прокси, куда приложения отправляют трафик.</p>
+          <p class="hint">Локальный прокси (SOCKS5 и HTTP CONNECT на одном порту), куда приложения отправляют трафик.</p>
+          <div class="row" style="margin-top: 14px">
+            <label class="check">
+              <input id="sysproxy" type="checkbox" />
+              Использовать как системный прокси Windows
+            </label>
+          </div>
+          <p class="hint" id="sysproxy-msg">Прописывает локальный прокси в системные настройки (WinINET) — приложения пойдут через него без настройки каждого. Нужен запущенный прокси; снимается при остановке.</p>
         </section>
 
         <section class="panel">

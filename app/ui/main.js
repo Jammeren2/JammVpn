@@ -183,6 +183,7 @@ async function startProxy() {
 async function stopProxy() {
   await invoke("proxy_stop");
   setStatus(null);
+  await loadSysProxy(); // бэкенд снимает системный прокси при остановке
 }
 
 async function refreshSubs() {
@@ -298,6 +299,30 @@ async function toggleAutostart() {
   } catch (e) {
     // Откат чекбокса к фактическому состоянию.
     await loadAutostart();
+    msg.textContent = "ошибка: " + e;
+    msg.className = "hint err";
+  }
+}
+
+async function loadSysProxy() {
+  try {
+    const s = await invoke("system_proxy_status");
+    // Считаем «нашим», если включён и указывает на loopback.
+    $("sysproxy").checked = !!s.enabled && !!(s.server && s.server.includes("127.0.0.1"));
+  } catch (e) {
+    $("sysproxy").checked = false;
+  }
+}
+
+async function toggleSysProxy() {
+  const on = $("sysproxy").checked;
+  const msg = $("sysproxy-msg");
+  try {
+    await invoke(on ? "set_system_proxy" : "clear_system_proxy");
+    msg.textContent = on ? "системный прокси включён" : "системный прокси выключен";
+    msg.className = "hint ok";
+  } catch (e) {
+    await loadSysProxy(); // откат к фактическому состоянию
     msg.textContent = "ошибка: " + e;
     msg.className = "hint err";
   }
@@ -590,6 +615,7 @@ async function init() {
   $("rules-body").addEventListener("click", onRulesClick);
   $("presets").addEventListener("click", onPresetClick);
   $("autostart").addEventListener("change", toggleAutostart);
+  $("sysproxy").addEventListener("change", toggleSysProxy);
   $("btn-split-save").addEventListener("click", saveSplit);
   $("btn-split-apply").addEventListener("click", applySplit);
   $("btn-split-clear").addEventListener("click", clearSplit);
@@ -610,6 +636,7 @@ async function init() {
   resetRuleForm();
   await loadAutostart();
   await loadSplit();
+  await loadSysProxy();
   setStatus(await invoke("proxy_status"));
 }
 

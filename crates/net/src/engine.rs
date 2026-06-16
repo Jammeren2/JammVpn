@@ -20,7 +20,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 /// Решение для соединения.
@@ -476,6 +476,20 @@ async fn serve_routed(
         let eng = Arc::clone(&engine);
         tokio::spawn(async move {
             let _permit = permit; // держим до конца обработки соединения
+            // Сниффим первый байт без потребления: 0x05 → SOCKS5, иначе → HTTP-прокси.
+            // Так один локальный порт принимает и SOCKS5, и HTTP CONNECT (для
+            // системного прокси Windows, который говорит по HTTP).
+            let mut peeked = [0u8; 1];
+            let first = match tokio::time::timeout(HANDSHAKE_TIMEOUT, client.peek(&mut peeked)).await
+            {
+                Ok(Ok(1)) => peeked[0],
+                _ => return,
+            };
+            if first != 0x05 {
+                let _ = tokio::time::timeout(HANDSHAKE_TIMEOUT, handle_http(&mut client, &eng))
+                    .await;
+                return;
+            }
             let req =
                 match tokio::time::timeout(HANDSHAKE_TIMEOUT, socks_handshake(&mut client)).await {
                     Ok(Ok(r)) => r,
@@ -499,6 +513,126 @@ async fn serve_routed(
             }
         });
     }
+}
+
+/// Обрабатывает HTTP-прокси соединение: `CONNECT host:port` (туннель, для HTTPS)
+/// и absolute-form запросы (`GET http://host/path` — обычный HTTP). Маршрутизация
+/// — тем же движком. Нужно для системного прокси Windows (WinINET говорит по HTTP).
+async fn handle_http(client: &mut TcpStream, engine: &Engine) -> io::Result<()> {
+    let head = read_http_head(client).await?;
+    let text = String::from_utf8_lossy(&head);
+    let req_line = text.split("\r\n").next().unwrap_or("");
+    let mut parts = req_line.split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let target_str = parts.next().unwrap_or("").to_string();
+
+    if method.eq_ignore_ascii_case("CONNECT") {
+        // authority-form: host:port (порт обязателен).
+        let (host, port) = split_host_port(&target_str, 443);
+        let routed = engine.route(&Target::Domain(host, port)).await;
+        match routed.decision {
+            Decision::Connect(ob) => match ob.connect_tcp(&routed.target).await {
+                Ok(mut up) => {
+                    client
+                        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                        .await?;
+                    tokio::io::copy_bidirectional(client, &mut up).await?;
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+                    Err(e)
+                }
+            },
+            Decision::Block => {
+                client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+                Ok(())
+            }
+        }
+    } else {
+        // absolute-form: METHOD http://host[:port]/path HTTP/1.1 → форвард в origin-form.
+        let Some((host, port, path)) = parse_absolute_uri(&target_str) else {
+            client.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await?;
+            return Ok(());
+        };
+        let routed = engine.route(&Target::Domain(host, port)).await;
+        match routed.decision {
+            Decision::Connect(ob) => match ob.connect_tcp(&routed.target).await {
+                Ok(mut up) => {
+                    // Переписываем строку запроса в origin-form, сохраняя заголовки.
+                    let headers_block = head
+                        .windows(2)
+                        .position(|w| w == b"\r\n")
+                        .map(|i| &head[i + 2..])
+                        .unwrap_or(b"");
+                    let mut out = format!("{method} {path} HTTP/1.1\r\n").into_bytes();
+                    out.extend_from_slice(headers_block);
+                    up.write_all(&out).await?;
+                    tokio::io::copy_bidirectional(client, &mut up).await?;
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+                    Err(e)
+                }
+            },
+            Decision::Block => {
+                client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Читает HTTP-заголовок до `\r\n\r\n` (с ограничением размера).
+async fn read_http_head(client: &mut TcpStream) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(512);
+    let mut byte = [0u8; 1];
+    loop {
+        if client.read(&mut byte).await? == 0 {
+            return Err(io::Error::other("http: соединение закрыто до конца заголовка"));
+        }
+        buf.push(byte[0]);
+        if buf.ends_with(b"\r\n\r\n") {
+            return Ok(buf);
+        }
+        if buf.len() > 16384 {
+            return Err(io::Error::other("http: заголовок слишком велик"));
+        }
+    }
+}
+
+/// `host:port` → (host, port); без порта — `default`. Поддерживает `[v6]:port`.
+fn split_host_port(s: &str, default: u16) -> (String, u16) {
+    if let Some(rest) = s.strip_prefix('[') {
+        // [v6]:port
+        if let Some((h, p)) = rest.split_once("]:") {
+            return (h.to_string(), p.parse().unwrap_or(default));
+        }
+        if let Some(h) = rest.strip_suffix(']') {
+            return (h.to_string(), default);
+        }
+    }
+    match s.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() => (h.to_string(), p.parse().unwrap_or(default)),
+        _ => (s.to_string(), default),
+    }
+}
+
+/// `http://host[:port]/path` → (host, port, "/path"). `None` — не absolute-form.
+fn parse_absolute_uri(uri: &str) -> Option<(String, u16, String)> {
+    let rest = uri
+        .strip_prefix("http://")
+        .or_else(|| uri.strip_prefix("https://"))?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = split_host_port(authority, 80);
+    if host.is_empty() {
+        return None;
+    }
+    Some((host, port, path.to_string()))
 }
 
 /// Транспарентный сервер для split-редиректа.
@@ -552,6 +686,58 @@ mod tests {
     use super::*;
     use crate::outbound::Socks5Config;
     use jammvpn_core::routing::DomainRule;
+
+    #[tokio::test]
+    async fn http_connect_tunnels_to_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Эхо-сервер как цель CONNECT.
+        let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = echo.accept().await {
+                let mut buf = [0u8; 5];
+                if s.read_exact(&mut buf).await.is_ok() {
+                    let _ = s.write_all(&buf).await;
+                }
+            }
+        });
+
+        // Смешанный inbound с Direct-маршрутизацией.
+        let engine = Arc::new(Engine::from_config(&AppConfig::default()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = serve_socks_routed(listener, engine).await;
+        });
+
+        // Клиент шлёт HTTP CONNECT (первый байт 'C' ≠ 0x05 → HTTP-ветка).
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "CONNECT {}:{} HTTP/1.1\r\nHost: x\r\n\r\n",
+            echo_addr.ip(),
+            echo_addr.port()
+        );
+        c.write_all(req.as_bytes()).await.unwrap();
+
+        // Ответ 200 (до \r\n\r\n).
+        let mut resp = Vec::new();
+        let mut b = [0u8; 1];
+        loop {
+            c.read_exact(&mut b).await.unwrap();
+            resp.push(b[0]);
+            if resp.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        assert!(String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 200"));
+
+        // Туннель работает: эхо.
+        c.write_all(b"hello").await.unwrap();
+        let mut out = [0u8; 5];
+        c.read_exact(&mut out).await.unwrap();
+        assert_eq!(&out, b"hello");
+    }
 
     #[tokio::test]
     async fn transparent_redirect_relays_to_original_dst() {
