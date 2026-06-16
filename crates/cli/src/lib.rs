@@ -437,6 +437,45 @@ pub async fn update_subscriptions() -> Result<Vec<SubUpdate>, String> {
     Ok(out)
 }
 
+/// Информация об обновлении (для сплеша).
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateInfo {
+    pub current: String,
+    pub latest: String,
+    pub url: String,
+    pub newer: bool,
+}
+
+/// Проверяет последний релиз на GitHub (best-effort). `Ok(None)` — не удалось
+/// проверить (приватный репозиторий / нет релизов / сеть) — стартап не блокируем.
+pub async fn check_update(current: &str) -> Result<Option<UpdateInfo>, String> {
+    const REPO: &str = "Jammeren2/jammvpn";
+    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    let body =
+        match jammvpn_net::subscription::fetch_text(&url, std::time::Duration::from_secs(6)).await {
+            Ok(b) => b,
+            Err(_) => return Ok(None),
+        };
+    let Ok(root) = jammvpn_core::JsonValue::parse(&body) else {
+        return Ok(None);
+    };
+    let Some(latest) = root.get("tag_name").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let html = root
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let newer = latest.trim_start_matches('v') != current;
+    Ok(Some(UpdateInfo {
+        current: current.to_string(),
+        latest: latest.to_string(),
+        url: html,
+        newer,
+    }))
+}
+
 /// Удаляет узел по имени из конфига (чистая логика, для тестов): возвращает,
 /// был ли он. Если удалили узел, назначенный default-прокси, — сбрасывает его.
 fn apply_remove(cfg: &mut AppConfig, name: &str) -> bool {

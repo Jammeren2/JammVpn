@@ -976,6 +976,46 @@ function esc(s) {
   );
 }
 
+// --- Сплеш-экран ---
+function splashStatus(t) {
+  const el = $("splash-status");
+  if (el) el.textContent = t;
+}
+function hideSplash() {
+  const el = $("splash");
+  if (!el) return;
+  el.classList.add("hide");
+  setTimeout(() => {
+    el.style.display = "none";
+  }, 600);
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function startupChecks() {
+  let v = "";
+  try {
+    v = await invoke("app_version");
+  } catch (e) {}
+  try {
+    const nodes = await invoke("list_nodes");
+    splashStatus(`v${v} · узлов: ${nodes.length} · проверка обновлений…`);
+  } catch (e) {
+    splashStatus(`v${v} · проверка обновлений…`);
+  }
+  try {
+    const u = await invoke("check_update");
+    if (u && u.newer) {
+      splashStatus(`доступно обновление ${u.latest} (у вас v${v})`);
+      // показываем чуть дольше, чтобы заметили
+      await sleep(1200);
+    } else {
+      splashStatus(`v${v} — версия актуальна`);
+    }
+  } catch (e) {
+    splashStatus(`v${v}`);
+  }
+}
+
 async function init() {
   $("btn-start").addEventListener("click", startAll);
   $("btn-stop").addEventListener("click", stopAll);
@@ -1047,6 +1087,9 @@ async function init() {
   await loadAdminState();
   renderModes();
   await updateHeroStatus();
+  // Сплеш: проверки при старте (с ограничением по времени), затем скрыть.
+  await Promise.race([startupChecks(), sleep(2800)]);
+  hideSplash();
 }
 
 window.addEventListener("DOMContentLoaded", init);

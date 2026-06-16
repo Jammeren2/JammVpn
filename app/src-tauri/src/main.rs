@@ -239,6 +239,18 @@ fn local_wg_qr() -> Result<String, String> {
     ctl::local_wg_qr()
 }
 
+/// Версия приложения.
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Проверка обновления (последний релиз на GitHub; best-effort).
+#[tauri::command]
+async fn check_update() -> Result<Option<ctl::UpdateInfo>, String> {
+    ctl::check_update(env!("CARGO_PKG_VERSION")).await
+}
+
 /// Последние `lines` строк лога (вкладка «Логи»; по умолчанию 100).
 #[tauri::command]
 fn read_log(lines: Option<usize>) -> String {
@@ -487,6 +499,8 @@ fn main() {
             relaunch_as_admin,
             read_log,
             clear_log,
+            app_version,
+            check_update,
             list_subscriptions,
             add_subscription,
             remove_subscription,
