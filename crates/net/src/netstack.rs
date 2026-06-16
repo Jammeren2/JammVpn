@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant as StdInstant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::runtime::Handle;
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 
@@ -123,6 +124,9 @@ struct Shared {
     engine: Arc<Engine>,
     /// Хендлы relay-задач — для отмены при остановке стека.
     relays: Mutex<Vec<JoinHandle<()>>>,
+    /// Хендл tokio-рантайма: спавн relay из любого (в т.ч. не-async) потока,
+    /// т.к. `inject` может вызываться из потока захвата NDIS.
+    handle: Handle,
 }
 
 impl Shared {
@@ -181,6 +185,7 @@ impl Netstack {
             out_tx,
             engine,
             relays: Mutex::new(Vec::new()),
+            handle: Handle::current(),
         });
 
         let driver = tokio::spawn(run_driver(shared.clone(), wake_rx, base));
@@ -290,7 +295,7 @@ fn demux_and_enqueue(shared: &Arc<Shared>, ip_pkt: &[u8]) {
                     let handle = st.sockets.add(sock);
                     st.tcp_seen.insert(key);
                     let dst = Target::Socket(ep_to_sockaddr(f.dst));
-                    let jh = tokio::spawn(relay_tcp(shared.clone(), handle, key, dst));
+                    let jh = shared.handle.spawn(relay_tcp(shared.clone(), handle, key, dst));
                     shared.relays.lock().unwrap().push(jh);
                 }
             }
@@ -312,7 +317,9 @@ fn demux_and_enqueue(shared: &Arc<Shared>, ip_pkt: &[u8]) {
                     let handle = st.sockets.add(sock);
                     st.udp_flows.insert(key, handle);
                     let dst = Target::Socket(ep_to_sockaddr(f.dst));
-                    let jh = tokio::spawn(relay_udp(shared.clone(), handle, key, dst, f.src));
+                    let jh = shared
+                        .handle
+                        .spawn(relay_udp(shared.clone(), handle, key, dst, f.src));
                     shared.relays.lock().unwrap().push(jh);
                 }
             }

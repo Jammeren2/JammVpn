@@ -18,6 +18,9 @@ pub mod sysproxy;
 pub mod dpapi;
 pub mod split;
 pub mod wfp;
+/// Split-туннелирование через Windows Packet Filter (ndisapi; только Windows).
+#[cfg(windows)]
+pub mod winpkfilter;
 
 #[cfg(windows)]
 pub use dpapi::DpapiStore;

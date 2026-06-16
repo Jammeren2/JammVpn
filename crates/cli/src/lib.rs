@@ -1269,6 +1269,71 @@ impl LocalWgController {
     }
 }
 
+// ───────────────── Split-туннелирование через Windows Packet Filter ──────────
+
+/// Управляемый split-перехват: NDIS-захват приложений (ndisapi) + userspace
+/// `netstack`, релеящий их трафик через выбранный путь.
+#[cfg(windows)]
+pub struct WinpkSplitController {
+    // Держим netstack живым (Drop остановит стек и relay-задачи).
+    _netstack: Arc<jammvpn_net::netstack::Netstack>,
+    tunnel: Option<jammvpn_platform_windows::winpkfilter::SplitTunnel>,
+    out_task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(windows)]
+impl WinpkSplitController {
+    /// Поднимает netstack (egress через выбранный на «Главной» узел или по
+    /// правилам) и запускает NDIS-перехват приложений из split-набора (правила
+    /// с действием Proxy). Требует драйвера `ndisrd` и админ-прав.
+    pub async fn start() -> Result<Self, String> {
+        let cfg = load();
+        let split_cfg = rules_to_split(&cfg);
+        let upstream = cfg.settings.proxy_node.clone();
+        let engine = Arc::new(build_engine(&cfg, upstream.as_deref())?);
+        let (netstack, mut out) =
+            jammvpn_net::netstack::Netstack::new(engine, Ipv4Addr::new(10, 9, 0, 1), 24);
+        let netstack = Arc::new(netstack);
+        let ns = netstack.clone();
+        let tunnel = jammvpn_platform_windows::winpkfilter::SplitTunnel::start(
+            split_cfg,
+            Box::new(move |ip: &[u8]| ns.inject(ip)),
+        )?;
+        let injector = tunnel.injector();
+        // Ответы из netstack → реинъекция приложению.
+        let out_task = tokio::spawn(async move {
+            while let Some(ip) = out.recv().await {
+                injector.inject(ip);
+            }
+        });
+        Ok(Self {
+            _netstack: netstack,
+            tunnel: Some(tunnel),
+            out_task,
+        })
+    }
+
+    /// Останавливает перехват и стек.
+    pub fn stop(mut self) {
+        if let Some(t) = self.tunnel.take() {
+            t.stop();
+        }
+        self.out_task.abort();
+    }
+}
+
+/// Заглушка вне Windows (split доступен только на Windows).
+#[cfg(not(windows))]
+pub struct WinpkSplitController;
+
+#[cfg(not(windows))]
+impl WinpkSplitController {
+    pub async fn start() -> Result<Self, String> {
+        Err("split-туннелирование доступно только на Windows".into())
+    }
+    pub fn stop(self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

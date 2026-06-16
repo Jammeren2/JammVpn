@@ -16,7 +16,7 @@ struct ProxyState(Mutex<Option<ctl::ProxyController>>);
 /// Активный split: работающий локальный редирект-прокси (или его отсутствие).
 /// `Some` ⇔ split применён (конфиг в драйвере + прокси поднят).
 #[derive(Default)]
-struct SplitState(Mutex<Option<ctl::SplitProxyController>>);
+struct SplitState(Mutex<Option<ctl::WinpkSplitController>>);
 
 /// Включён ли системный прокси Windows нами (для авто-снятия при остановке).
 #[derive(Default)]
@@ -313,30 +313,23 @@ fn set_split(kill_switch: bool) -> Result<(), String> {
     ctl::set_split_options(kill_switch)
 }
 
-/// Применить split: поднять локальный редирект-прокси и передать правила
-/// драйверу (требует загруженного WFP-драйвера и админ-прав).
+/// Применить split: поднять NDIS-перехват приложений (Windows Packet Filter) +
+/// userspace netstack. Требует установленного драйвера `ndisrd` и админ-прав.
 #[tauri::command]
 async fn split_apply(state: State<'_, SplitState>) -> Result<(), String> {
     if state.0.lock().unwrap().is_some() {
         return Err("split уже применён".into());
     }
-    let listen = format!("127.0.0.1:{}", ctl::SPLIT_REDIRECT_PORT);
-    let proxy = ctl::SplitProxyController::start(&listen).await?;
-    // Конфиг в драйвер; при ошибке откатываем поднятый прокси.
-    if let Err(e) = ctl::apply_split(ctl::SPLIT_REDIRECT_PORT) {
-        proxy.stop();
-        return Err(e);
-    }
-    *state.0.lock().unwrap() = Some(proxy);
+    let controller = ctl::WinpkSplitController::start().await?;
+    *state.0.lock().unwrap() = Some(controller);
     Ok(())
 }
 
-/// Снять split: очистить правила в драйвере и остановить редирект-прокси.
+/// Снять split: остановить перехват и стек.
 #[tauri::command]
 fn split_clear(state: State<'_, SplitState>) -> Result<(), String> {
-    let _ = ctl::clear_split();
-    if let Some(proxy) = state.0.lock().unwrap().take() {
-        proxy.stop();
+    if let Some(controller) = state.0.lock().unwrap().take() {
+        controller.stop();
     }
     Ok(())
 }

@@ -25,3 +25,16 @@ windows-sys = { version = "0.59", features = [
     "Win32_Networking_WinInet",
     "Win32_Foundation",
 ] }
+# Windows Packet Filter (WinpkFilter / ndisapi) — захват пакетов на уровне NDIS
+# для per-app split-туннелирования (как WireSock). Требует установленного
+# драйвера (ndisrd) и запуска от администратора.
+ndisapi = "0.5"
+# Атрибуция пакетов к процессу (таблицы TCP/UDP → PID → путь к exe) + Win32-события.
+# Версия пиннится под ту, что использует ndisapi 0.5.6 (общий тип HANDLE).
+windows = { version = "=0.54.0", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+] }
