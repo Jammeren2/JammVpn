@@ -29,30 +29,50 @@ async function refreshNodes() {
   sel.innerHTML = '<option value="">— по правилам конфига —</option>';
   if (dsel) dsel.innerHTML = '<option value="">— первый доступный —</option>';
   if (lsel) lsel.innerHTML = '<option value="">— по правилам конфига —</option>';
-  for (const [i, n] of nodes.entries()) {
-    // Экспорт .conf — только для WireGuard/AmneziaWG-узлов.
-    const isWg = /wireguard|amnezia|awg/i.test(n.protocol);
-    const exportBtn = isWg
-      ? `<button class="x" title="Сохранить .conf" data-export="${esc(
-          n.name
-        )}">⤓</button>`
-      : "";
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${i + 1}</td><td>${esc(n.name)}</td><td>${esc(
-      n.protocol
-    )}</td><td>${esc(n.address)}:${n.port}</td><td class="lat" data-name="${esc(
-      n.name
-    )}">—</td><td class="del">${exportBtn}<button class="x" title="Удалить" data-name="${esc(
-      n.name
-    )}">✕</button></td>`;
-    body.appendChild(tr);
 
-    const opt = document.createElement("option");
-    opt.value = n.name;
-    opt.textContent = n.name;
-    sel.appendChild(opt);
-    if (dsel) dsel.appendChild(opt.cloneNode(true));
-    if (lsel) lsel.appendChild(opt.cloneNode(true));
+  // Группируем: свои ключи отдельно, узлы подписок — по источнику.
+  const own = nodes.filter((n) => !n.group);
+  const groups = new Map();
+  for (const n of nodes) {
+    if (!n.group) continue;
+    if (!groups.has(n.group)) groups.set(n.group, []);
+    groups.get(n.group).push(n);
+  }
+  const sections = [];
+  if (own.length) sections.push(["🔑 Свои ключи", own]);
+  for (const [g, list] of groups) sections.push(["📡 " + g, list]);
+
+  let idx = 0;
+  for (const [title, list] of sections) {
+    if (sections.length > 1) {
+      const head = document.createElement("tr");
+      head.className = "group-head";
+      head.innerHTML = `<td colspan="6">${esc(title)} <span class="group-count">${list.length}</span></td>`;
+      body.appendChild(head);
+    }
+    for (const n of list) {
+      idx++;
+      const isWg = /wireguard|amnezia|awg/i.test(n.protocol);
+      const exportBtn = isWg
+        ? `<button class="x" title="Сохранить .conf" data-export="${esc(n.name)}">⤓</button>`
+        : "";
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${idx}</td><td>${esc(n.name)}</td><td>${esc(
+        n.protocol
+      )}</td><td>${esc(n.address)}:${n.port}</td><td class="lat" data-name="${esc(
+        n.name
+      )}">—</td><td class="del">${exportBtn}<button class="x" title="Удалить" data-name="${esc(
+        n.name
+      )}">✕</button></td>`;
+      body.appendChild(tr);
+
+      const opt = document.createElement("option");
+      opt.value = n.name;
+      opt.textContent = n.name;
+      sel.appendChild(opt);
+      if (dsel) dsel.appendChild(opt.cloneNode(true));
+      if (lsel) lsel.appendChild(opt.cloneNode(true));
+    }
   }
   sel.value = prev;
   if (dsel) dsel.value = prevDefault;

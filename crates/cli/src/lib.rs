@@ -32,6 +32,8 @@ pub struct NodeInfo {
     pub protocol: String,
     pub address: String,
     pub port: u16,
+    /// Группа узла = источник-подписка (первый тег) или `None` — свой ключ.
+    pub group: Option<String>,
 }
 
 /// Результат теста задержки одного узла.
@@ -224,6 +226,7 @@ pub fn list_nodes() -> Vec<NodeInfo> {
             protocol: s.protocol.to_string(),
             address: s.address.clone(),
             port: s.port,
+            group: s.tags.first().cloned(),
         })
         .collect()
 }

@@ -60,7 +60,11 @@
     // Данные берём из таблицы узлов (имя / протокол / адрес / задержка) —
     // она богаче опций select. Если таблицы нет — падаем на опции select.
     function rows() {
-      const trs = nodesBody ? [...nodesBody.querySelectorAll("tr")] : [];
+      const trs = nodesBody
+        ? [...nodesBody.querySelectorAll("tr")].filter(
+            (tr) => !tr.classList.contains("group-head")
+          )
+        : [];
       if (trs.length) {
         return trs.map((tr) => {
           const td = tr.querySelectorAll("td");

@@ -30,30 +30,40 @@ pub async fn update_subscription(
     timeout: Duration,
 ) -> io::Result<Vec<ServerProfile>> {
     let body = fetch_text(&sub.url, timeout).await?;
+    let tag = sub_tag(sub);
     let mut profiles: Vec<ServerProfile> = parse_subscription(&body)
         .into_iter()
         .filter_map(Result::ok)
         .collect();
-    if let Some(tag) = &sub.tag {
-        for p in &mut profiles {
-            if !p.tags.iter().any(|t| t == tag) {
-                p.tags.push(tag.clone());
-            }
+    // Тегируем узлы источником-подпиской (для группировки в UI и обновления).
+    for p in &mut profiles {
+        if !p.tags.iter().any(|t| t == &tag) {
+            p.tags.push(tag.clone());
         }
     }
     Ok(profiles)
 }
 
+/// Тег подписки для группировки/обновления: явный `sub.tag` или хост из URL.
+pub fn sub_tag(sub: &Subscription) -> String {
+    if let Some(t) = &sub.tag {
+        if !t.trim().is_empty() {
+            return t.clone();
+        }
+    }
+    let rest = sub.url.split("://").nth(1).unwrap_or(&sub.url);
+    rest.split('/').next().unwrap_or(&sub.url).to_string()
+}
+
 /// Вливает обновлённые серверы подписки в конфиг: удаляет прежние серверы этой
-/// подписки (по её тегу) и добавляет новые. Без тега — просто добавляет.
+/// подписки (по её теге) и добавляет новые.
 pub fn merge_subscription(
     cfg: &mut AppConfig,
     sub: &Subscription,
     new_servers: Vec<ServerProfile>,
 ) {
-    if let Some(tag) = &sub.tag {
-        cfg.servers.retain(|s| !s.tags.iter().any(|t| t == tag));
-    }
+    let tag = sub_tag(sub);
+    cfg.servers.retain(|s| !s.tags.iter().any(|t| t == &tag));
     cfg.servers.extend(new_servers);
 }
 
