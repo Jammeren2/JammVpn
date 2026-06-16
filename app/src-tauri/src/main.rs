@@ -196,6 +196,22 @@ fn set_settings(default_to_proxy: bool, default_proxy: Option<String>) -> Result
     ctl::set_settings(default_to_proxy, default_proxy)
 }
 
+/// Сохранить настройки подключения (адреса прокси, узел туннеля).
+#[tauri::command]
+fn set_connection(
+    listen: Option<String>,
+    tunnel_node: Option<String>,
+    tunnel_listen: Option<String>,
+) -> Result<(), String> {
+    ctl::set_connection(listen, tunnel_node, tunnel_listen)
+}
+
+/// Экспортировать WG/AmneziaWG-узел в `.conf` на диск; возвращает путь к файлу.
+#[tauri::command]
+fn export_node_conf(name: String) -> Result<String, String> {
+    ctl::export_node_conf(&name)
+}
+
 /// Список сохранённых подписок.
 #[tauri::command]
 fn list_subscriptions() -> Vec<ctl::SubscriptionInfo> {
@@ -410,6 +426,8 @@ fn main() {
             remove_node,
             get_settings,
             set_settings,
+            set_connection,
+            export_node_conf,
             list_subscriptions,
             add_subscription,
             remove_subscription,

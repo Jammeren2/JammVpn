@@ -56,6 +56,12 @@ pub struct SettingsInfo {
     pub default_to_proxy: bool,
     /// Узел по умолчанию (для `Proxy(None)` и default-прокси).
     pub default_proxy: Option<String>,
+    /// Локальный адрес основного прокси (SOCKS5/HTTP).
+    pub listen: Option<String>,
+    /// Узел туннель-прокси «всё в туннель».
+    pub tunnel_node: Option<String>,
+    /// Локальный адрес туннель-прокси.
+    pub tunnel_listen: Option<String>,
 }
 
 /// Подписка в списке (для UI).
@@ -360,6 +366,9 @@ pub fn get_settings() -> SettingsInfo {
     SettingsInfo {
         default_to_proxy: cfg.settings.default_to_proxy,
         default_proxy: cfg.settings.default_proxy.clone(),
+        listen: cfg.settings.listen.clone(),
+        tunnel_node: cfg.settings.tunnel_node.clone(),
+        tunnel_listen: cfg.settings.tunnel_listen.clone(),
     }
 }
 
@@ -371,6 +380,105 @@ pub fn set_settings(default_to_proxy: bool, default_proxy: Option<String>) -> Re
     cfg.settings.default_to_proxy = default_to_proxy;
     cfg.settings.default_proxy = default_proxy.filter(|s| !s.is_empty());
     save_config(&path, &cfg, store.as_ref())
+}
+
+/// Сохраняет настройки подключения (адреса прокси и узел туннеля). Пустые
+/// строки трактуются как «не задано».
+pub fn set_connection(
+    listen: Option<String>,
+    tunnel_node: Option<String>,
+    tunnel_listen: Option<String>,
+) -> Result<(), String> {
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    let norm = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    cfg.settings.listen = norm(listen);
+    cfg.settings.tunnel_node = norm(tunnel_node);
+    cfg.settings.tunnel_listen = norm(tunnel_listen);
+    save_config(&path, &cfg, store.as_ref())
+}
+
+/// Сериализует WireGuard/AmneziaWG-узел в `.conf` и пишет файл рядом с конфигом.
+/// Возвращает абсолютный путь к созданному файлу.
+pub fn export_node_conf(name: &str) -> Result<String, String> {
+    let cfg = load();
+    let node = cfg
+        .servers
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("узел не найден: {name}"))?;
+    if !matches!(
+        node.protocol,
+        jammvpn_core::ProtocolKind::Wireguard | jammvpn_core::ProtocolKind::AmneziaWg
+    ) {
+        return Err("экспорт .conf доступен только для WireGuard/AmneziaWG".into());
+    }
+    let conf = node_to_wg_conf(node);
+
+    // Безопасное имя файла из имени узла.
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let dir = config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = dir.join(format!("{safe}.conf"));
+    std::fs::write(&file, conf).map_err(|e| e.to_string())?;
+    Ok(file.to_string_lossy().to_string())
+}
+
+/// Собирает текст `.conf` (WireGuard/AmneziaWG) из параметров узла.
+fn node_to_wg_conf(p: &ServerProfile) -> String {
+    let mut s = String::from("[Interface]\n");
+    if let Some(v) = p.param("private_key") {
+        s.push_str(&format!("PrivateKey = {v}\n"));
+    }
+    if let Some(v) = p.param("address") {
+        s.push_str(&format!("Address = {v}\n"));
+    }
+    if let Some(v) = p.param("dns") {
+        s.push_str(&format!("DNS = {v}\n"));
+    }
+    // Обфускация AmneziaWG (если есть).
+    for (label, key) in [
+        ("Jc", "jc"),
+        ("Jmin", "jmin"),
+        ("Jmax", "jmax"),
+        ("S1", "s1"),
+        ("S2", "s2"),
+        ("H1", "h1"),
+        ("H2", "h2"),
+        ("H3", "h3"),
+        ("H4", "h4"),
+    ] {
+        if let Some(v) = p.param(key) {
+            s.push_str(&format!("{label} = {v}\n"));
+        }
+    }
+    s.push_str("\n[Peer]\n");
+    if let Some(v) = p.param("public_key") {
+        s.push_str(&format!("PublicKey = {v}\n"));
+    }
+    if let Some(v) = p.param("preshared_key") {
+        s.push_str(&format!("PresharedKey = {v}\n"));
+    }
+    s.push_str(&format!("Endpoint = {}:{}\n", p.address, p.port));
+    let allowed = p.param("allowed_ips").unwrap_or("0.0.0.0/0, ::/0");
+    s.push_str(&format!("AllowedIPs = {allowed}\n"));
+    if let Some(v) = p.param("persistent_keepalive") {
+        s.push_str(&format!("PersistentKeepalive = {v}\n"));
+    }
+    s
 }
 
 /// Список подписок из конфига.
@@ -973,6 +1081,39 @@ mod tests {
     fn config_path_ends_correctly() {
         let p = config_path();
         assert!(p.ends_with("jammvpn/config.json") || p.ends_with("jammvpn\\config.json"));
+    }
+
+    #[test]
+    fn wg_conf_export_roundtrips() {
+        // Узел AmneziaWG → .conf → парсер: ключевые поля сохраняются.
+        let conf = "\
+[Interface]
+PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+Address = 10.8.1.3/32
+DNS = 1.1.1.1, 1.0.0.1
+Jc = 4
+S1 = 71
+H1 = 1882683096
+[Peer]
+PublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=
+PresharedKey = CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=
+Endpoint = 192.0.2.10:32132
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+";
+        let node = parse_awg_conf(conf).unwrap();
+        let exported = node_to_wg_conf(&node);
+        let reparsed = parse_awg_conf(&exported).unwrap();
+        assert_eq!(reparsed.protocol, jammvpn_core::ProtocolKind::AmneziaWg);
+        assert_eq!(reparsed.address, "192.0.2.10");
+        assert_eq!(reparsed.port, 32132);
+        assert_eq!(reparsed.param("private_key"), node.param("private_key"));
+        assert_eq!(reparsed.param("public_key"), node.param("public_key"));
+        assert_eq!(reparsed.param("preshared_key"), node.param("preshared_key"));
+        assert_eq!(reparsed.param("h1"), Some("1882683096"));
+        assert_eq!(reparsed.param("jc"), Some("4"));
+        assert_eq!(reparsed.param("persistent_keepalive"), Some("25"));
+        assert_eq!(reparsed.param("allowed_ips"), Some("0.0.0.0/0, ::/0"));
     }
 
     #[test]

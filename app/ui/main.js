@@ -82,6 +82,43 @@ async function loadSettings() {
   const s = await invoke("get_settings");
   $("default-to-proxy").checked = !!s.default_to_proxy;
   $("default-proxy").value = s.default_proxy || "";
+  // Сохранённые адреса/узел подключения (если заданы — иначе остаются дефолты).
+  if (s.listen) $("listen").value = s.listen;
+  if (s.tunnel_listen) $("tunnel-listen").value = s.tunnel_listen;
+  if (s.tunnel_node) $("tunnel-node").value = s.tunnel_node;
+}
+
+// Персист настроек подключения (адреса прокси + узел туннеля). Тихо игнорируем
+// ошибки записи — это фоновое сохранение по мере правок полей.
+async function saveConnection() {
+  try {
+    await invoke("set_connection", {
+      listen: $("listen").value.trim() || null,
+      tunnelNode: $("tunnel-node").value || null,
+      tunnelListen: $("tunnel-listen").value.trim() || null,
+    });
+  } catch (e) {
+    /* фон: не мешаем пользователю */
+  }
+}
+
+// Экспорт выбранного узла туннеля в .conf на диск.
+async function exportTunnelConf() {
+  const node = $("tunnel-node").value;
+  const hint = $("tunnel-hint");
+  hint.className = "hint";
+  if (!node) {
+    hint.textContent = "выберите узел для экспорта .conf";
+    hint.className = "hint err";
+    return;
+  }
+  try {
+    const path = await invoke("export_node_conf", { name: node });
+    hint.textContent = "конфиг сохранён: " + path;
+  } catch (e) {
+    hint.textContent = "ошибка экспорта: " + e;
+    hint.className = "hint err";
+  }
 }
 
 async function saveSettings() {
@@ -665,6 +702,11 @@ async function init() {
   $("btn-split-clear").addEventListener("click", clearSplit);
   $("btn-tunnel-start").addEventListener("click", startTunnelProxy);
   $("btn-tunnel-stop").addEventListener("click", stopTunnelProxy);
+  $("btn-tunnel-export").addEventListener("click", exportTunnelConf);
+  // Автосохранение адресов/узла подключения при изменении.
+  $("listen").addEventListener("change", saveConnection);
+  $("tunnel-listen").addEventListener("change", saveConnection);
+  $("tunnel-node").addEventListener("change", saveConnection);
   $("import-arg").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doImport();
   });

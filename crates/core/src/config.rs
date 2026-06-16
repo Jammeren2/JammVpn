@@ -35,6 +35,12 @@ pub struct Settings {
     pub default_proxy: Option<String>,
     /// Если `true`, трафик без совпавшего правила идёт в прокси, иначе — напрямую.
     pub default_to_proxy: bool,
+    /// Локальный адрес основного прокси (SOCKS5/HTTP), напр. `127.0.0.1:1080`.
+    pub listen: Option<String>,
+    /// Узел для туннель-прокси «всё в туннель».
+    pub tunnel_node: Option<String>,
+    /// Локальный адрес туннель-прокси, напр. `127.0.0.1:1081`.
+    pub tunnel_listen: Option<String>,
 }
 
 /// Описание DNS-сервера для движка (строки; `net` парсит в транспорт).
