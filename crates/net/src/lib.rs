@@ -11,6 +11,7 @@
 // dead_code (часть API ещё не подключена) и clippy (стиль апстрима). См. ATTRIBUTION.md.
 #[allow(dead_code, clippy::all)]
 mod buf_reader;
+pub mod conn;
 pub mod dns;
 pub mod engine;
 pub mod fakeip;
@@ -38,6 +39,7 @@ mod vision;
 pub mod vless;
 pub mod wireguard;
 
+pub use conn::{snapshot as connection_snapshot, ConnInfo};
 pub use engine::{serve_socks_routed, serve_transparent_redirect, Decision, Engine, Routed};
 pub use fakeip::FakeIp;
 pub use from_profile::{outbound_from_profile, ProfileError};

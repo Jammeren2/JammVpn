@@ -156,6 +156,28 @@ pub fn list_nodes() -> Vec<NodeInfo> {
         .collect()
 }
 
+/// Активное соединение для монитора (срез реестра движка).
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectionInfo {
+    pub target: String,
+    pub via: String,
+    pub up: u64,
+    pub down: u64,
+}
+
+/// Список активных проксируемых соединений (живой срез).
+pub fn list_connections() -> Vec<ConnectionInfo> {
+    jammvpn_net::connection_snapshot()
+        .into_iter()
+        .map(|c| ConnectionInfo {
+            target: c.target,
+            via: c.via.to_string(),
+            up: c.up,
+            down: c.down,
+        })
+        .collect()
+}
+
 /// Импортирует узел (share-ссылка) или подписку (URL). Возвращает сообщение.
 pub async fn import(arg: &str) -> Result<String, String> {
     let path = config_path();

@@ -27,6 +27,12 @@ fn list_nodes() -> Vec<ctl::NodeInfo> {
     ctl::list_nodes()
 }
 
+/// Активные проксируемые соединения (для монитора статистики).
+#[tauri::command]
+fn list_connections() -> Vec<ctl::ConnectionInfo> {
+    ctl::list_connections()
+}
+
 #[tauri::command]
 fn config_path() -> String {
     ctl::config_path().display().to_string()
@@ -342,6 +348,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             list_nodes,
+            list_connections,
             config_path,
             import,
             import_config,

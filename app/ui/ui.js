@@ -163,33 +163,85 @@
     render();
   }
 
-  // --- Статистика соединений ---
-  // Живой мониторинг активных соединений требует поддержки бэкенда
-  // (напр. invoke("list_connections")). Пока её нет — честная заглушка вместо
-  // демо-данных: прочерки в чипах и пояснение, без вымышленных цифр.
+  // --- Статистика соединений (живой опрос бэкенда) ---
+  // Реальные данные из движка: invoke("list_connections") → [{target, via, up, down}].
   function setupStats() {
     const body = document.getElementById("st-body");
     if (!body) return;
-    setText("st-active", "—");
-    setText("st-up", "—");
-    setText("st-down", "—");
-    body.innerHTML =
-      '<p class="np-empty">Мониторинг активных соединений появится в следующей ' +
-      "версии — он требует учёта соединений в движке.</p>";
+    const invoke =
+      window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
 
-    // Кнопки сортировки переключают вид, но без данных это лишь подсветка;
-    // пауза неактивна. Обработчики защищены от отсутствия элементов.
+    let sortKey = "down"; // proc|dest|down — сортировка
+    let paused = false;
+
+    function fmtBytes(n) {
+      if (!n) return "—";
+      if (n < 1024) return n + " Б";
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " КБ";
+      return (n / 1024 / 1024).toFixed(1) + " МБ";
+    }
+
+    function row(c) {
+      const node = c.via === "direct" ? "напрямую" : "прокси";
+      return `<div class="conn">
+        <div class="conn-proc"><span class="conn-dot ${esc(c.via)}"></span>—</div>
+        <div class="conn-dest">${esc(c.target)}</div>
+        <div class="conn-node">${esc(node)}</div>
+        <div class="conn-up num">${fmtBytes(c.up)}</div>
+        <div class="conn-down num">${fmtBytes(c.down)}</div>
+      </div>`;
+    }
+
+    function render(list) {
+      list.sort((a, b) => {
+        if (sortKey === "down") return b.down - a.down;
+        if (sortKey === "ip") return b.up - a.up; // «IP» → по отдаче
+        return String(a.target).localeCompare(String(b.target)); // proc/dest → по цели
+      });
+      body.innerHTML = list.length
+        ? list.map(row).join("")
+        : '<p class="np-empty">Нет активных соединений.</p>';
+      setText("st-active", list.length);
+      setText("st-up", fmtBytes(list.reduce((s, c) => s + c.up, 0)));
+      setText("st-down", fmtBytes(list.reduce((s, c) => s + c.down, 0)));
+    }
+
+    async function poll() {
+      if (paused || !invoke) return;
+      try {
+        render(await invoke("list_connections"));
+      } catch (_) {
+        /* прокси не запущен / нет данных */
+      }
+    }
+
+    if (!invoke) {
+      // Предпросмотр в браузере без бэкенда.
+      body.innerHTML = '<p class="np-empty">Нет данных (бэкенд недоступен).</p>';
+      return;
+    }
+
+    // Сортировка.
     const seg = document.getElementById("st-sort");
     if (seg)
       seg.addEventListener("click", (e) => {
         const btn = e.target.closest(".seg-btn");
         if (!btn) return;
-        seg
-          .querySelectorAll(".seg-btn")
-          .forEach((b) => b.classList.toggle("active", b === btn));
+        sortKey = btn.dataset.sort;
+        seg.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b === btn));
+        poll();
       });
+    // Пауза.
     const pauseBtn = document.getElementById("st-pause");
-    if (pauseBtn) pauseBtn.disabled = true;
+    if (pauseBtn)
+      pauseBtn.addEventListener("click", () => {
+        paused = !paused;
+        pauseBtn.classList.toggle("paused", paused);
+        pauseBtn.textContent = paused ? "▶ Продолжить" : "❚❚ Пауза";
+      });
+
+    poll();
+    setInterval(poll, 1500);
   }
 
   function setText(id, v) {

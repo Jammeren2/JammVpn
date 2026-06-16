@@ -7,7 +7,7 @@
 use crate::dns::{DnsResolver, DnsServer};
 use crate::fakeip::FakeIp;
 use crate::from_profile::outbound_from_profile;
-use crate::inbound::{relay_through, reply, socks_handshake, SocksRequest};
+use crate::inbound::{reply, socks_handshake, SocksRequest};
 use crate::outbound::Outbound;
 use crate::target::Target;
 use jammvpn_core::config::{AppConfig, DnsServerConfig};
@@ -486,8 +486,7 @@ async fn serve_routed(
                 _ => return,
             };
             if first != 0x05 {
-                let _ = tokio::time::timeout(HANDSHAKE_TIMEOUT, handle_http(&mut client, &eng))
-                    .await;
+                let _ = tokio::time::timeout(HANDSHAKE_TIMEOUT, handle_http(client, &eng)).await;
                 return;
             }
             let req =
@@ -499,9 +498,19 @@ async fn serve_routed(
                 SocksRequest::Connect(target) => {
                     let routed = eng.route(&target).await;
                     match routed.decision {
-                        Decision::Connect(ob) => {
-                            let _ = relay_through(client, &ob, &routed.target).await;
-                        }
+                        Decision::Connect(ob) => match ob.connect_tcp(&routed.target).await {
+                            Ok(up) => {
+                                let _ = client.write_all(&reply(0x00)).await;
+                                let g = crate::conn::register(
+                                    target_label(&routed.target),
+                                    via_label(&ob),
+                                );
+                                let _ = crate::conn::copy_counted(client, up, &g).await;
+                            }
+                            Err(_) => {
+                                let _ = client.write_all(&reply(0x05)).await; // connection refused
+                            }
+                        },
                         Decision::Block => {
                             let _ = client.write_all(&reply(0x02)).await; // not allowed by ruleset
                         }
@@ -515,11 +524,27 @@ async fn serve_routed(
     }
 }
 
+/// Метка маршрута для монитора соединений.
+fn via_label(ob: &Outbound) -> &'static str {
+    match ob {
+        Outbound::Direct => "direct",
+        _ => "proxy",
+    }
+}
+
+/// Текстовое представление цели для монитора (`host:port` / `ip:port`).
+fn target_label(t: &Target) -> String {
+    match t {
+        Target::Domain(h, p) => format!("{h}:{p}"),
+        Target::Socket(a) => a.to_string(),
+    }
+}
+
 /// Обрабатывает HTTP-прокси соединение: `CONNECT host:port` (туннель, для HTTPS)
 /// и absolute-form запросы (`GET http://host/path` — обычный HTTP). Маршрутизация
 /// — тем же движком. Нужно для системного прокси Windows (WinINET говорит по HTTP).
-async fn handle_http(client: &mut TcpStream, engine: &Engine) -> io::Result<()> {
-    let head = read_http_head(client).await?;
+async fn handle_http(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
+    let head = read_http_head(&mut client).await?;
     let text = String::from_utf8_lossy(&head);
     let req_line = text.split("\r\n").next().unwrap_or("");
     let mut parts = req_line.split_whitespace();
@@ -532,12 +557,12 @@ async fn handle_http(client: &mut TcpStream, engine: &Engine) -> io::Result<()> 
         let routed = engine.route(&Target::Domain(host, port)).await;
         match routed.decision {
             Decision::Connect(ob) => match ob.connect_tcp(&routed.target).await {
-                Ok(mut up) => {
+                Ok(up) => {
                     client
                         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                         .await?;
-                    tokio::io::copy_bidirectional(client, &mut up).await?;
-                    Ok(())
+                    let g = crate::conn::register(target_label(&routed.target), via_label(&ob));
+                    crate::conn::copy_counted(client, up, &g).await
                 }
                 Err(e) => {
                     let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
@@ -568,8 +593,8 @@ async fn handle_http(client: &mut TcpStream, engine: &Engine) -> io::Result<()> 
                     let mut out = format!("{method} {path} HTTP/1.1\r\n").into_bytes();
                     out.extend_from_slice(headers_block);
                     up.write_all(&out).await?;
-                    tokio::io::copy_bidirectional(client, &mut up).await?;
-                    Ok(())
+                    let g = crate::conn::register(target_label(&routed.target), via_label(&ob));
+                    crate::conn::copy_counted(client, up, &g).await
                 }
                 Err(e) => {
                     let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
@@ -653,7 +678,7 @@ where
     let original_dst = Arc::new(original_dst);
     let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
-        let (mut client, _) = listener.accept().await?;
+        let (client, _) = listener.accept().await?;
         // Лимит исчерпан → закрываем новое соединение, не копим задачи.
         let permit = match Arc::clone(&sem).try_acquire_owned() {
             Ok(p) => p,
@@ -672,8 +697,9 @@ where
             // SOCKS), поэтому подключаем исходящий и копируем напрямую, без
             // относящегося к SOCKS ответа.
             if let Decision::Connect(ob) = routed.decision {
-                if let Ok(mut upstream) = ob.connect_tcp(&routed.target).await {
-                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                if let Ok(upstream) = ob.connect_tcp(&routed.target).await {
+                    let g = crate::conn::register(target_label(&routed.target), via_label(&ob));
+                    let _ = crate::conn::copy_counted(client, upstream, &g).await;
                 }
             }
             // Decision::Block → просто закрываем соединение.
