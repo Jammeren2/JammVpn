@@ -153,6 +153,8 @@
 
     // main.js перестраивает #server (childList) и обновляет задержки в #nodes-body.
     new MutationObserver(render).observe(sel, { childList: true });
+    // Восстановление выбора из настроек (main.js шлёт change) — перерисовать.
+    sel.addEventListener("change", render);
     if (nodesBody)
       new MutationObserver(render).observe(nodesBody, {
         childList: true,

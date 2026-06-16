@@ -48,6 +48,7 @@
             <option value="">— по правилам конфига —</option>
           </select>
           <div class="node-picker" id="node-picker"></div>
+          <p class="hint">Локальный прокси один: SOCKS5 + HTTP с поддержкой UDP (UDP ASSOCIATE). Выбран узел — весь трафик (TCP и UDP) идёт через него, без разницы VLESS/WG/SS; «Авто» — по правилам конфига. Адрес прокси — на вкладке «Дополнительно».</p>
         </section>
       </section>
 
@@ -209,30 +210,6 @@
             </label>
           </div>
           <p class="hint" id="sysproxy-msg">Прописывает локальный прокси в системные настройки (WinINET) — приложения пойдут через него без настройки каждого. Нужен запущенный прокси; снимается при остановке.</p>
-        </section>
-
-        <section class="panel">
-          <div class="panel-head">
-            <h2>Прокси «всё в туннель»</h2>
-            <div id="tunnel-status" class="status off">остановлен</div>
-          </div>
-          <p class="hint">Отдельный локальный SOCKS5-прокси: <b>весь</b> трафик (TCP <i>и</i> UDP — через SOCKS5 UDP ASSOCIATE) идёт целиком через выбранный узел (обычно WireGuard / AmneziaWG), без правил, мимо основного прокси. Направьте сюда приложение, чтобы весь его трафик шёл в туннель. UDP работает только для узлов с его поддержкой (WG/AmneziaWG, Shadowsocks, Trojan, TUIC).</p>
-          <div class="row" style="margin-top: 14px">
-            <label>Узел туннеля
-              <select id="tunnel-node">
-                <option value="">— выберите узел —</option>
-              </select>
-            </label>
-            <label>Локальный адрес
-              <input id="tunnel-listen" type="text" value="127.0.0.1:1081" />
-            </label>
-          </div>
-          <div class="row" style="margin-top: 12px">
-            <button id="btn-tunnel-start">Запустить</button>
-            <button id="btn-tunnel-stop" class="ghost" disabled>Остановить</button>
-            <button id="btn-tunnel-export" class="ghost" title="Сохранить конфиг выбранного WG/AmneziaWG-узла в файл .conf">Сохранить .conf</button>
-          </div>
-          <p class="hint" id="tunnel-hint"></p>
         </section>
 
         <section class="panel">

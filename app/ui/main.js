@@ -11,7 +11,7 @@ function setStatus(addr) {
   $("btn-start").disabled = running;
   $("btn-stop").disabled = !running;
   $("proxy-hint").textContent = running
-    ? `проверка: curl --socks5-hostname ${addr} https://icanhazip.com`
+    ? `SOCKS5 + HTTP (TCP и UDP) на ${addr}. Проверка: curl --socks5-hostname ${addr} https://icanhazip.com`
     : "";
 }
 
@@ -21,21 +21,25 @@ async function refreshNodes() {
   body.innerHTML = "";
   const sel = $("server");
   const dsel = $("default-proxy");
-  const tsel = $("tunnel-node");
   // сохраняем выбранные значения
   const prev = sel.value;
   const prevDefault = dsel ? dsel.value : "";
-  const prevTunnel = tsel ? tsel.value : "";
   sel.innerHTML = '<option value="">— по правилам конфига —</option>';
   if (dsel) dsel.innerHTML = '<option value="">— первый доступный —</option>';
-  if (tsel) tsel.innerHTML = '<option value="">— выберите узел —</option>';
   for (const [i, n] of nodes.entries()) {
+    // Экспорт .conf — только для WireGuard/AmneziaWG-узлов.
+    const isWg = /wireguard|amnezia|awg/i.test(n.protocol);
+    const exportBtn = isWg
+      ? `<button class="x" title="Сохранить .conf" data-export="${esc(
+          n.name
+        )}">⤓</button>`
+      : "";
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${i + 1}</td><td>${esc(n.name)}</td><td>${esc(
       n.protocol
     )}</td><td>${esc(n.address)}:${n.port}</td><td class="lat" data-name="${esc(
       n.name
-    )}">—</td><td class="del"><button class="x" title="Удалить" data-name="${esc(
+    )}">—</td><td class="del">${exportBtn}<button class="x" title="Удалить" data-name="${esc(
       n.name
     )}">✕</button></td>`;
     body.appendChild(tr);
@@ -45,13 +49,14 @@ async function refreshNodes() {
     opt.textContent = n.name;
     sel.appendChild(opt);
     if (dsel) dsel.appendChild(opt.cloneNode(true));
-    if (tsel) tsel.appendChild(opt.cloneNode(true));
   }
   sel.value = prev;
   if (dsel) dsel.value = prevDefault;
-  if (tsel) tsel.value = prevTunnel;
-  for (const btn of body.querySelectorAll("button.x")) {
+  for (const btn of body.querySelectorAll("button.x[data-name]")) {
     btn.addEventListener("click", () => removeNode(btn.dataset.name));
+  }
+  for (const btn of body.querySelectorAll("button.x[data-export]")) {
+    btn.addEventListener("click", () => exportNode(btn.dataset.export));
   }
   // datalist имён узлов — для автодополнения тега в редакторе правил.
   const dl = $("node-names");
@@ -82,42 +87,42 @@ async function loadSettings() {
   const s = await invoke("get_settings");
   $("default-to-proxy").checked = !!s.default_to_proxy;
   $("default-proxy").value = s.default_proxy || "";
-  // Сохранённые адреса/узел подключения (если заданы — иначе остаются дефолты).
+  // Сохранённые адрес прокси и выбранный узел (если заданы — иначе дефолты).
   if (s.listen) $("listen").value = s.listen;
-  if (s.tunnel_listen) $("tunnel-listen").value = s.tunnel_listen;
-  if (s.tunnel_node) $("tunnel-node").value = s.tunnel_node;
+  if (s.proxy_node) {
+    $("server").value = s.proxy_node;
+    // Уведомляем node-picker (ui.js) перерисовать выбор.
+    $("server").dispatchEvent(new Event("change", { bubbles: true }));
+  }
 }
 
-// Персист настроек подключения (адреса прокси + узел туннеля). Тихо игнорируем
-// ошибки записи — это фоновое сохранение по мере правок полей.
+// Персист настроек подключения (адрес прокси + выбранный узел). Тихо игнорируем
+// ошибки записи — это фоновое сохранение по мере правок.
 async function saveConnection() {
   try {
     await invoke("set_connection", {
       listen: $("listen").value.trim() || null,
-      tunnelNode: $("tunnel-node").value || null,
-      tunnelListen: $("tunnel-listen").value.trim() || null,
+      proxyNode: $("server").value || null,
     });
   } catch (e) {
     /* фон: не мешаем пользователю */
   }
 }
 
-// Экспорт выбранного узла туннеля в .conf на диск.
-async function exportTunnelConf() {
-  const node = $("tunnel-node").value;
-  const hint = $("tunnel-hint");
-  hint.className = "hint";
-  if (!node) {
-    hint.textContent = "выберите узел для экспорта .conf";
-    hint.className = "hint err";
-    return;
-  }
+// Экспорт узла (WG/AmneziaWG) в .conf на диск. Сообщение — в строку статуса узлов.
+async function exportNode(name) {
+  const msg = $("import-msg");
   try {
-    const path = await invoke("export_node_conf", { name: node });
-    hint.textContent = "конфиг сохранён: " + path;
+    const path = await invoke("export_node_conf", { name });
+    if (msg) {
+      msg.textContent = "конфиг сохранён: " + path;
+      msg.className = "hint ok";
+    }
   } catch (e) {
-    hint.textContent = "ошибка экспорта: " + e;
-    hint.className = "hint err";
+    if (msg) {
+      msg.textContent = "ошибка экспорта: " + e;
+      msg.className = "hint err";
+    }
   }
 }
 
@@ -226,45 +231,6 @@ async function stopProxy() {
   await invoke("proxy_stop");
   setStatus(null);
   await loadSysProxy(); // бэкенд снимает системный прокси при остановке
-}
-
-function setTunnelStatus(addr) {
-  const el = $("tunnel-status");
-  const running = !!addr;
-  if (el) {
-    el.textContent = running ? `на ${addr}` : "остановлен";
-    el.className = "status " + (running ? "on" : "off");
-  }
-  $("btn-tunnel-start").disabled = running;
-  $("btn-tunnel-stop").disabled = !running;
-  $("tunnel-hint").textContent = running
-    ? `весь трафик на ${addr} идёт через узел; проверка: curl --socks5-hostname ${addr} https://icanhazip.com`
-    : "";
-}
-
-async function startTunnelProxy() {
-  const listen = $("tunnel-listen").value.trim() || "127.0.0.1:1081";
-  const node = $("tunnel-node").value || "";
-  const hint = $("tunnel-hint");
-  hint.className = "hint";
-  if (!node) {
-    hint.textContent = "выберите узел для туннеля";
-    hint.className = "hint err";
-    return;
-  }
-  hint.textContent = "запуск…";
-  try {
-    const addr = await invoke("tunnel_proxy_start", { listen, node });
-    setTunnelStatus(addr);
-  } catch (e) {
-    hint.textContent = "ошибка: " + e;
-    hint.className = "hint err";
-  }
-}
-
-async function stopTunnelProxy() {
-  await invoke("tunnel_proxy_stop");
-  setTunnelStatus(null);
 }
 
 async function refreshSubs() {
@@ -700,13 +666,9 @@ async function init() {
   $("btn-split-save").addEventListener("click", saveSplit);
   $("btn-split-apply").addEventListener("click", applySplit);
   $("btn-split-clear").addEventListener("click", clearSplit);
-  $("btn-tunnel-start").addEventListener("click", startTunnelProxy);
-  $("btn-tunnel-stop").addEventListener("click", stopTunnelProxy);
-  $("btn-tunnel-export").addEventListener("click", exportTunnelConf);
-  // Автосохранение адресов/узла подключения при изменении.
+  // Автосохранение адреса прокси и выбранного узла при изменении.
   $("listen").addEventListener("change", saveConnection);
-  $("tunnel-listen").addEventListener("change", saveConnection);
-  $("tunnel-node").addEventListener("change", saveConnection);
+  $("server").addEventListener("change", saveConnection);
   $("import-arg").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doImport();
   });
@@ -726,7 +688,6 @@ async function init() {
   await loadSplit();
   await loadSysProxy();
   setStatus(await invoke("proxy_status"));
-  setTunnelStatus(await invoke("tunnel_proxy_status"));
 }
 
 window.addEventListener("DOMContentLoaded", init);

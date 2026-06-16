@@ -56,12 +56,10 @@ pub struct SettingsInfo {
     pub default_to_proxy: bool,
     /// Узел по умолчанию (для `Proxy(None)` и default-прокси).
     pub default_proxy: Option<String>,
-    /// Локальный адрес основного прокси (SOCKS5/HTTP).
+    /// Локальный адрес прокси (SOCKS5/HTTP).
     pub listen: Option<String>,
-    /// Узел туннель-прокси «всё в туннель».
-    pub tunnel_node: Option<String>,
-    /// Локальный адрес туннель-прокси.
-    pub tunnel_listen: Option<String>,
+    /// Выбранный на «Главной» узел (весь трафик через него; `None` — по правилам).
+    pub proxy_node: Option<String>,
 }
 
 /// Подписка в списке (для UI).
@@ -367,8 +365,7 @@ pub fn get_settings() -> SettingsInfo {
         default_to_proxy: cfg.settings.default_to_proxy,
         default_proxy: cfg.settings.default_proxy.clone(),
         listen: cfg.settings.listen.clone(),
-        tunnel_node: cfg.settings.tunnel_node.clone(),
-        tunnel_listen: cfg.settings.tunnel_listen.clone(),
+        proxy_node: cfg.settings.proxy_node.clone(),
     }
 }
 
@@ -382,20 +379,15 @@ pub fn set_settings(default_to_proxy: bool, default_proxy: Option<String>) -> Re
     save_config(&path, &cfg, store.as_ref())
 }
 
-/// Сохраняет настройки подключения (адреса прокси и узел туннеля). Пустые
+/// Сохраняет настройки подключения (адрес прокси и выбранный узел). Пустые
 /// строки трактуются как «не задано».
-pub fn set_connection(
-    listen: Option<String>,
-    tunnel_node: Option<String>,
-    tunnel_listen: Option<String>,
-) -> Result<(), String> {
+pub fn set_connection(listen: Option<String>, proxy_node: Option<String>) -> Result<(), String> {
     let path = config_path();
     let store = secret_store();
     let mut cfg = load_config(&path, store.as_ref());
     let norm = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     cfg.settings.listen = norm(listen);
-    cfg.settings.tunnel_node = norm(tunnel_node);
-    cfg.settings.tunnel_listen = norm(tunnel_listen);
+    cfg.settings.proxy_node = norm(proxy_node);
     save_config(&path, &cfg, store.as_ref())
 }
 
