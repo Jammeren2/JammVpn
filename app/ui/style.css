@@ -1049,3 +1049,30 @@ button.mini:hover:not(:disabled) {
 footer {
   display: none;
 }
+
+/* ============ Импорт конфига (textarea) ============ */
+textarea {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  font: inherit;
+  transition: 0.15s;
+}
+textarea::placeholder {
+  color: var(--faint);
+}
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+#import-config-text {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+}

@@ -135,6 +135,21 @@ async function doImport() {
   }
 }
 
+async function importConfig() {
+  const text = $("import-config-text").value.trim();
+  if (!text) return;
+  const msg = $("import-msg");
+  try {
+    msg.textContent = await invoke("import_config", { text });
+    msg.className = "hint ok";
+    $("import-config-text").value = "";
+    await refreshNodes();
+  } catch (e) {
+    msg.textContent = "ошибка: " + e;
+    msg.className = "hint err";
+  }
+}
+
 async function updateSubs() {
   const msg = $("import-msg");
   try {
@@ -528,6 +543,7 @@ async function init() {
   $("btn-refresh").addEventListener("click", refreshNodes);
   $("btn-test").addEventListener("click", testLatencies);
   $("btn-import").addEventListener("click", doImport);
+  $("btn-import-config").addEventListener("click", importConfig);
   $("btn-update").addEventListener("click", updateSubs);
   $("btn-save-settings").addEventListener("click", saveSettings);
   $("btn-add-sub").addEventListener("click", addSub);

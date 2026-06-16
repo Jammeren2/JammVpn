@@ -33,6 +33,12 @@ async fn import(arg: String) -> Result<String, String> {
     ctl::import(&arg).await
 }
 
+/// Импорт из вставленного текста конфига (ссылки / Xray|sing-box JSON / AWG).
+#[tauri::command]
+fn import_config(text: String) -> Result<String, String> {
+    ctl::import_config(&text)
+}
+
 #[tauri::command]
 async fn test_latencies() -> Vec<ctl::LatencyResult> {
     ctl::test_latencies(None).await
@@ -282,6 +288,7 @@ fn main() {
             list_nodes,
             config_path,
             import,
+            import_config,
             test_latencies,
             update_subscriptions,
             proxy_start,

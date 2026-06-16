@@ -6,10 +6,13 @@
 //! в нём шифруются (DPAPI на Windows). Операции возвращают ДАННЫЕ (не печатают),
 //! ошибки — человекочитаемой строкой; UI/CLI форматируют сами.
 
+use jammvpn_core::error::ParseError;
+use jammvpn_core::model::ServerProfile;
 use jammvpn_core::routing::DomainRule;
 use jammvpn_core::split::{AppMatcher, IpCidr};
 use jammvpn_core::{
-    parse_link, AppConfig, RouteAction, Rule, SecretStore, SplitConfig, SplitMode, Subscription,
+    parse_awg_conf, parse_link, parse_singbox_config, parse_xray_config, AppConfig, RouteAction,
+    Rule, SecretStore, SplitConfig, SplitMode, Subscription,
 };
 use jammvpn_net::{outbound_from_profile, serve_socks_routed, subscription, urltest, Engine};
 use serde::{Deserialize, Serialize};
@@ -181,6 +184,70 @@ pub async fn import(arg: &str) -> Result<String, String> {
         m
     };
     save_config(&path, &cfg, store.as_ref())?;
+    Ok(msg)
+}
+
+/// Определяет формат текста конфига и парсит его в список профилей.
+/// Возвращает (имя формата, результаты парсинга по элементам).
+fn parse_any_config(text: &str) -> (&'static str, Vec<Result<ServerProfile, ParseError>>) {
+    let t = text.trim_start();
+    // JSON: сначала пробуем sing-box (поле `type`), затем Xray (`protocol`).
+    if t.starts_with('{') {
+        let sb = parse_singbox_config(text);
+        if sb.iter().any(|r| r.is_ok()) {
+            return ("sing-box JSON", sb);
+        }
+        let xr = parse_xray_config(text);
+        if xr.iter().any(|r| r.is_ok()) {
+            return ("Xray JSON", xr);
+        }
+        return ("JSON", sb); // вернём ошибки sing-box для диагностики
+    }
+    // AmneziaWG / WireGuard .conf.
+    if text.contains("[Interface]") {
+        return ("AmneziaWG .conf", vec![parse_awg_conf(text)]);
+    }
+    // Иначе — ссылки построчно (поддерживает вставку нескольких ссылок).
+    let links = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(parse_link)
+        .collect();
+    ("ссылки", links)
+}
+
+/// Импорт из вставленного текста конфига: ссылка(и) / Xray JSON / sing-box JSON
+/// / AmneziaWG `.conf`. Добавляет найденные узлы в конфиг. Возвращает сообщение.
+pub fn import_config(text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("пустой ввод".into());
+    }
+    let (fmt, results) = parse_any_config(text);
+    let mut profiles = Vec::new();
+    let mut errors = 0usize;
+    for r in results {
+        match r {
+            Ok(p) => profiles.push(p),
+            Err(_) => errors += 1,
+        }
+    }
+    if profiles.is_empty() {
+        return Err(format!(
+            "не удалось распознать конфиг (формат: {fmt}); узлов не найдено"
+        ));
+    }
+    let n = profiles.len();
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    cfg.servers.append(&mut profiles);
+    save_config(&path, &cfg, store.as_ref())?;
+    let mut msg = format!("импортировано узлов: {n} (формат: {fmt})");
+    if errors > 0 {
+        msg.push_str(&format!("; пропущено с ошибкой: {errors}"));
+    }
     Ok(msg)
 }
 
@@ -996,6 +1063,24 @@ mod tests {
         assert!(apply_remove_rule(&mut cfg, 1));
         assert_eq!(cfg.rules.len(), 2);
         assert!(!apply_remove_rule(&mut cfg, 9));
+    }
+
+    #[test]
+    fn import_config_detects_formats() {
+        // Несколько ссылок построчно (с комментарием/пустой строкой).
+        let (fmt, r) = parse_any_config(
+            "ss://YWVzLTI1Ni1nY206cGFzcw==@1.2.3.4:8388#A\n# комментарий\n\nss://YWVzLTI1Ni1nY206cGFzcw==@5.6.7.8:8388#B",
+        );
+        assert_eq!(fmt, "ссылки");
+        assert_eq!(r.iter().filter(|x| x.is_ok()).count(), 2);
+
+        // AmneziaWG .conf — определяется по секции [Interface].
+        let (fmt, _) = parse_any_config("[Interface]\nPrivateKey = x\n[Peer]\nEndpoint = h:51820");
+        assert_eq!(fmt, "AmneziaWG .conf");
+
+        // JSON — определяется по ведущей `{`.
+        let (fmt, _) = parse_any_config("{ \"outbounds\": [] }");
+        assert!(fmt == "JSON" || fmt == "sing-box JSON" || fmt == "Xray JSON");
     }
 
     #[test]
