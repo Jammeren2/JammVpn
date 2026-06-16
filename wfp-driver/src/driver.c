@@ -419,14 +419,22 @@ static void NTAPI JammClassify(
     JAMM_IP remote; UINT16 portHost; UCHAR ctx[JAMM_REDIRECT_CONTEXT_LEN];
     JammBuildDst(isV4, inFixedValues, &remote, &portHost, ctx);
 
+    /* PID процесса-инициатора (для самоисключения прокси). */
+    UINT64 procId = 0;
+    if (FWPS_IS_METADATA_FIELD_PRESENT(inMetaValues, FWPS_METADATA_FIELD_PROCESS_ID)) {
+        procId = inMetaValues->processId;
+    }
+
     JAMM_DECISION decision;
     UINT16 redirectPort;
+    UINT32 redirectPid;
     BOOLEAN killSwitch;
 
     KIRQL irql;
     KeAcquireSpinLock(&gConfigLock, &irql);
     decision = JammDecide(&appLower, &remote);
     redirectPort = gConfig.redirectPort;
+    redirectPid = gConfig.redirectPid;
     killSwitch = gConfig.killSwitch;
     KeReleaseSpinLock(&gConfigLock, irql);
 
@@ -437,7 +445,10 @@ static void NTAPI JammClassify(
         classifyOut->rights &= ~FWPS_RIGHT_ACTION_WRITE;
         return;
     }
-    if (decision == JAMM_DIRECT || redirectPort == 0) {
+    /* Трафик самого прокси-процесса (redirectPid) НИКОГДА не перенаправляем —
+     * иначе соединение прокси к VPN-серверу зациклится обратно в прокси. */
+    if (decision == JAMM_DIRECT || redirectPort == 0
+        || (redirectPid != 0 && procId == (UINT64)redirectPid)) {
         classifyOut->actionType = FWP_ACTION_PERMIT;
         return;
     }
