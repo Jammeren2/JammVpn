@@ -328,6 +328,64 @@ async function testLatencies() {
   }
 }
 
+// --- Модалка добавления узла/подписки ---
+const ADD_PLACEHOLDERS = {
+  vless: "vless://uuid@host:443?security=reality&pbk=...&sid=...&sni=...#Имя",
+  shadowsocks: "ss://base64@host:port#Имя   (поддерживается Outline-ссылка)",
+  trojan: "trojan://password@host:443?sni=...#Имя",
+  wireguard:
+    "[Interface]\nPrivateKey = ...\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = ...\nPresharedKey = ...\nEndpoint = host:51820\nAllowedIPs = 0.0.0.0/0, ::/0",
+  tuic: "tuic://uuid:password@host:443?sni=...#Имя",
+  socks: "socks5://user:pass@host:1080#Имя   (или http://user:pass@host:8080)",
+  sub: "https://example.com/sub  — ссылка на подписку",
+};
+let addProto = "vless";
+
+function openAddModal() {
+  $("add-modal").style.display = "flex";
+  $("add-msg").textContent = "";
+  $("add-input").value = "";
+  setAddProto("vless");
+  $("add-input").focus();
+}
+function closeAddModal() {
+  $("add-modal").style.display = "none";
+}
+function setAddProto(p) {
+  addProto = p;
+  for (const c of document.querySelectorAll("#add-proto .proto-chip"))
+    c.classList.toggle("on", c.dataset.proto === p);
+  $("add-input").placeholder = ADD_PLACEHOLDERS[p] || "";
+}
+async function submitAdd() {
+  const text = $("add-input").value.trim();
+  const msg = $("add-msg");
+  if (!text) {
+    msg.textContent = "вставьте ключ / конфиг / ссылку";
+    msg.className = "hint err";
+    return;
+  }
+  msg.className = "hint";
+  msg.textContent = "добавляю…";
+  try {
+    if (addProto === "sub") {
+      await invoke("add_subscription", { url: text, tag: null, intervalHours: 12 });
+      const ups = await invoke("update_subscriptions");
+      const n = ups.reduce((s, u) => s + (u.count || 0), 0);
+      msg.textContent = `подписка добавлена: ${n} узлов`;
+      await refreshSubs();
+    } else {
+      msg.textContent = await invoke("import_config", { text });
+    }
+    msg.className = "hint ok";
+    await refreshNodes();
+    setTimeout(closeAddModal, 1000);
+  } catch (e) {
+    msg.textContent = "ошибка: " + e;
+    msg.className = "hint err";
+  }
+}
+
 async function doImport() {
   const arg = $("import-arg").value.trim();
   if (!arg) return;
@@ -958,6 +1016,17 @@ async function init() {
   }
   $("btn-refresh").addEventListener("click", refreshNodes);
   $("btn-test").addEventListener("click", testLatencies);
+  // Модалка «Добавить».
+  $("btn-add-node").addEventListener("click", openAddModal);
+  $("add-close").addEventListener("click", closeAddModal);
+  $("add-submit").addEventListener("click", submitAdd);
+  $("add-proto").addEventListener("click", (e) => {
+    const c = e.target.closest(".proto-chip");
+    if (c) setAddProto(c.dataset.proto);
+  });
+  $("add-modal").addEventListener("click", (e) => {
+    if (e.target === $("add-modal")) closeAddModal();
+  });
   $("btn-import").addEventListener("click", doImport);
   $("btn-import-config").addEventListener("click", importConfig);
   $("btn-update").addEventListener("click", updateSubs);

@@ -47,7 +47,10 @@
         <section class="panel">
           <div class="panel-head">
             <h2>Через узел</h2>
-            <button id="btn-test-home" class="ghost">Тест задержек</button>
+            <div class="panel-actions">
+              <button id="btn-add-node" title="Добавить ключ или подписку">+ Добавить</button>
+              <button id="btn-test-home" class="ghost">Тест задержек</button>
+            </div>
           </div>
           <!-- main.js заполняет и читает этот select; визуальный список рисует ui.js -->
           <select id="server" class="visually-hidden" tabindex="-1" aria-hidden="true">
@@ -342,6 +345,31 @@
         </section>
       </section>
     </main>
+
+    <!-- ====================== МОДАЛКА «ДОБАВИТЬ» ====================== -->
+    <div id="add-modal" class="modal-overlay" style="display: none">
+      <div class="modal">
+        <div class="panel-head">
+          <h2>Добавить узел или подписку</h2>
+          <button id="add-close" class="ghost">✕</button>
+        </div>
+        <p class="hint">1) выбери тип, 2) вставь ключ / конфиг / ссылку подписки.</p>
+        <div class="proto-grid" id="add-proto">
+          <button class="proto-chip on" data-proto="vless">VLESS</button>
+          <button class="proto-chip" data-proto="shadowsocks">Shadowsocks</button>
+          <button class="proto-chip" data-proto="trojan">Trojan</button>
+          <button class="proto-chip" data-proto="wireguard">WireGuard / AmneziaWG</button>
+          <button class="proto-chip" data-proto="tuic">TUIC</button>
+          <button class="proto-chip" data-proto="socks">SOCKS5 / HTTP</button>
+          <button class="proto-chip" data-proto="sub">Подписка (URL)</button>
+        </div>
+        <textarea id="add-input" rows="5"></textarea>
+        <div class="row" style="margin-top: 12px">
+          <button id="add-submit">Добавить</button>
+        </div>
+        <p class="hint" id="add-msg"></p>
+      </div>
+    </div>
 
     <datalist id="node-names"></datalist>
 
