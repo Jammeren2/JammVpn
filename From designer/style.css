@@ -193,6 +193,7 @@ body {
 .panel-head h2,
 .panel-head h3 {
   margin: 0;
+  white-space: nowrap;
 }
 .panel-actions {
   display: flex;
@@ -396,6 +397,126 @@ button.ghost:hover:not(:disabled) {
   margin: 4px 0 0;
   font-family: var(--mono);
   font-size: 11.5px;
+}
+
+.hero-sub {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.hero-sub b {
+  color: #c7f5fe;
+  font-weight: 600;
+}
+
+/* ============ Node picker (Главная — выбор узла) ============ */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.node-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.np-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  text-align: left;
+  padding: 13px 16px;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  cursor: pointer;
+  color: var(--text);
+  font: inherit;
+  transition: 0.15s;
+}
+.np-item:hover {
+  border-color: var(--border-2);
+  background: rgba(255, 255, 255, 0.04);
+}
+.np-item.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+.np-radio {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--faint);
+  flex: 0 0 auto;
+  position: relative;
+  transition: 0.15s;
+}
+.np-item.selected .np-radio {
+  border-color: var(--accent);
+}
+.np-item.selected .np-radio::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+.np-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.np-name {
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.np-sub {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.np-lat {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--faint);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 3px 9px;
+  border-radius: 6px;
+  flex: 0 0 auto;
+}
+.np-lat.ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+.np-lat.err {
+  color: var(--err);
+  background: var(--err-soft);
+}
+.np-auto .np-radio {
+  border-style: dashed;
+}
+.np-empty {
+  padding: 14px 4px 2px;
+  color: var(--muted);
+  font-size: 12.5px;
 }
 
 /* ============ Status badges ============ */

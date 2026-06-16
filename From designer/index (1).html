@@ -29,52 +29,25 @@
           <div class="hero-ring"></div>
           <div class="hero-mid">
             <div id="status" class="status off">прокси остановлен</div>
-            <div class="hero-controls">
-              <label>Локальный адрес (SOCKS5)
-                <input id="listen" type="text" value="127.0.0.1:1080" />
-              </label>
-              <label>Через узел
-                <select id="server">
-                  <option value="">— по правилам конфига —</option>
-                </select>
-              </label>
-            </div>
+            <p class="hero-sub" id="hero-node-label">Авто — по правилам конфига</p>
           </div>
           <div class="hero-actions">
-            <button id="btn-start">Запустить</button>
+            <button id="btn-start">Запустить туннель</button>
             <button id="btn-stop" class="ghost" disabled>Остановить</button>
           </div>
           <p class="hint" id="proxy-hint"></p>
         </section>
 
         <section class="panel">
-          <h2>Маршрутизация по умолчанию</h2>
-          <div class="row" style="margin-bottom: 14px">
-            <label class="check">
-              <input id="default-to-proxy" type="checkbox" />
-              Трафик без правил — через прокси (иначе напрямую)
-            </label>
+          <div class="panel-head">
+            <h2>Через узел</h2>
+            <button id="btn-test-home" class="ghost">Тест задержек</button>
           </div>
-          <div class="row">
-            <label>Узел по умолчанию
-              <select id="default-proxy">
-                <option value="">— первый доступный —</option>
-              </select>
-            </label>
-            <button id="btn-save-settings" class="ghost">Сохранить</button>
-          </div>
-          <p class="hint" id="settings-msg"></p>
-        </section>
-
-        <section class="panel">
-          <h2>Система</h2>
-          <div class="row">
-            <label class="check">
-              <input id="autostart" type="checkbox" />
-              Запускать JammVPN при входе в Windows (в трей)
-            </label>
-          </div>
-          <p class="hint" id="autostart-msg"></p>
+          <!-- main.js заполняет и читает этот select; визуальный список рисует ui.js -->
+          <select id="server" class="visually-hidden" tabindex="-1" aria-hidden="true">
+            <option value="">— по правилам конфига —</option>
+          </select>
+          <div class="node-picker" id="node-picker"></div>
         </section>
       </section>
 
@@ -210,6 +183,46 @@
 
       <!-- ====================== ДОПОЛНИТЕЛЬНО ====================== -->
       <section class="tabpanel" data-tab-panel="advanced">
+        <section class="panel">
+          <h2>Подключение</h2>
+          <div class="row">
+            <label>Локальный адрес (SOCKS5)
+              <input id="listen" type="text" value="127.0.0.1:1080" />
+            </label>
+          </div>
+          <p class="hint">Локальный SOCKS5-прокси, куда приложения отправляют трафик.</p>
+        </section>
+
+        <section class="panel">
+          <h2>Маршрутизация по умолчанию</h2>
+          <div class="row" style="margin-bottom: 14px">
+            <label class="check">
+              <input id="default-to-proxy" type="checkbox" />
+              Трафик без правил — через прокси (иначе напрямую)
+            </label>
+          </div>
+          <div class="row">
+            <label>Узел по умолчанию
+              <select id="default-proxy">
+                <option value="">— первый доступный —</option>
+              </select>
+            </label>
+            <button id="btn-save-settings" class="ghost">Сохранить</button>
+          </div>
+          <p class="hint" id="settings-msg"></p>
+        </section>
+
+        <section class="panel">
+          <h2>Система</h2>
+          <div class="row">
+            <label class="check">
+              <input id="autostart" type="checkbox" />
+              Запускать JammVPN при входе в Windows (в трей)
+            </label>
+          </div>
+          <p class="hint" id="autostart-msg"></p>
+        </section>
+
         <section class="panel">
           <div class="panel-head">
             <h2>Раздельное туннелирование (split)</h2>
