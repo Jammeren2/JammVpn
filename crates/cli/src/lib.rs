@@ -925,6 +925,42 @@ pub fn get_split_options() -> SplitOptions {
     }
 }
 
+/// Авто-тест доступности сети через запущенный локальный прокси: подключается
+/// SOCKS5-клиентом к `proxy_addr`, тянет `http://icanhazip.com` и возвращает
+/// внешний IP (или ошибку — значит трафик через узел не идёт).
+pub async fn proxy_self_test(proxy_addr: &str) -> Result<String, String> {
+    use jammvpn_net::{Outbound, Socks5Config, Target};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let ob = Outbound::Socks5(Socks5Config {
+        server: proxy_addr.to_string(),
+        username: None,
+        password: None,
+    });
+    let target = Target::Domain("icanhazip.com".to_string(), 80);
+    let fut = async {
+        let mut s = ob.connect_tcp(&target).await?;
+        s.write_all(b"GET / HTTP/1.1\r\nHost: icanhazip.com\r\nConnection: close\r\nUser-Agent: curl/8\r\n\r\n")
+            .await?;
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).await?;
+        Ok::<_, std::io::Error>(buf)
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(12), fut).await {
+        Ok(Ok(buf)) => {
+            let text = String::from_utf8_lossy(&buf);
+            let ip = text.rsplit("\r\n\r\n").next().unwrap_or("").trim().to_string();
+            if ip.is_empty() {
+                Err("пустой ответ".into())
+            } else {
+                Ok(ip)
+            }
+        }
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("таймаут (12с)".into()),
+    }
+}
+
 /// Сохраняет драйвер-настройки split (kill-switch).
 pub fn set_split_options(kill_switch: bool) -> Result<(), String> {
     let path = config_path();
@@ -1223,6 +1259,34 @@ pub fn local_wg_export_conf() -> Result<String, String> {
     Ok(file.to_string_lossy().to_string())
 }
 
+/// Best-effort: разрешает входящий UDP-порт в брандмауэре Windows (netsh).
+/// Требует прав администратора; без них — тихо ничего не делает (UDP по LAN
+/// тогда может блокироваться, подключайтесь к локальному WG от админа).
+#[cfg(windows)]
+fn firewall_allow_udp(port: u16) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let name = format!("JammVPN Local WG {port}");
+    let _ = std::process::Command::new("netsh")
+        .args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}")])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let _ = std::process::Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &format!("name={name}"),
+            "dir=in",
+            "action=allow",
+            "protocol=UDP",
+            &format!("localport={port}"),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+}
+
 /// Управляемый локальный WG-сервер (запуск/остановка из UI).
 pub struct LocalWgController {
     server: WgServer,
@@ -1252,6 +1316,11 @@ impl LocalWgController {
             server_ip,
             prefix: lw.prefix,
         };
+        // Открываем входящий UDP-порт в брандмауэре (best-effort; нужен админ —
+        // иначе подключение по LAN блокируется).
+        #[cfg(windows)]
+        firewall_allow_udp(lw.port);
+
         let server = WgServer::start(params, Arc::new(engine))
             .await
             .map_err(|e| e.to_string())?;

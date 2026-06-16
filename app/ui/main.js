@@ -296,9 +296,38 @@ async function startProxy() {
   try {
     const addr = await invoke("proxy_start", { listen, server });
     setStatus(addr);
+    checkConnectivity(addr); // авто-тест доступности сети
   } catch (e) {
     $("proxy-hint").textContent = "ошибка: " + e;
     $("proxy-hint").className = "hint err";
+  }
+}
+
+// Смена выбранного узла: сохранить и, если прокси запущен, перезапустить с ним.
+async function onNodeChange() {
+  await saveConnection();
+  if ($("status").classList.contains("on")) {
+    try {
+      await invoke("proxy_stop");
+    } catch (e) {
+      /* ignore */
+    }
+    await startProxy();
+  }
+}
+
+// Авто-проверка доступности сети через запущенный прокси (показывает exit-IP).
+async function checkConnectivity(addr) {
+  const hint = $("proxy-hint");
+  hint.className = "hint";
+  hint.textContent = `прокси на ${addr} · проверка сети…`;
+  try {
+    const ip = await invoke("proxy_self_test");
+    hint.textContent = `сеть доступна ✓ внешний IP: ${ip} (прокси ${addr})`;
+    hint.className = "hint ok";
+  } catch (e) {
+    hint.textContent = `прокси на ${addr}, но сеть недоступна: ${e}`;
+    hint.className = "hint err";
   }
 }
 
@@ -743,7 +772,7 @@ async function init() {
   $("btn-split-clear").addEventListener("click", clearSplit);
   // Автосохранение адреса прокси и выбранного узла при изменении.
   $("listen").addEventListener("change", saveConnection);
-  $("server").addEventListener("change", saveConnection);
+  $("server").addEventListener("change", onNodeChange);
   // Локальный WG-сервер.
   $("btn-lwg-start").addEventListener("click", startLocalWg);
   $("btn-lwg-stop").addEventListener("click", stopLocalWg);

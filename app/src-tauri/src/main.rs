@@ -125,6 +125,20 @@ fn system_proxy_status() -> Result<ctl::SysProxyStatus, String> {
     ctl::system_proxy_status()
 }
 
+/// Авто-тест: через запущенный прокси тянет внешний IP (проверка, что трафик
+/// реально идёт через узел).
+#[tauri::command]
+async fn proxy_self_test(state: State<'_, ProxyState>) -> Result<String, String> {
+    let addr: Option<String> = state
+        .0
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.addr().to_string());
+    let addr = addr.ok_or("прокси не запущен")?;
+    ctl::proxy_self_test(&addr).await
+}
+
 /// Адрес работающего прокси (`None` — не запущен).
 #[tauri::command]
 fn proxy_status(state: State<'_, ProxyState>) -> Option<String> {
@@ -414,6 +428,7 @@ fn main() {
             proxy_start,
             proxy_stop,
             proxy_status,
+            proxy_self_test,
             remove_node,
             get_settings,
             set_settings,

@@ -185,9 +185,18 @@ impl Engine {
         if let Some(server) = cfg.dns.servers.iter().find_map(dns_server_from_config) {
             engine.resolver = Some(DnsResolver::new(server));
         }
-        // FakeIP: при включении и корректном диапазоне.
+        // FakeIP: при включении. Некорректный диапазон в конфиге не отключает
+        // фичу — откатываемся на дефолтный 198.18.0.0/15.
         if cfg.dns.fakeip.enabled {
-            match FakeIp::new(&cfg.dns.fakeip.range) {
+            const DEFAULT_RANGE: &str = "198.18.0.0/15";
+            let fi = FakeIp::new(&cfg.dns.fakeip.range).or_else(|e| {
+                eprintln!(
+                    "предупреждение: некорректный FakeIP-диапазон «{}» ({e}); беру {DEFAULT_RANGE}",
+                    cfg.dns.fakeip.range
+                );
+                FakeIp::new(DEFAULT_RANGE)
+            });
+            match fi {
                 Ok(fi) => engine.fakeip = Some(Arc::new(fi)),
                 Err(e) => eprintln!("предупреждение: FakeIP отключён ({e})"),
             }
