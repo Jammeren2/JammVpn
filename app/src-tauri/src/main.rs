@@ -22,6 +22,11 @@ struct SplitState(Mutex<Option<ctl::SplitProxyController>>);
 #[derive(Default)]
 struct SysProxyState(Mutex<bool>);
 
+/// Отдельный локальный прокси «весь трафик через выбранный узел» (туннель),
+/// независимый от основного прокси-по-правилам.
+#[derive(Default)]
+struct TunnelProxyState(Mutex<Option<ctl::ProxyController>>);
+
 #[tauri::command]
 fn list_nodes() -> Vec<ctl::NodeInfo> {
     ctl::list_nodes()
@@ -124,6 +129,47 @@ fn system_proxy_status() -> Result<ctl::SysProxyStatus, String> {
 /// Адрес работающего прокси (`None` — не запущен).
 #[tauri::command]
 fn proxy_status(state: State<'_, ProxyState>) -> Option<String> {
+    state
+        .0
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.addr().to_string())
+}
+
+/// Поднять отдельный локальный прокси «весь трафик через узел `node`» (например,
+/// WG/AmneziaWG-узел ⇒ всё, что проксируется на этот порт, идёт через туннель).
+/// Независим от основного прокси-по-правилам.
+#[tauri::command]
+async fn tunnel_proxy_start(
+    state: State<'_, TunnelProxyState>,
+    listen: String,
+    node: String,
+) -> Result<String, String> {
+    if node.is_empty() {
+        return Err("выберите узел для туннеля".into());
+    }
+    if state.0.lock().unwrap().is_some() {
+        return Err("туннель-прокси уже запущен".into());
+    }
+    // server=Some(node) ⇒ ProxyController строит single_proxy: весь трафик в узел.
+    let proxy = ctl::ProxyController::start(&listen, Some(node)).await?;
+    let addr = proxy.addr().to_string();
+    *state.0.lock().unwrap() = Some(proxy);
+    Ok(addr)
+}
+
+/// Остановить туннель-прокси.
+#[tauri::command]
+fn tunnel_proxy_stop(state: State<'_, TunnelProxyState>) {
+    if let Some(proxy) = state.0.lock().unwrap().take() {
+        proxy.stop();
+    }
+}
+
+/// Адрес работающего туннель-прокси (`None` — не запущен).
+#[tauri::command]
+fn tunnel_proxy_status(state: State<'_, TunnelProxyState>) -> Option<String> {
     state
         .0
         .lock()
@@ -329,6 +375,7 @@ fn main() {
         .manage(ProxyState::default())
         .manage(SplitState::default())
         .manage(SysProxyState::default())
+        .manage(TunnelProxyState::default())
         .setup(|app| {
             setup_tray(app)?;
             // Автозапуск (флаг --minimized) — стартуем сразу в трей, без окна.
@@ -357,6 +404,9 @@ fn main() {
             proxy_start,
             proxy_stop,
             proxy_status,
+            tunnel_proxy_start,
+            tunnel_proxy_stop,
+            tunnel_proxy_status,
             remove_node,
             get_settings,
             set_settings,

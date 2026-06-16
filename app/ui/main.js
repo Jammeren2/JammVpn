@@ -21,11 +21,14 @@ async function refreshNodes() {
   body.innerHTML = "";
   const sel = $("server");
   const dsel = $("default-proxy");
+  const tsel = $("tunnel-node");
   // сохраняем выбранные значения
   const prev = sel.value;
   const prevDefault = dsel ? dsel.value : "";
+  const prevTunnel = tsel ? tsel.value : "";
   sel.innerHTML = '<option value="">— по правилам конфига —</option>';
   if (dsel) dsel.innerHTML = '<option value="">— первый доступный —</option>';
+  if (tsel) tsel.innerHTML = '<option value="">— выберите узел —</option>';
   for (const [i, n] of nodes.entries()) {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${i + 1}</td><td>${esc(n.name)}</td><td>${esc(
@@ -42,9 +45,11 @@ async function refreshNodes() {
     opt.textContent = n.name;
     sel.appendChild(opt);
     if (dsel) dsel.appendChild(opt.cloneNode(true));
+    if (tsel) tsel.appendChild(opt.cloneNode(true));
   }
   sel.value = prev;
   if (dsel) dsel.value = prevDefault;
+  if (tsel) tsel.value = prevTunnel;
   for (const btn of body.querySelectorAll("button.x")) {
     btn.addEventListener("click", () => removeNode(btn.dataset.name));
   }
@@ -184,6 +189,45 @@ async function stopProxy() {
   await invoke("proxy_stop");
   setStatus(null);
   await loadSysProxy(); // бэкенд снимает системный прокси при остановке
+}
+
+function setTunnelStatus(addr) {
+  const el = $("tunnel-status");
+  const running = !!addr;
+  if (el) {
+    el.textContent = running ? `на ${addr}` : "остановлен";
+    el.className = "status " + (running ? "on" : "off");
+  }
+  $("btn-tunnel-start").disabled = running;
+  $("btn-tunnel-stop").disabled = !running;
+  $("tunnel-hint").textContent = running
+    ? `весь трафик на ${addr} идёт через узел; проверка: curl --socks5-hostname ${addr} https://icanhazip.com`
+    : "";
+}
+
+async function startTunnelProxy() {
+  const listen = $("tunnel-listen").value.trim() || "127.0.0.1:1081";
+  const node = $("tunnel-node").value || "";
+  const hint = $("tunnel-hint");
+  hint.className = "hint";
+  if (!node) {
+    hint.textContent = "выберите узел для туннеля";
+    hint.className = "hint err";
+    return;
+  }
+  hint.textContent = "запуск…";
+  try {
+    const addr = await invoke("tunnel_proxy_start", { listen, node });
+    setTunnelStatus(addr);
+  } catch (e) {
+    hint.textContent = "ошибка: " + e;
+    hint.className = "hint err";
+  }
+}
+
+async function stopTunnelProxy() {
+  await invoke("tunnel_proxy_stop");
+  setTunnelStatus(null);
 }
 
 async function refreshSubs() {
@@ -619,6 +663,8 @@ async function init() {
   $("btn-split-save").addEventListener("click", saveSplit);
   $("btn-split-apply").addEventListener("click", applySplit);
   $("btn-split-clear").addEventListener("click", clearSplit);
+  $("btn-tunnel-start").addEventListener("click", startTunnelProxy);
+  $("btn-tunnel-stop").addEventListener("click", stopTunnelProxy);
   $("import-arg").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doImport();
   });
@@ -638,6 +684,7 @@ async function init() {
   await loadSplit();
   await loadSysProxy();
   setStatus(await invoke("proxy_status"));
+  setTunnelStatus(await invoke("tunnel_proxy_status"));
 }
 
 window.addEventListener("DOMContentLoaded", init);

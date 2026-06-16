@@ -212,6 +212,29 @@
         </section>
 
         <section class="panel">
+          <div class="panel-head">
+            <h2>Прокси «всё в туннель»</h2>
+            <div id="tunnel-status" class="status off">остановлен</div>
+          </div>
+          <p class="hint">Отдельный локальный прокси: <b>всё</b>, что на него отправлено, идёт целиком через выбранный узел (обычно WireGuard / AmneziaWG) — без правил, мимо основного прокси. Удобно направить туда отдельное приложение, чтобы весь его трафик шёл в туннель.</p>
+          <div class="row" style="margin-top: 14px">
+            <label>Узел туннеля
+              <select id="tunnel-node">
+                <option value="">— выберите узел —</option>
+              </select>
+            </label>
+            <label>Локальный адрес
+              <input id="tunnel-listen" type="text" value="127.0.0.1:1081" />
+            </label>
+          </div>
+          <div class="row" style="margin-top: 12px">
+            <button id="btn-tunnel-start">Запустить</button>
+            <button id="btn-tunnel-stop" class="ghost" disabled>Остановить</button>
+          </div>
+          <p class="hint" id="tunnel-hint"></p>
+        </section>
+
+        <section class="panel">
           <h2>Маршрутизация по умолчанию</h2>
           <div class="row" style="margin-bottom: 14px">
             <label class="check">
