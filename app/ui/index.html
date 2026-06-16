@@ -14,7 +14,6 @@
       </div>
       <nav class="tabs">
         <button class="tab active" data-tab="home">Главная</button>
-        <button class="tab" data-tab="nodes">Узлы</button>
         <button class="tab" data-tab="routes">Маршруты</button>
         <button class="tab" data-tab="stats">Статистика</button>
         <button class="tab" data-tab="advanced">Дополнительно</button>
@@ -59,10 +58,7 @@
           <div class="node-picker" id="node-picker"></div>
           <p class="hint">Локальный прокси один: SOCKS5 + HTTP с поддержкой UDP (UDP ASSOCIATE). Выбран узел — весь трафик (TCP и UDP) идёт через него, без разницы VLESS/WG/SS; «Авто» — по правилам конфига. Адрес прокси — на вкладке «Дополнительно».</p>
         </section>
-      </section>
 
-      <!-- ====================== УЗЛЫ ====================== -->
-      <section class="tabpanel" data-tab-panel="nodes">
         <section class="panel">
           <div class="panel-head">
             <h2>Серверы</h2>
@@ -77,28 +73,15 @@
             </thead>
             <tbody id="nodes-body"></tbody>
           </table>
-          <p class="hint" id="nodes-empty">Узлов нет — импортируйте ссылку или подписку ниже.</p>
+          <p class="hint" id="nodes-empty">Узлов нет — нажмите «+ Добавить» вверху.</p>
+          <p class="hint" id="nodes-msg"></p>
         </section>
 
         <section class="panel">
-          <h2>Импорт</h2>
-          <div class="row">
-            <input id="import-arg" type="text" placeholder="vless://… / ss://… / https://подписка" />
-            <button id="btn-import">Импортировать</button>
+          <div class="panel-head">
+            <h2>Подписки</h2>
             <button id="btn-update" class="ghost">Обновить подписки</button>
           </div>
-          <div class="row" style="margin-top: 12px">
-            <textarea id="import-config-text" rows="4"
-              placeholder="Или вставьте конфиг: Clash/Clash.Meta YAML, Xray / sing-box JSON, AmneziaWG .conf, либо несколько ссылок построчно"></textarea>
-          </div>
-          <div class="row">
-            <button id="btn-import-config" class="ghost">Импортировать конфиг</button>
-          </div>
-          <p class="hint" id="import-msg"></p>
-        </section>
-
-        <section class="panel">
-          <h2>Подписки</h2>
           <table id="subs">
             <thead>
               <tr><th>URL</th><th>Тег</th><th>Период, ч</th><th></th></tr>

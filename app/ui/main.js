@@ -183,7 +183,7 @@ async function saveConnection() {
 
 // Экспорт узла (WG/AmneziaWG) в .conf на диск. Сообщение — в строку статуса узлов.
 async function exportNode(name) {
-  const msg = $("import-msg");
+  const msg = $("nodes-msg");
   try {
     const path = await invoke("export_node_conf", { name });
     if (msg) {
@@ -386,39 +386,8 @@ async function submitAdd() {
   }
 }
 
-async function doImport() {
-  const arg = $("import-arg").value.trim();
-  if (!arg) return;
-  const msg = $("import-msg");
-  try {
-    msg.textContent = await invoke("import", { arg });
-    msg.className = "hint ok";
-    $("import-arg").value = "";
-    await refreshNodes();
-    await refreshSubs();
-  } catch (e) {
-    msg.textContent = "ошибка: " + e;
-    msg.className = "hint err";
-  }
-}
-
-async function importConfig() {
-  const text = $("import-config-text").value.trim();
-  if (!text) return;
-  const msg = $("import-msg");
-  try {
-    msg.textContent = await invoke("import_config", { text });
-    msg.className = "hint ok";
-    $("import-config-text").value = "";
-    await refreshNodes();
-  } catch (e) {
-    msg.textContent = "ошибка: " + e;
-    msg.className = "hint err";
-  }
-}
-
 async function updateSubs() {
-  const msg = $("import-msg");
+  const msg = $("subs-msg");
   try {
     const ups = await invoke("update_subscriptions");
     msg.textContent = ups.length
@@ -1027,8 +996,6 @@ async function init() {
   $("add-modal").addEventListener("click", (e) => {
     if (e.target === $("add-modal")) closeAddModal();
   });
-  $("btn-import").addEventListener("click", doImport);
-  $("btn-import-config").addEventListener("click", importConfig);
   $("btn-update").addEventListener("click", updateSubs);
   $("btn-save-settings").addEventListener("click", saveSettings);
   $("btn-add-sub").addEventListener("click", addSub);
@@ -1061,9 +1028,6 @@ async function init() {
   setInterval(() => {
     if (logsTabActive() && $("log-auto") && $("log-auto").checked) loadLog();
   }, 2000);
-  $("import-arg").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") doImport();
-  });
   $("sub-url").addEventListener("keydown", (e) => {
     if (e.key === "Enter") addSub();
   });
