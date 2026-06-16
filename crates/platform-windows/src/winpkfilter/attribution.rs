@@ -25,8 +25,10 @@ pub enum Proto {
     Udp,
 }
 
-/// Как часто перестраивать таблицы порт→PID.
+/// Как часто перестраивать таблицы порт→PID (фоновое).
 const REFRESH: Duration = Duration::from_millis(1000);
+/// Минимальный интервал между принудительными обновлениями при промахе.
+const FORCE_COOLDOWN: Duration = Duration::from_millis(20);
 
 /// Резолвер «локальный порт → процесс» с кэшем таблиц и путей.
 pub struct ProcessResolver {
@@ -35,6 +37,7 @@ pub struct ProcessResolver {
     /// PID → путь к exe (кэш, чтобы не открывать процесс на каждый пакет).
     pid_exe: HashMap<u32, Option<String>>,
     last: Option<Instant>,
+    last_forced: Option<Instant>,
 }
 
 impl Default for ProcessResolver {
@@ -49,13 +52,21 @@ impl ProcessResolver {
             ports: HashMap::new(),
             pid_exe: HashMap::new(),
             last: None,
+            last_forced: None,
         }
     }
 
     /// Возвращает приложение-владельца потока с локальным портом `local_port`.
+    /// При промахе (новое соединение, которого ещё нет в устаревшей таблице)
+    /// принудительно обновляет таблицу и повторяет — иначе SYN утекал бы «прямо».
     pub fn resolve(&mut self, proto: Proto, is_v6: bool, local_port: u16) -> Option<ConnApp> {
         self.maybe_refresh();
-        let pid = *self.ports.get(&(proto == Proto::Tcp, is_v6, local_port))?;
+        let key = (proto == Proto::Tcp, is_v6, local_port);
+        let mut pid = self.ports.get(&key).copied();
+        if pid.is_none() && self.force_refresh() {
+            pid = self.ports.get(&key).copied();
+        }
+        let pid = pid?;
         let exe = self.exe_for(pid);
         let process_name = exe.as_ref().and_then(|p| {
             std::path::Path::new(p)
@@ -68,16 +79,9 @@ impl ProcessResolver {
         })
     }
 
-    fn maybe_refresh(&mut self) {
-        let stale = match self.last {
-            Some(t) => t.elapsed() >= REFRESH,
-            None => true,
-        };
-        if !stale {
-            return;
-        }
+    /// Перестраивает таблицы порт→PID.
+    fn load_tables(&mut self) {
         self.ports.clear();
-        self.pid_exe.clear();
         unsafe {
             self.load_tcp(false);
             self.load_tcp(true);
@@ -85,6 +89,32 @@ impl ProcessResolver {
             self.load_udp(true);
         }
         self.last = Some(Instant::now());
+    }
+
+    fn maybe_refresh(&mut self) {
+        let stale = match self.last {
+            Some(t) => t.elapsed() >= REFRESH,
+            None => true,
+        };
+        if stale {
+            self.pid_exe.clear();
+            self.load_tables();
+        }
+    }
+
+    /// Принудительное обновление таблиц при промахе (с кулдауном, чтобы не
+    /// молотить системные таблицы на каждом неопознанном пакете).
+    fn force_refresh(&mut self) -> bool {
+        let recent = self
+            .last_forced
+            .map(|t| t.elapsed() < FORCE_COOLDOWN)
+            .unwrap_or(false);
+        if recent {
+            return false;
+        }
+        self.last_forced = Some(Instant::now());
+        self.load_tables();
+        true
     }
 
     /// Кэшируемый путь к exe по PID.

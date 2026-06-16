@@ -38,6 +38,14 @@ const UDP_IDLE: Duration = Duration::from_secs(60);
 /// Таймаут ожидания установления входящего TCP.
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Метка цели для монитора соединений.
+fn target_label(t: &Target) -> String {
+    match t {
+        Target::Socket(a) => a.to_string(),
+        Target::Domain(h, p) => format!("{h}:{p}"),
+    }
+}
+
 /// Конвертирует smoltcp-эндпоинт в `std::net::SocketAddr`.
 fn ep_to_sockaddr(ep: IpEndpoint) -> SocketAddr {
     let ip = match ep.addr {
@@ -365,9 +373,16 @@ async fn relay_tcp(
     if wait_established(&shared, handle).await {
         let routed = shared.engine.route(&dst).await;
         if let Decision::Connect(ob) = routed.decision {
-            if let Ok(mut up) = ob.connect_tcp(&routed.target).await {
-                let mut down = NsTcpStream::new(shared.clone(), handle);
-                let _ = tokio::io::copy_bidirectional(&mut down, &mut up).await;
+            if let Ok(up) = ob.connect_tcp(&routed.target).await {
+                let down = NsTcpStream::new(shared.clone(), handle);
+                // Регистрируем в мониторе соединений (видно в статистике).
+                let via = if matches!(ob, crate::outbound::Outbound::Direct) {
+                    "direct"
+                } else {
+                    "proxy"
+                };
+                let g = crate::conn::register(target_label(&dst), via);
+                let _ = crate::conn::copy_counted(down, up, &g).await;
             }
         }
     }
