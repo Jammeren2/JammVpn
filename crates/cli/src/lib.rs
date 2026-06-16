@@ -14,9 +14,13 @@ use jammvpn_core::{
     parse_awg_conf, parse_clash, parse_link, parse_singbox_config, parse_xray_config, AppConfig,
     RouteAction, Rule, SecretStore, SplitConfig, SplitMode, Subscription,
 };
-use jammvpn_net::{outbound_from_profile, serve_socks_routed, subscription, urltest, Engine};
+use jammvpn_core::LocalWgConfig;
+use jammvpn_net::{
+    gen_preshared_key, gen_private_key, outbound_from_profile, serve_socks_routed, subscription,
+    urltest, wg_public_key, Engine, WgServer, WgServerParams,
+};
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -1061,6 +1065,207 @@ impl SplitProxyController {
     /// Останавливает транспарент-сервер.
     pub fn stop(self) {
         self.handle.abort();
+    }
+}
+
+// ─────────────────────── Локальный WireGuard-сервер (inbound-шлюз) ───────────
+
+/// Состояние локального WG-сервера для UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalWgInfo {
+    /// Сконфигурирован ли (есть ключи).
+    pub configured: bool,
+    /// Запущен ли сейчас.
+    pub running: bool,
+    /// Фактический адрес прослушивания (если запущен).
+    pub listen_addr: Option<String>,
+    /// UDP-порт.
+    pub port: u16,
+    /// IP клиента в туннеле.
+    pub client_ip: String,
+    /// Публичный ключ сервера (для справки).
+    pub server_public: String,
+    /// Узел-апстрим (egress).
+    pub upstream_node: Option<String>,
+    /// Определённый LAN-IP для Endpoint в .conf.
+    pub endpoint_host: Option<String>,
+}
+
+fn b64(bytes: &[u8]) -> String {
+    jammvpn_core::base64::encode_standard(bytes)
+}
+
+fn decode32(s: &str) -> Result<[u8; 32], String> {
+    let v = jammvpn_core::base64::decode_loose(s).map_err(|e| format!("base64: {e}"))?;
+    if v.len() != 32 {
+        return Err("ключ не 32 байта".into());
+    }
+    let mut k = [0u8; 32];
+    k.copy_from_slice(&v);
+    Ok(k)
+}
+
+/// Определяет основной LAN-IP машины (через UDP-connect без отправки пакетов).
+fn detect_lan_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    sock.local_addr().ok().map(|a| a.ip())
+}
+
+/// Гарантирует наличие конфигурации локального WG (генерирует ключи при первом
+/// обращении) и возвращает её.
+pub fn local_wg_ensure() -> Result<LocalWgConfig, String> {
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    if let Some(lw) = &cfg.local_wg {
+        return Ok(lw.clone());
+    }
+    let server_priv = gen_private_key();
+    let client_priv = gen_private_key();
+    let lw = LocalWgConfig {
+        server_private: b64(&server_priv),
+        server_public: b64(&wg_public_key(&server_priv)),
+        client_private: b64(&client_priv),
+        client_public: b64(&wg_public_key(&client_priv)),
+        preshared_key: b64(&gen_preshared_key()),
+        port: 51820,
+        server_ip: "10.9.0.1".into(),
+        client_ip: "10.9.0.2".into(),
+        prefix: 24,
+        upstream_node: None,
+        dns: "1.1.1.1, 1.0.0.1".into(),
+    };
+    cfg.local_wg = Some(lw.clone());
+    save_config(&path, &cfg, store.as_ref())?;
+    Ok(lw)
+}
+
+/// Сохраняет порт/узел-апстрим локального WG.
+pub fn local_wg_set(port: Option<u16>, upstream_node: Option<String>) -> Result<(), String> {
+    local_wg_ensure()?;
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    if let Some(lw) = cfg.local_wg.as_mut() {
+        if let Some(p) = port {
+            if p != 0 {
+                lw.port = p;
+            }
+        }
+        lw.upstream_node = upstream_node.filter(|s| !s.trim().is_empty());
+    }
+    save_config(&path, &cfg, store.as_ref())
+}
+
+/// Текущее состояние локального WG (с учётом запущенного контроллера).
+pub fn local_wg_status(running_addr: Option<String>) -> LocalWgInfo {
+    let cfg = load();
+    match cfg.local_wg {
+        Some(lw) => LocalWgInfo {
+            configured: true,
+            running: running_addr.is_some(),
+            listen_addr: running_addr,
+            port: lw.port,
+            client_ip: lw.client_ip,
+            server_public: lw.server_public,
+            upstream_node: lw.upstream_node,
+            endpoint_host: detect_lan_ip().map(|ip| ip.to_string()),
+        },
+        None => LocalWgInfo {
+            configured: false,
+            running: false,
+            listen_addr: None,
+            port: 51820,
+            client_ip: "10.9.0.2".into(),
+            server_public: String::new(),
+            upstream_node: None,
+            endpoint_host: detect_lan_ip().map(|ip| ip.to_string()),
+        },
+    }
+}
+
+/// Генерирует клиентский `.conf` и пишет его рядом с конфигом; возвращает путь.
+pub fn local_wg_export_conf() -> Result<String, String> {
+    let lw = local_wg_ensure()?;
+    let host = detect_lan_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let conf = format!(
+        "[Interface]\n\
+         PrivateKey = {privk}\n\
+         Address = {cip}/{prefix}\n\
+         DNS = {dns}\n\
+         \n\
+         [Peer]\n\
+         PublicKey = {pubk}\n\
+         PresharedKey = {psk}\n\
+         Endpoint = {host}:{port}\n\
+         AllowedIPs = 0.0.0.0/0, ::/0\n\
+         PersistentKeepalive = 25\n",
+        privk = lw.client_private,
+        cip = lw.client_ip,
+        prefix = lw.prefix,
+        dns = lw.dns,
+        pubk = lw.server_public,
+        psk = lw.preshared_key,
+        host = host,
+        port = lw.port,
+    );
+    let dir = config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = dir.join("jammvpn-local-wg.conf");
+    std::fs::write(&file, conf).map_err(|e| e.to_string())?;
+    Ok(file.to_string_lossy().to_string())
+}
+
+/// Управляемый локальный WG-сервер (запуск/остановка из UI).
+pub struct LocalWgController {
+    server: WgServer,
+    addr: SocketAddr,
+}
+
+impl LocalWgController {
+    /// Поднимает сервер: egress через `upstream_node` (или по правилам, если
+    /// `None`). Сохраняет выбор узла/порт в конфиг.
+    pub async fn start(upstream_node: Option<String>) -> Result<Self, String> {
+        let upstream = upstream_node.filter(|s| !s.trim().is_empty());
+        local_wg_set(None, upstream.clone())?;
+        let lw = local_wg_ensure()?;
+        let cfg = load();
+        let engine = build_engine(&cfg, upstream.as_deref())?;
+        let server_ip: Ipv4Addr = lw
+            .server_ip
+            .parse()
+            .map_err(|_| "некорректный server_ip".to_string())?;
+        let params = WgServerParams {
+            listen: format!("0.0.0.0:{}", lw.port)
+                .parse()
+                .map_err(|e| format!("listen: {e}"))?,
+            server_private: decode32(&lw.server_private)?,
+            client_public: decode32(&lw.client_public)?,
+            preshared_key: Some(decode32(&lw.preshared_key)?),
+            server_ip,
+            prefix: lw.prefix,
+        };
+        let server = WgServer::start(params, Arc::new(engine))
+            .await
+            .map_err(|e| e.to_string())?;
+        let addr = server.local_addr();
+        Ok(Self { server, addr })
+    }
+
+    /// Адрес прослушивания.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Останавливает сервер.
+    pub fn stop(self) {
+        self.server.stop();
     }
 }
 

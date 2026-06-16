@@ -213,6 +213,31 @@
         </section>
 
         <section class="panel">
+          <div class="panel-head">
+            <h2>Локальный WireGuard-сервер</h2>
+            <div id="lwg-status" class="status off">остановлен</div>
+          </div>
+          <p class="hint">JammVPN поднимает свой WG-эндпоинт. Подключаешь к нему приложение/устройство по экспортированному <b>.conf</b> — весь его трафик (TCP и UDP) уходит наружу через выбранный узел (основной туннель). Удобно завернуть отдельное приложение, VM или телефон в LAN.</p>
+          <div class="row" style="margin-top: 14px">
+            <label>Узел-апстрим (egress)
+              <select id="lwg-node">
+                <option value="">— по правилам конфига —</option>
+              </select>
+            </label>
+            <label>UDP-порт
+              <input id="lwg-port" type="number" min="1" max="65535" value="51820" />
+            </label>
+          </div>
+          <div class="row" style="margin-top: 12px">
+            <button id="btn-lwg-start">Запустить</button>
+            <button id="btn-lwg-stop" class="ghost" disabled>Остановить</button>
+            <button id="btn-lwg-export" class="ghost" title="Сохранить клиентский .conf для подключения к этому серверу">Сохранить .conf клиента</button>
+          </div>
+          <p class="hint" id="lwg-endpoint"></p>
+          <p class="hint" id="lwg-hint"></p>
+        </section>
+
+        <section class="panel">
           <h2>Маршрутизация по умолчанию</h2>
           <div class="row" style="margin-bottom: 14px">
             <label class="check">

@@ -101,6 +101,35 @@ pub struct GeoConfig {
     pub geoip_path: Option<String>,
 }
 
+/// Локальный WireGuard-сервер (inbound-шлюз): ключи, подсеть, апстрим-узел.
+/// Секретные поля (`*_private`, `preshared_key`) шифруются хранилищем секретов.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalWgConfig {
+    /// Приватный ключ сервера (base64).
+    pub server_private: String,
+    /// Публичный ключ сервера (base64).
+    pub server_public: String,
+    /// Приватный ключ клиента-пира (base64).
+    pub client_private: String,
+    /// Публичный ключ клиента-пира (base64).
+    pub client_public: String,
+    /// Preshared-ключ (base64).
+    pub preshared_key: String,
+    /// UDP-порт прослушивания.
+    pub port: u16,
+    /// IP сервера в туннеле (gateway).
+    pub server_ip: String,
+    /// IP клиента в туннеле.
+    pub client_ip: String,
+    /// Длина префикса подсети.
+    pub prefix: u8,
+    /// Узел-апстрим для egress (`None` — по правилам конфига).
+    pub upstream_node: Option<String>,
+    /// DNS для экспортируемого клиентского `.conf`.
+    pub dns: String,
+}
+
 /// Корневой конфиг приложения.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -119,6 +148,8 @@ pub struct AppConfig {
     pub dns: DnsConfig,
     /// Пути к базам geosite/geoip.
     pub geo: GeoConfig,
+    /// Локальный WG-сервер (inbound-шлюз); `None` — не сконфигурирован.
+    pub local_wg: Option<LocalWgConfig>,
 }
 
 /// Ошибка загрузки/сохранения конфига.

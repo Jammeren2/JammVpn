@@ -21,11 +21,14 @@ async function refreshNodes() {
   body.innerHTML = "";
   const sel = $("server");
   const dsel = $("default-proxy");
+  const lsel = $("lwg-node");
   // сохраняем выбранные значения
   const prev = sel.value;
   const prevDefault = dsel ? dsel.value : "";
+  const prevLwg = lsel ? lsel.value : "";
   sel.innerHTML = '<option value="">— по правилам конфига —</option>';
   if (dsel) dsel.innerHTML = '<option value="">— первый доступный —</option>';
+  if (lsel) lsel.innerHTML = '<option value="">— по правилам конфига —</option>';
   for (const [i, n] of nodes.entries()) {
     // Экспорт .conf — только для WireGuard/AmneziaWG-узлов.
     const isWg = /wireguard|amnezia|awg/i.test(n.protocol);
@@ -49,9 +52,11 @@ async function refreshNodes() {
     opt.textContent = n.name;
     sel.appendChild(opt);
     if (dsel) dsel.appendChild(opt.cloneNode(true));
+    if (lsel) lsel.appendChild(opt.cloneNode(true));
   }
   sel.value = prev;
   if (dsel) dsel.value = prevDefault;
+  if (lsel) lsel.value = prevLwg;
   for (const btn of body.querySelectorAll("button.x[data-name]")) {
     btn.addEventListener("click", () => removeNode(btn.dataset.name));
   }
@@ -123,6 +128,76 @@ async function exportNode(name) {
       msg.textContent = "ошибка экспорта: " + e;
       msg.className = "hint err";
     }
+  }
+}
+
+// --- Локальный WireGuard-сервер (inbound-шлюз) ---
+function setLocalWgStatus(info, addr) {
+  const el = $("lwg-status");
+  const running = !!addr || (info && info.running);
+  if (el) {
+    el.textContent = running ? "запущен" : "остановлен";
+    el.className = "status " + (running ? "on" : "off");
+  }
+  $("btn-lwg-start").disabled = running;
+  $("btn-lwg-stop").disabled = !running;
+  const ep = $("lwg-endpoint");
+  if (ep && info) {
+    const host = info.endpoint_host || "<IP-этой-машины>";
+    ep.textContent = `Клиент подключается на Endpoint ${host}:${info.port} (адрес клиента ${info.client_ip}). Экспортируй .conf и импортируй его в WireGuard на приложении/устройстве.`;
+  }
+}
+
+async function loadLocalWg() {
+  try {
+    const info = await invoke("local_wg_status");
+    if (info.port) $("lwg-port").value = info.port;
+    if (info.upstream_node) $("lwg-node").value = info.upstream_node;
+    setLocalWgStatus(info, info.listen_addr);
+  } catch (e) {
+    /* нет данных */
+  }
+}
+
+async function startLocalWg() {
+  const hint = $("lwg-hint");
+  hint.className = "hint";
+  hint.textContent = "запуск…";
+  const node = $("lwg-node").value || null;
+  const port = parseInt($("lwg-port").value, 10) || 51820;
+  try {
+    // Порт сохраняем заранее (start читает его из конфига).
+    await invoke("local_wg_set", { port, upstreamNode: node });
+  } catch (e) {
+    /* set может отсутствовать как команда — порт всё равно в конфиге по умолчанию */
+  }
+  try {
+    const addr = await invoke("local_wg_start", { upstreamNode: node });
+    hint.textContent = "сервер слушает на " + addr;
+    await loadLocalWg();
+    setLocalWgStatus(await invoke("local_wg_status"), addr);
+  } catch (e) {
+    hint.textContent = "ошибка: " + e;
+    hint.className = "hint err";
+  }
+}
+
+async function stopLocalWg() {
+  await invoke("local_wg_stop");
+  $("lwg-hint").textContent = "";
+  $("lwg-hint").className = "hint";
+  await loadLocalWg();
+}
+
+async function exportLocalWgConf() {
+  const hint = $("lwg-hint");
+  hint.className = "hint";
+  try {
+    const path = await invoke("local_wg_export_conf");
+    hint.textContent = "клиентский .conf сохранён: " + path;
+  } catch (e) {
+    hint.textContent = "ошибка экспорта: " + e;
+    hint.className = "hint err";
   }
 }
 
@@ -669,6 +744,10 @@ async function init() {
   // Автосохранение адреса прокси и выбранного узла при изменении.
   $("listen").addEventListener("change", saveConnection);
   $("server").addEventListener("change", saveConnection);
+  // Локальный WG-сервер.
+  $("btn-lwg-start").addEventListener("click", startLocalWg);
+  $("btn-lwg-stop").addEventListener("click", stopLocalWg);
+  $("btn-lwg-export").addEventListener("click", exportLocalWgConf);
   $("import-arg").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doImport();
   });
@@ -687,6 +766,7 @@ async function init() {
   await loadAutostart();
   await loadSplit();
   await loadSysProxy();
+  await loadLocalWg();
   setStatus(await invoke("proxy_status"));
 }
 

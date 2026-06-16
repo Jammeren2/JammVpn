@@ -22,6 +22,10 @@ struct SplitState(Mutex<Option<ctl::SplitProxyController>>);
 #[derive(Default)]
 struct SysProxyState(Mutex<bool>);
 
+/// Запущенный локальный WG-сервер (inbound-шлюз).
+#[derive(Default)]
+struct LocalWgState(Mutex<Option<ctl::LocalWgController>>);
+
 #[tauri::command]
 fn list_nodes() -> Vec<ctl::NodeInfo> {
     ctl::list_nodes()
@@ -160,6 +164,53 @@ fn set_connection(listen: Option<String>, proxy_node: Option<String>) -> Result<
 #[tauri::command]
 fn export_node_conf(name: String) -> Result<String, String> {
     ctl::export_node_conf(&name)
+}
+
+/// Состояние локального WG-сервера (inbound-шлюз).
+#[tauri::command]
+fn local_wg_status(state: State<'_, LocalWgState>) -> ctl::LocalWgInfo {
+    let addr = state
+        .0
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.addr().to_string());
+    ctl::local_wg_status(addr)
+}
+
+/// Запустить локальный WG-сервер; egress через `upstream_node` (или по правилам).
+#[tauri::command]
+async fn local_wg_start(
+    state: State<'_, LocalWgState>,
+    upstream_node: Option<String>,
+) -> Result<String, String> {
+    if state.0.lock().unwrap().is_some() {
+        return Err("локальный WG уже запущен".into());
+    }
+    let controller = ctl::LocalWgController::start(upstream_node).await?;
+    let addr = controller.addr().to_string();
+    *state.0.lock().unwrap() = Some(controller);
+    Ok(addr)
+}
+
+/// Остановить локальный WG-сервер.
+#[tauri::command]
+fn local_wg_stop(state: State<'_, LocalWgState>) {
+    if let Some(c) = state.0.lock().unwrap().take() {
+        c.stop();
+    }
+}
+
+/// Сохранить порт/узел-апстрим локального WG (до запуска).
+#[tauri::command]
+fn local_wg_set(port: Option<u16>, upstream_node: Option<String>) -> Result<(), String> {
+    ctl::local_wg_set(port, upstream_node)
+}
+
+/// Сгенерировать и сохранить клиентский `.conf` локального WG; вернуть путь.
+#[tauri::command]
+fn local_wg_export_conf() -> Result<String, String> {
+    ctl::local_wg_export_conf()
 }
 
 /// Список сохранённых подписок.
@@ -341,6 +392,7 @@ fn main() {
         .manage(ProxyState::default())
         .manage(SplitState::default())
         .manage(SysProxyState::default())
+        .manage(LocalWgState::default())
         .setup(|app| {
             setup_tray(app)?;
             // Автозапуск (флаг --minimized) — стартуем сразу в трей, без окна.
@@ -374,6 +426,11 @@ fn main() {
             set_settings,
             set_connection,
             export_node_conf,
+            local_wg_status,
+            local_wg_start,
+            local_wg_stop,
+            local_wg_set,
+            local_wg_export_conf,
             list_subscriptions,
             add_subscription,
             remove_subscription,

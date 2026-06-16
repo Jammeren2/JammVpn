@@ -90,6 +90,24 @@ pub fn protect_config(cfg: &mut AppConfig, store: &dyn SecretStore) -> Result<()
         }
     }
     apply(cfg, updates);
+    // Секреты локального WG-сервера (отдельная структура, не params).
+    if let Some(lw) = cfg.local_wg.as_mut() {
+        let enc = |v: &str| -> Result<String, SecretError> {
+            if v.is_empty() || is_protected(v) {
+                return Ok(v.to_string());
+            }
+            let blob = store.protect(v.as_bytes())?;
+            Ok(format!("{ENC_PREFIX}{}", base64::encode_standard(&blob)))
+        };
+        let (sp, cp, pk) = (
+            enc(&lw.server_private)?,
+            enc(&lw.client_private)?,
+            enc(&lw.preshared_key)?,
+        );
+        lw.server_private = sp;
+        lw.client_private = cp;
+        lw.preshared_key = pk;
+    }
     Ok(())
 }
 
@@ -116,6 +134,28 @@ pub fn unprotect_config(cfg: &mut AppConfig, store: &dyn SecretStore) -> Result<
         }
     }
     apply(cfg, updates);
+    // Расшифровка секретов локального WG-сервера.
+    if let Some(lw) = cfg.local_wg.as_mut() {
+        let dec = |v: &str| -> Result<String, SecretError> {
+            match v.strip_prefix(ENC_PREFIX) {
+                Some(b64) => {
+                    let blob =
+                        base64::decode_loose(b64).map_err(|e| SecretError(format!("base64: {e}")))?;
+                    let plain = store.unprotect(&blob)?;
+                    String::from_utf8(plain).map_err(|e| SecretError(format!("utf8: {e}")))
+                }
+                None => Ok(v.to_string()),
+            }
+        };
+        let (sp, cp, pk) = (
+            dec(&lw.server_private)?,
+            dec(&lw.client_private)?,
+            dec(&lw.preshared_key)?,
+        );
+        lw.server_private = sp;
+        lw.client_private = cp;
+        lw.preshared_key = pk;
+    }
     Ok(())
 }
 

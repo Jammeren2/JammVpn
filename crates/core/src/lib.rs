@@ -20,8 +20,8 @@ pub mod split;
 pub mod util;
 
 pub use config::{
-    AppConfig, ConfigError, DnsConfig, DnsServerConfig, FakeIpConfig, GeoConfig, Settings,
-    Subscription,
+    AppConfig, ConfigError, DnsConfig, DnsServerConfig, FakeIpConfig, GeoConfig, LocalWgConfig,
+    Settings, Subscription,
 };
 pub use error::ParseError;
 pub use geo::{GeoIpDb, GeoSiteDb};
