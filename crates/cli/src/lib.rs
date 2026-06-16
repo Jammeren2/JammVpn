@@ -222,7 +222,8 @@ pub async fn import(arg: &str) -> Result<String, String> {
 fn parse_any_config(text: &str) -> (&'static str, Vec<Result<ServerProfile, ParseError>>) {
     let t = text.trim_start();
     // JSON: сначала пробуем sing-box (поле `type`), затем Xray (`protocol`).
-    if t.starts_with('{') {
+    // `[` — массив конфигов (подписка Happ/v2rayN).
+    if t.starts_with('{') || t.starts_with('[') {
         let sb = parse_singbox_config(text);
         if sb.iter().any(|r| r.is_ok()) {
             return ("sing-box JSON", sb);

@@ -25,6 +25,14 @@ pub fn parse_xray_config(input: &str) -> Vec<Result<ServerProfile, ParseError>> 
         Err(e) => return vec![Err(e)],
     };
 
+    // Подписка Happ/v2rayN: массив ПОЛНЫХ конфигов (каждый со своими `outbounds`
+    // и `remarks`). Извлекаем proxy-узлы из каждого, имя = `remarks · tag`.
+    if let Some(arr) = root.as_array() {
+        if arr.iter().any(|c| c.get("outbounds").is_some()) {
+            return arr.iter().flat_map(parse_config_entry).collect();
+        }
+    }
+
     let outbounds: &[JsonValue] =
         if let Some(arr) = root.get("outbounds").and_then(JsonValue::as_array) {
             arr
@@ -37,6 +45,38 @@ pub fn parse_xray_config(input: &str) -> Vec<Result<ServerProfile, ParseError>> 
         };
 
     outbounds.iter().map(parse_outbound).collect()
+}
+
+/// Разбирает один полный конфиг из массива-подписки: берёт все поддержанные
+/// proxy-outbounds, неподдержанные (freedom/blackhole/dns/...) молча отбрасывает,
+/// имя префиксует `remarks` конфига.
+fn parse_config_entry(config: &JsonValue) -> Vec<Result<ServerProfile, ParseError>> {
+    let remarks = config
+        .get("remarks")
+        .and_then(JsonValue::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let Some(obs) = config.get("outbounds").and_then(JsonValue::as_array) else {
+        return Vec::new();
+    };
+    obs.iter()
+        .map(parse_outbound)
+        // Не-proxy outbound (freedom/dns/blackhole) и объекты без protocol — мимо.
+        .filter(|r| {
+            !matches!(
+                r,
+                Err(ParseError::UnknownScheme(_)) | Err(ParseError::MissingField("protocol"))
+            )
+        })
+        .map(|r| {
+            r.map(|mut p| {
+                if let Some(rem) = &remarks {
+                    p.name = format!("{rem} · {}", p.name);
+                }
+                p
+            })
+        })
+        .collect()
 }
 
 /// Разбирает один outbound-объект.
