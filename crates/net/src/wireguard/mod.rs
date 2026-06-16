@@ -13,11 +13,13 @@ mod driver;
 mod obfs;
 mod stream;
 mod tunnel;
+mod udp_socket;
 
 #[cfg(test)]
 mod loopback;
 
 pub use config::{decode_key, parse_addresses, parse_ip_list, AwgObfuscation, WgConfig, WgParams};
+pub use udp_socket::WgUdpSocket;
 
 use crate::target::Target;
 use crate::BoxedStream;
@@ -27,6 +29,11 @@ use std::net::IpAddr;
 /// Точка входа: TCP-соединение до `target` через WG-туннель (лениво поднимаемый).
 pub async fn wireguard_connect(cfg: &WgConfig, target: &Target) -> io::Result<BoxedStream> {
     cfg.connect_tcp(target).await
+}
+
+/// Точка входа: UDP-сессия до `target` через WG-туннель (для SOCKS5 UDP ASSOCIATE).
+pub async fn wireguard_connect_udp(cfg: &WgConfig, target: &Target) -> io::Result<WgUdpSocket> {
+    cfg.connect_udp(target).await
 }
 
 /// Резолвит цель в `(IpAddr, port)`.

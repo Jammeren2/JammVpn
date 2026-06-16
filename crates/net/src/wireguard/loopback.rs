@@ -14,7 +14,7 @@ use crate::target::Target;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use smoltcp::iface::{Config, Interface, SocketSet};
-use smoltcp::socket::tcp;
+use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 use std::net::{IpAddr, Ipv4Addr};
@@ -74,6 +74,22 @@ async fn echo_server(
         })
         .collect();
 
+    // UDP-echo на том же порту (отдельное пространство портов smoltcp): любую
+    // принятую датаграмму отправляем обратно источнику.
+    let udp_echo = {
+        let rx = udp::PacketBuffer::new(
+            vec![udp::PacketMetadata::EMPTY; 8],
+            vec![0u8; 65536],
+        );
+        let tx = udp::PacketBuffer::new(
+            vec![udp::PacketMetadata::EMPTY; 8],
+            vec![0u8; 65536],
+        );
+        let mut s = udp::Socket::new(rx, tx);
+        s.bind(listen_port).unwrap();
+        sockets.add(s)
+    };
+
     let mut scratch = vec![0u8; 65535];
     let mut udp_buf = vec![0u8; 65535];
     let mut peer = None;
@@ -93,6 +109,15 @@ async fn echo_server(
                         let _ = s.send_slice(&tmp[..n]);
                     }
                 }
+            }
+        }
+
+        // UDP-echo: датаграмму отправляем обратно её источнику.
+        {
+            let s = sockets.get_mut::<udp::Socket>(udp_echo);
+            let echo = s.recv().ok().map(|(d, m)| (d.to_vec(), m.endpoint));
+            if let Some((data, ep)) = echo {
+                let _ = s.send_slice(&data, ep);
             }
         }
 
@@ -277,6 +302,64 @@ async fn loopback_echo_amneziawg() {
         h4: 0x5444_4444,
     };
     tokio::time::timeout(Duration::from_secs(20), run_echo(Some(awg)))
+        .await
+        .expect("тест не должен зависнуть");
+}
+
+/// UDP через туннель: датаграмма доходит до UDP-echo сервера и возвращается.
+async fn run_udp_echo() {
+    let client_priv = [11u8; 32];
+    let server_priv = [22u8; 32];
+    let server_iface = Ipv4Addr::new(10, 0, 0, 1);
+    let client_iface = Ipv4Addr::new(10, 0, 0, 2);
+    let listen_port = 8080;
+
+    let server_udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let server_addr = server_udp.local_addr().unwrap();
+    tokio::spawn(echo_server(
+        server_udp,
+        server_priv,
+        pubkey(client_priv),
+        None,
+        server_iface,
+        24,
+        listen_port,
+        1,
+    ));
+
+    let cfg = WgConfig::new(WgParams {
+        endpoint: server_addr.to_string(),
+        private_key: client_priv,
+        peer_public_key: pubkey(server_priv),
+        preshared_key: None,
+        address: vec![(IpAddr::V4(client_iface), 24)],
+        dns: vec![],
+        persistent_keepalive: None,
+        awg: None,
+    });
+    let target = Target::Socket(format!("{server_iface}:{listen_port}").parse().unwrap());
+    let sess = super::wireguard_connect_udp(&cfg, &target)
+        .await
+        .expect("udp session");
+
+    // UDP best-effort: первые датаграммы до завершения handshake могут пропасть,
+    // поэтому шлём с ретраями, ожидая эхо.
+    for _ in 0..10u32 {
+        sess.send(b"ping udp").await.expect("send");
+        match tokio::time::timeout(Duration::from_millis(500), sess.recv()).await {
+            Ok(Ok(resp)) => {
+                assert_eq!(&resp, b"ping udp", "udp echo совпадает");
+                return;
+            }
+            _ => continue,
+        }
+    }
+    panic!("UDP-echo не вернулся за 10 попыток");
+}
+
+#[tokio::test]
+async fn loopback_udp_echo() {
+    tokio::time::timeout(Duration::from_secs(20), run_udp_echo())
         .await
         .expect("тест не должен зависнуть");
 }

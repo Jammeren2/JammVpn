@@ -188,7 +188,8 @@ pub async fn udp_associate(mut control: TcpStream, engine: Arc<Engine>) -> io::R
                             warned_proxy = true;
                             eprintln!(
                                 "предупреждение: UDP через этот исходящий пока не поддержан — \
-                                 датаграммы отбрасываются (поддержаны: Direct, Shadowsocks legacy)"
+                                 датаграммы отбрасываются (поддержаны: Direct, Shadowsocks, \
+                                 SS-2022, Trojan, TUIC, WireGuard/AmneziaWG)"
                             );
                         }
                     }

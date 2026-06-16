@@ -159,6 +159,14 @@ impl WgConfig {
         self.tunnel().await?.connect(target).await
     }
 
+    /// Открывает UDP-сессию до `target` через общий туннель.
+    pub(crate) async fn connect_udp(
+        &self,
+        target: &Target,
+    ) -> io::Result<super::udp_socket::WgUdpSocket> {
+        self.tunnel().await?.connect_udp(target).await
+    }
+
     /// Параметры узла (для диагностики/тестов).
     pub fn params(&self) -> &WgParams {
         &self.inner.params

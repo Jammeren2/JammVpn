@@ -132,8 +132,9 @@ impl Outbound {
     ///   цели идёт в каждом пакете (домен резолвит сервер — remote DNS).
     /// - `Tuic`: поток поверх общего QUIC-соединения (мультиплекс по assoc_id,
     ///   QUIC-датаграммы; домен резолвит сервер).
+    /// - `Wireguard`/AmneziaWG: датаграммы поверх smoltcp udp-сокета в туннеле.
     ///
-    /// Прочие исходящие (SS-2022/Trojan/VLESS/…) UDP пока не поддерживают.
+    /// Прочие исходящие (VLESS/…) UDP пока не поддерживают.
     pub async fn connect_udp(&self, target: &Target) -> io::Result<UdpSession> {
         match self {
             Outbound::Direct => {
@@ -179,6 +180,9 @@ impl Outbound {
                     rx: tokio::sync::Mutex::new(rx),
                 })
             }
+            Outbound::Wireguard(cfg) => Ok(UdpSession::Wireguard(
+                crate::wireguard::wireguard_connect_udp(cfg, target).await?,
+            )),
             Outbound::Trojan(cfg) => {
                 // UDP поверх потока Trojan (TCP/Reality): заголовок CMD=0x03, затем
                 // length-framed пакеты. Поток делим на чтение/запись.
@@ -236,6 +240,8 @@ pub enum UdpSession {
         write: tokio::sync::Mutex<tokio::io::WriteHalf<BoxedStream>>,
         target: Target,
     },
+    /// Через WireGuard/AmneziaWG: датаграммы поверх smoltcp udp-сокета в туннеле.
+    Wireguard(crate::wireguard::WgUdpSocket),
 }
 
 impl UdpSession {
@@ -275,6 +281,9 @@ impl UdpSession {
             } => {
                 let pkt = session.encrypt(target, payload)?;
                 sock.send(&pkt).await?;
+            }
+            UdpSession::Wireguard(sock) => {
+                sock.send(payload).await?;
             }
         }
         Ok(())
@@ -320,6 +329,7 @@ impl UdpSession {
                 let n = sock.recv(&mut buf).await?;
                 session.decrypt(&buf[..n])
             }
+            UdpSession::Wireguard(sock) => sock.recv().await,
         }
     }
 

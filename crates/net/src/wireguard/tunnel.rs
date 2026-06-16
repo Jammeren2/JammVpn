@@ -12,7 +12,7 @@ use crate::BoxedStream;
 use boringtun::noise::Tunn;
 use boringtun::x25519::{PublicKey, StaticSecret};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::socket::tcp;
+use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint};
 use std::io;
@@ -25,6 +25,8 @@ use tokio::sync::{mpsc, Notify};
 
 /// Буфер приёма/передачи smoltcp-сокета (на соединение).
 const SOCKET_BUF: usize = 64 * 1024;
+/// Кол-во слотов метаданных датаграмм в UDP-буфере (приём/передача).
+const UDP_META: usize = 32;
 /// Таймаут установления TCP-соединения через туннель.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Динамический диапазон локальных портов.
@@ -209,6 +211,42 @@ impl WgTunnel {
                 ))
             }
         }
+    }
+
+    /// Открывает UDP-сокет до `target` через туннель: привязывает локальный порт
+    /// и нацеливает на разрешённый адрес. UDP без установления — сокет готов сразу
+    /// (первые датаграммы до завершения handshake могут быть потеряны, как и
+    /// положено UDP).
+    pub(crate) async fn connect_udp(
+        self: &Arc<Self>,
+        target: &Target,
+    ) -> io::Result<super::udp_socket::WgUdpSocket> {
+        let (ip, port) = resolve_target(target).await?;
+        let remote = IpEndpoint::new(IpAddress::from(ip), port);
+
+        let handle = {
+            let mut st = self.stack.lock().unwrap();
+            let rx = udp::PacketBuffer::new(
+                vec![udp::PacketMetadata::EMPTY; UDP_META],
+                vec![0u8; SOCKET_BUF],
+            );
+            let tx = udp::PacketBuffer::new(
+                vec![udp::PacketMetadata::EMPTY; UDP_META],
+                vec![0u8; SOCKET_BUF],
+            );
+            let mut socket = udp::Socket::new(rx, tx);
+            let local_port = self.alloc_port();
+            socket
+                .bind(local_port)
+                .map_err(|e| io::Error::other(format!("wg: udp bind: {e:?}")))?;
+            st.sockets.add(socket)
+        };
+        self.kick();
+        Ok(super::udp_socket::WgUdpSocket::new(
+            self.clone(),
+            handle,
+            remote,
+        ))
     }
 }
 
