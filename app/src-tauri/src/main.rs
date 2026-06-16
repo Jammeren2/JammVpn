@@ -37,6 +37,12 @@ fn list_connections() -> Vec<ctl::ConnectionInfo> {
     ctl::list_connections()
 }
 
+/// Принудительно закрыть соединение по id (кнопка «дропнуть» в статистике).
+#[tauri::command]
+fn drop_connection(id: u64) -> bool {
+    ctl::drop_connection(id)
+}
+
 #[tauri::command]
 fn config_path() -> String {
     ctl::config_path().display().to_string()
@@ -420,6 +426,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_nodes,
             list_connections,
+            drop_connection,
             config_path,
             import,
             import_config,

@@ -191,8 +191,16 @@
         <div class="conn-node">${esc(node)}</div>
         <div class="conn-up num">${fmtBytes(c.up)}</div>
         <div class="conn-down num">${fmtBytes(c.down)}</div>
+        <div class="conn-kill"><button class="x" data-kill="${c.id}" title="Закрыть соединение">✕</button></div>
       </div>`;
     }
+
+    // Делегированный клик: «дропнуть» соединение по id.
+    body.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-kill]");
+      if (!btn) return;
+      invoke("drop_connection", { id: parseInt(btn.dataset.kill, 10) }).then(poll);
+    });
 
     function render(list) {
       list.sort((a, b) => {

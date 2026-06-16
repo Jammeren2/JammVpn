@@ -12,12 +12,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::Notify;
 
 struct Entry {
     target: String,
     via: &'static str,
     up: Arc<AtomicU64>,
     down: Arc<AtomicU64>,
+    /// Сигнал принудительного закрытия соединения из UI.
+    kill: Arc<Notify>,
 }
 
 fn registry() -> &'static Mutex<HashMap<u64, Entry>> {
@@ -30,6 +33,8 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Срез активного соединения (для UI).
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
+    /// Идентификатор (для принудительного закрытия из UI).
+    pub id: u64,
     /// Цель (`host:port` / `ip:port`).
     pub target: String,
     /// Маршрут: `proxy` | `direct`.
@@ -47,6 +52,8 @@ pub struct ConnGuard {
     pub up: Arc<AtomicU64>,
     /// Счётчик принятых байт (читается из исходящего).
     pub down: Arc<AtomicU64>,
+    /// Сигнал принудительного закрытия (см. [`copy_counted`]).
+    kill: Arc<Notify>,
 }
 
 /// Регистрирует соединение; держите guard на время relay.
@@ -54,6 +61,7 @@ pub fn register(target: String, via: &'static str) -> ConnGuard {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let up = Arc::new(AtomicU64::new(0));
     let down = Arc::new(AtomicU64::new(0));
+    let kill = Arc::new(Notify::new());
     registry().lock().unwrap().insert(
         id,
         Entry {
@@ -61,9 +69,27 @@ pub fn register(target: String, via: &'static str) -> ConnGuard {
             via,
             up: Arc::clone(&up),
             down: Arc::clone(&down),
+            kill: Arc::clone(&kill),
         },
     );
-    ConnGuard { id, up, down }
+    ConnGuard {
+        id,
+        up,
+        down,
+        kill,
+    }
+}
+
+/// Принудительно закрывает соединение по `id` (UI «дропнуть»). `false` — нет
+/// такого активного соединения.
+pub fn drop_connection(id: u64) -> bool {
+    match registry().lock().unwrap().get(&id) {
+        Some(e) => {
+            e.kill.notify_waiters();
+            true
+        }
+        None => false,
+    }
 }
 
 impl Drop for ConnGuard {
@@ -77,8 +103,9 @@ pub fn snapshot() -> Vec<ConnInfo> {
     registry()
         .lock()
         .unwrap()
-        .values()
-        .map(|e| ConnInfo {
+        .iter()
+        .map(|(id, e)| ConnInfo {
+            id: *id,
             target: e.target.clone(),
             via: e.via,
             up: e.up.load(Ordering::Relaxed),
@@ -142,7 +169,12 @@ where
 {
     let mut c = ReadCounting::new(client, Arc::clone(&guard.up));
     let mut u = ReadCounting::new(upstream, Arc::clone(&guard.down));
-    tokio::io::copy_bidirectional(&mut c, &mut u).await?;
+    // Гонка с сигналом принудительного закрытия из UI: при `kill` бросаем relay
+    // (потоки закрываются при Drop).
+    tokio::select! {
+        r = tokio::io::copy_bidirectional(&mut c, &mut u) => { r?; }
+        _ = guard.kill.notified() => {}
+    }
     Ok(())
 }
 

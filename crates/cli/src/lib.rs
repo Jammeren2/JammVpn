@@ -167,6 +167,7 @@ pub fn list_nodes() -> Vec<NodeInfo> {
 /// Активное соединение для монитора (срез реестра движка).
 #[derive(Debug, Clone, Serialize)]
 pub struct ConnectionInfo {
+    pub id: u64,
     pub target: String,
     pub via: String,
     pub up: u64,
@@ -178,12 +179,18 @@ pub fn list_connections() -> Vec<ConnectionInfo> {
     jammvpn_net::connection_snapshot()
         .into_iter()
         .map(|c| ConnectionInfo {
+            id: c.id,
             target: c.target,
             via: c.via.to_string(),
             up: c.up,
             down: c.down,
         })
         .collect()
+}
+
+/// Принудительно закрывает соединение по `id`.
+pub fn drop_connection(id: u64) -> bool {
+    jammvpn_net::connection_drop(id)
 }
 
 /// Импортирует узел (share-ссылка) или подписку (URL). Возвращает сообщение.

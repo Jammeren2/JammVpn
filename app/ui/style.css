@@ -944,9 +944,20 @@ button.mini:hover:not(:disabled) {
 .conn-head,
 .conn {
   display: grid;
-  grid-template-columns: 1.4fr 1.8fr 1.3fr 84px 84px;
+  grid-template-columns: 1.4fr 1.8fr 1.3fr 84px 84px 30px;
   gap: 12px;
   align-items: center;
+}
+.conn-kill {
+  display: flex;
+  justify-content: center;
+}
+.conn-kill .x {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.conn:hover .conn-kill .x {
+  opacity: 1;
 }
 .conn-head {
   padding: 0 16px 10px;
