@@ -12,7 +12,7 @@ use jammvpn_core::routing::DomainRule;
 use jammvpn_core::split::{AppMatcher, IpCidr};
 use jammvpn_core::{
     parse_awg_conf, parse_clash, parse_link, parse_singbox_config, parse_xray_config, AppConfig,
-    RouteAction, Rule, SecretStore, SplitConfig, SplitMode, Subscription,
+    RouteAction, Rule, SecretStore, SplitConfig, Subscription,
 };
 use jammvpn_core::LocalWgConfig;
 use jammvpn_net::{
@@ -148,6 +148,30 @@ pub fn save_config(path: &Path, cfg: &AppConfig, store: &dyn SecretStore) -> Res
 /// Загружает текущий конфиг штатным хранилищем.
 pub fn load() -> AppConfig {
     load_config(&config_path(), secret_store().as_ref())
+}
+
+/// Дозаписывает строку в файл лога (`%APPDATA%/jammvpn/jammvpn.log`). Для
+/// диагностики там, где stdout/stderr не видны (GUI без консоли).
+pub fn log_line(msg: &str) {
+    use std::io::Write;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = config_path()
+        .parent()
+        .map(|p| p.join("jammvpn.log"))
+        .unwrap_or_else(|| PathBuf::from("jammvpn.log"));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "[{secs}] {msg}");
+    }
 }
 
 /// Список узлов из конфига.
@@ -891,6 +915,13 @@ pub struct SplitOptions {
 /// (узел/прямо/блок) для перехваченного трафика далее решает движок по правилам.
 fn rules_to_split(cfg: &AppConfig) -> SplitConfig {
     let mut apps: Vec<AppMatcher> = Vec::new();
+    // Источник 1: приложения, заданные напрямую в split-конфиге (панель split).
+    for a in &cfg.split.apps {
+        if !apps.contains(a) {
+            apps.push(a.clone());
+        }
+    }
+    // Источник 2: процессы из правил с действием «проксировать».
     for r in &cfg.rules {
         if matches!(r.action, RouteAction::Proxy(_)) {
             for p in &r.processes {
@@ -909,12 +940,12 @@ fn rules_to_split(cfg: &AppConfig) -> SplitConfig {
         .map(|s| s.address.clone())
         .collect();
     SplitConfig {
-        mode: SplitMode::Inclusive,
+        mode: cfg.split.mode,
         apps,
         inherit_children: cfg.split.inherit_children,
         kill_switch: cfg.split.kill_switch,
-        force_direct_cidrs: Vec::new(),
-        force_tunnel_cidrs: Vec::new(),
+        force_direct_cidrs: cfg.split.force_direct_cidrs.clone(),
+        force_tunnel_cidrs: cfg.split.force_tunnel_cidrs.clone(),
         server_endpoints: endpoints,
     }
 }
@@ -1367,14 +1398,29 @@ impl WinpkSplitController {
         let cfg = load();
         let split_cfg = rules_to_split(&cfg);
         let upstream = cfg.settings.proxy_node.clone();
+        log_line(&format!(
+            "split start: apps={:?} mode={:?} upstream={:?} elevated={}",
+            split_cfg.apps,
+            split_cfg.mode,
+            upstream,
+            jammvpn_platform_windows::winpkfilter::is_elevated()
+        ));
+        if split_cfg.apps.is_empty() {
+            return Err("нет приложений для split: добавьте процесс в наборе split или \
+                        правило с действием «проксировать»"
+                .into());
+        }
         let engine = Arc::new(build_engine(&cfg, upstream.as_deref())?);
         let (netstack, mut out) =
             jammvpn_net::netstack::Netstack::new(engine, Ipv4Addr::new(10, 9, 0, 1), 24);
         let netstack = Arc::new(netstack);
         let ns = netstack.clone();
+        let logger: jammvpn_platform_windows::winpkfilter::Logger =
+            std::sync::Arc::new(|m: String| log_line(&m));
         let tunnel = jammvpn_platform_windows::winpkfilter::SplitTunnel::start(
             split_cfg,
             Box::new(move |ip: &[u8]| ns.inject(ip)),
+            logger,
         )?;
         let injector = tunnel.injector();
         // Ответы из netstack → реинъекция приложению.

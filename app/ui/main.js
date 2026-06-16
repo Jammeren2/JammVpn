@@ -297,9 +297,34 @@ async function startProxy() {
     const addr = await invoke("proxy_start", { listen, server });
     setStatus(addr);
     checkConnectivity(addr); // авто-тест доступности сети
+    autoSplit(); // split активируется вместе с туннелем
   } catch (e) {
     $("proxy-hint").textContent = "ошибка: " + e;
     $("proxy-hint").className = "hint err";
+  }
+}
+
+// Авто-активация split вместе с туннелем (если заданы приложения и есть права).
+async function autoSplit() {
+  let opts;
+  try {
+    opts = await invoke("get_split");
+  } catch (e) {
+    return;
+  }
+  if (!opts || !opts.captured_apps || opts.captured_apps.length === 0) return;
+  try {
+    await invoke("split_apply");
+    setSplitState(true);
+    if ($("split-msg")) {
+      $("split-msg").textContent = "split активирован вместе с туннелем (" + opts.captured_apps.join(", ") + ")";
+      $("split-msg").className = "hint ok";
+    }
+  } catch (e) {
+    if ($("split-msg")) {
+      $("split-msg").textContent = "split не запущен: " + e;
+      $("split-msg").className = "hint err";
+    }
   }
 }
 
@@ -333,6 +358,12 @@ async function checkConnectivity(addr) {
 
 async function stopProxy() {
   await invoke("proxy_stop");
+  try {
+    await invoke("split_clear"); // split снимается вместе с туннелем
+    setSplitState(false);
+  } catch (e) {
+    /* ignore */
+  }
   setStatus(null);
   await loadSysProxy(); // бэкенд снимает системный прокси при остановке
 }
