@@ -165,6 +165,18 @@ fn move_rule(index: usize, up: bool) -> Result<bool, String> {
     ctl::move_rule(index, up)
 }
 
+/// Список готовых пресетов правил.
+#[tauri::command]
+fn list_presets() -> Vec<ctl::PresetInfo> {
+    ctl::list_presets()
+}
+
+/// Применить пресет (заменяет текущие правила). Возвращает число правил.
+#[tauri::command]
+fn apply_preset(id: String) -> Result<usize, String> {
+    ctl::apply_preset(&id)
+}
+
 /// Включён ли автозапуск приложения при входе в систему.
 #[tauri::command]
 fn autostart_status() -> Result<bool, String> {
@@ -307,6 +319,8 @@ fn main() {
             update_rule,
             remove_rule,
             move_rule,
+            list_presets,
+            apply_preset,
             autostart_status,
             set_autostart,
             get_split,

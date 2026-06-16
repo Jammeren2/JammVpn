@@ -627,6 +627,43 @@ pub fn move_rule(index: usize, up: bool) -> Result<bool, String> {
     Ok(moved)
 }
 
+/// Готовый пресет правил (для UI).
+#[derive(Debug, Clone, Serialize)]
+pub struct PresetInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+/// Список доступных пресетов правил.
+pub fn list_presets() -> Vec<PresetInfo> {
+    jammvpn_core::routing::presets()
+        .into_iter()
+        .map(|(id, name, description, _)| PresetInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+        })
+        .collect()
+}
+
+/// Применяет пресет: ЗАМЕНЯЕТ текущие правила набором пресета. Возвращает
+/// число применённых правил. Err — неизвестный id.
+pub fn apply_preset(id: &str) -> Result<usize, String> {
+    let rules = jammvpn_core::routing::presets()
+        .into_iter()
+        .find(|(pid, ..)| *pid == id)
+        .map(|(_, _, _, rules)| rules)
+        .ok_or_else(|| format!("неизвестный пресет: {id}"))?;
+    let n = rules.len();
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    cfg.rules = rules;
+    save_config(&path, &cfg, store.as_ref())?;
+    Ok(n)
+}
+
 // --- Автозапуск при входе в систему (Windows: реестр Run) ---
 
 /// Включён ли автозапуск приложения при входе (на не-Windows — всегда `false`).

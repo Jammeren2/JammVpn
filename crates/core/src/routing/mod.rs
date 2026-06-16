@@ -14,5 +14,5 @@ mod rule;
 
 pub use domain::DomainRule;
 pub use engine::evaluate;
-pub use preset::{all_direct, all_proxy, direct_domains};
+pub use preset::{all_direct, all_proxy, direct_domains, presets};
 pub use rule::{RouteAction, RouteRequest, Rule};

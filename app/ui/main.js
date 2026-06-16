@@ -531,6 +531,42 @@ function onRulesClick(e) {
   }
 }
 
+// --- Пресеты правил ---
+
+async function loadPresets() {
+  const box = $("presets");
+  if (!box) return;
+  const presets = await invoke("list_presets");
+  box.innerHTML = "";
+  for (const p of presets) {
+    const b = document.createElement("button");
+    b.className = "ghost preset-btn";
+    b.textContent = p.name;
+    b.title = p.description;
+    b.dataset.id = p.id;
+    box.appendChild(b);
+  }
+}
+
+async function applyPreset(id, name) {
+  if (!confirm(`Применить пресет «${name}»?\nТекущие правила будут заменены.`)) return;
+  const msg = $("rules-msg");
+  try {
+    const n = await invoke("apply_preset", { id });
+    await refreshRules();
+    msg.textContent = `применён пресет «${name}» (${n} правил)`;
+    msg.className = "hint ok";
+  } catch (e) {
+    msg.textContent = "ошибка: " + e;
+    msg.className = "hint err";
+  }
+}
+
+function onPresetClick(e) {
+  const b = e.target.closest("button[data-id]");
+  if (b) applyPreset(b.dataset.id, b.textContent);
+}
+
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
@@ -552,6 +588,7 @@ async function init() {
   $("btn-rule-cancel").addEventListener("click", resetRuleForm);
   $("r-action").addEventListener("change", updateTagVisibility);
   $("rules-body").addEventListener("click", onRulesClick);
+  $("presets").addEventListener("click", onPresetClick);
   $("autostart").addEventListener("change", toggleAutostart);
   $("btn-split-save").addEventListener("click", saveSplit);
   $("btn-split-apply").addEventListener("click", applySplit);
@@ -569,6 +606,7 @@ async function init() {
   await refreshSubs();
   await loadGeo();
   await refreshRules();
+  await loadPresets();
   resetRuleForm();
   await loadAutostart();
   await loadSplit();
