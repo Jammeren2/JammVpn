@@ -1260,13 +1260,13 @@ pub fn local_wg_status(running_addr: Option<String>) -> LocalWgInfo {
     }
 }
 
-/// Генерирует клиентский `.conf` и пишет его рядом с конфигом; возвращает путь.
-pub fn local_wg_export_conf() -> Result<String, String> {
+/// Строит текст клиентского `.conf` локального WG (Endpoint = LAN-IP машины).
+pub fn local_wg_client_conf() -> Result<String, String> {
     let lw = local_wg_ensure()?;
     let host = detect_lan_ip()
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    let conf = format!(
+    Ok(format!(
         "[Interface]\n\
          PrivateKey = {privk}\n\
          Address = {cip}/{prefix}\n\
@@ -1286,7 +1286,12 @@ pub fn local_wg_export_conf() -> Result<String, String> {
         psk = lw.preshared_key,
         host = host,
         port = lw.port,
-    );
+    ))
+}
+
+/// Генерирует клиентский `.conf` и пишет его рядом с конфигом; возвращает путь.
+pub fn local_wg_export_conf() -> Result<String, String> {
+    let conf = local_wg_client_conf()?;
     let dir = config_path()
         .parent()
         .map(Path::to_path_buf)
@@ -1295,6 +1300,46 @@ pub fn local_wg_export_conf() -> Result<String, String> {
     let file = dir.join("jammvpn-local-wg.conf");
     std::fs::write(&file, conf).map_err(|e| e.to_string())?;
     Ok(file.to_string_lossy().to_string())
+}
+
+/// Запущен ли процесс от администратора.
+pub fn is_admin() -> bool {
+    #[cfg(windows)]
+    {
+        jammvpn_platform_windows::winpkfilter::is_elevated()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Перезапускает приложение от администратора (UAC). Текущий процесс должен
+/// завершиться вызывающим.
+pub fn relaunch_as_admin() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        jammvpn_platform_windows::winpkfilter::relaunch_elevated()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("только Windows".into())
+    }
+}
+
+/// QR-код клиентского `.conf` локального WG в виде SVG-строки (для скана
+/// WireGuard-приложением на телефоне).
+pub fn local_wg_qr() -> Result<String, String> {
+    let conf = local_wg_client_conf()?;
+    let code = qrcode::QrCode::new(conf.as_bytes()).map_err(|e| e.to_string())?;
+    let svg = code
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(280, 280)
+        .quiet_zone(true)
+        .dark_color(qrcode::render::svg::Color("#0b0e14"))
+        .light_color(qrcode::render::svg::Color("#ffffff"))
+        .build();
+    Ok(svg)
 }
 
 /// Best-effort: разрешает входящий UDP-порт в брандмауэре Windows (netsh).

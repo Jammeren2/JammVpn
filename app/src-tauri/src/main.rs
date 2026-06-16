@@ -233,6 +233,30 @@ fn local_wg_export_conf() -> Result<String, String> {
     ctl::local_wg_export_conf()
 }
 
+/// QR-код клиентского `.conf` локального WG (SVG-строка) для скана телефоном.
+#[tauri::command]
+fn local_wg_qr() -> Result<String, String> {
+    ctl::local_wg_qr()
+}
+
+/// Запущен ли процесс от администратора (для подсказки про split).
+#[tauri::command]
+fn is_admin() -> bool {
+    ctl::is_admin()
+}
+
+/// Перезапустить приложение от администратора (UAC) и закрыть текущее.
+#[tauri::command]
+fn relaunch_as_admin() -> Result<(), String> {
+    ctl::relaunch_as_admin()?;
+    // Даём новому (elevated) процессу стартовать и выходим.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        std::process::exit(0);
+    });
+    Ok(())
+}
+
 /// Список сохранённых подписок.
 #[tauri::command]
 fn list_subscriptions() -> Vec<ctl::SubscriptionInfo> {
@@ -446,6 +470,9 @@ fn main() {
             local_wg_stop,
             local_wg_set,
             local_wg_export_conf,
+            local_wg_qr,
+            is_admin,
+            relaunch_as_admin,
             list_subscriptions,
             add_subscription,
             remove_subscription,

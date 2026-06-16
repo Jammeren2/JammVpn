@@ -232,9 +232,11 @@
             <button id="btn-lwg-start">Запустить</button>
             <button id="btn-lwg-stop" class="ghost" disabled>Остановить</button>
             <button id="btn-lwg-export" class="ghost" title="Сохранить клиентский .conf для подключения к этому серверу">Сохранить .conf клиента</button>
+            <button id="btn-lwg-qr" class="ghost" title="QR-код для скана WireGuard-приложением на телефоне">QR для телефона</button>
           </div>
           <p class="hint" id="lwg-endpoint"></p>
           <p class="hint" id="lwg-hint"></p>
+          <div id="lwg-qr" class="lwg-qr"></div>
         </section>
 
         <section class="panel">
@@ -290,6 +292,7 @@
             <button id="btn-split-save" class="ghost">Сохранить</button>
             <button id="btn-split-apply">Применить</button>
             <button id="btn-split-clear" class="ghost">Снять</button>
+            <button id="btn-split-elevate" class="ghost" style="display: none" title="Split требует прав администратора">Перезапустить от админа</button>
           </div>
           <p class="hint" id="split-msg">Требует драйвера WinpkFilter (ndisrd) и запуска от администратора.</p>
         </section>

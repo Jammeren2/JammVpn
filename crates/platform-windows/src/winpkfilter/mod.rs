@@ -33,6 +33,32 @@ type OnCapture = Box<dyn FnMut(&[u8]) + Send>;
 /// Логгер диагностики (пишет в файл лога приложения).
 pub type Logger = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
+/// Перезапускает приложение с запросом прав администратора (UAC) и просит
+/// вызывающего завершить текущий процесс. Ошибка — если UAC отклонён.
+pub fn relaunch_elevated() -> Result<(), String> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_w = HSTRING::from(exe.as_os_str());
+    let verb = HSTRING::from("runas");
+    let h = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(exe_w.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW возвращает значение > 32 при успехе.
+    if h.0 as isize <= 32 {
+        return Err("перезапуск от администратора отменён".into());
+    }
+    Ok(())
+}
+
 /// `true`, если процесс запущен с правами администратора (нужно для драйвера).
 pub fn is_elevated() -> bool {
     use std::mem::size_of;

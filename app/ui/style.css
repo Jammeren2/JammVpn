@@ -948,6 +948,16 @@ button.mini:hover:not(:disabled) {
   gap: 12px;
   align-items: center;
 }
+.lwg-qr {
+  margin-top: 14px;
+}
+.lwg-qr svg {
+  width: 280px;
+  height: 280px;
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px;
+}
 .conn-kill {
   display: flex;
   justify-content: center;

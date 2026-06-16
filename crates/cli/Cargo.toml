@@ -22,6 +22,8 @@ all = "warn"
 jammvpn-core = { path = "../core" }
 jammvpn-net = { path = "../net" }
 serde = { version = "1", features = ["derive"] }
+# QR-код клиентского .conf локального WG (SVG; без image-фичи — лишних зависимостей нет).
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "net",

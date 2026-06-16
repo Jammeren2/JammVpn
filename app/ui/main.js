@@ -201,6 +201,26 @@ async function exportLocalWgConf() {
   }
 }
 
+// QR-код клиентского .conf для скана WireGuard-приложением на телефоне.
+async function showLocalWgQr() {
+  const box = $("lwg-qr");
+  const hint = $("lwg-hint");
+  hint.className = "hint";
+  if (box && box.innerHTML) {
+    box.innerHTML = ""; // повторный клик — скрыть
+    return;
+  }
+  try {
+    const svg = await invoke("local_wg_qr");
+    if (box) box.innerHTML = svg;
+    hint.textContent =
+      "Открой WireGuard на телефоне → «+» → «Сканировать QR-код». Endpoint = LAN-IP этой машины — телефон должен быть в той же сети, сервер запущен.";
+  } catch (e) {
+    hint.textContent = "ошибка QR: " + e;
+    hint.className = "hint err";
+  }
+}
+
 async function saveSettings() {
   const msg = $("settings-msg");
   try {
@@ -568,6 +588,39 @@ async function clearSplit() {
   }
 }
 
+// Проверка прав администратора: если не от админа — показываем кнопку
+// перезапуска и предупреждение (split без админа не работает).
+async function loadAdminState() {
+  let admin = true;
+  try {
+    admin = await invoke("is_admin");
+  } catch (e) {
+    return;
+  }
+  const btn = $("btn-split-elevate");
+  if (btn) btn.style.display = admin ? "none" : "";
+  if (!admin) {
+    const msg = $("split-msg");
+    if (msg) {
+      msg.textContent =
+        "JammVPN запущен НЕ от администратора — split работать не будет. Нажмите «Перезапустить от админа».";
+      msg.className = "hint err";
+    }
+  }
+}
+
+async function relaunchAsAdmin() {
+  try {
+    await invoke("relaunch_as_admin");
+  } catch (e) {
+    const msg = $("split-msg");
+    if (msg) {
+      msg.textContent = "не удалось: " + e;
+      msg.className = "hint err";
+    }
+  }
+}
+
 // --- Правила маршрутизации ---
 
 let rulesCache = [];
@@ -808,6 +861,8 @@ async function init() {
   $("btn-lwg-start").addEventListener("click", startLocalWg);
   $("btn-lwg-stop").addEventListener("click", stopLocalWg);
   $("btn-lwg-export").addEventListener("click", exportLocalWgConf);
+  $("btn-lwg-qr").addEventListener("click", showLocalWgQr);
+  $("btn-split-elevate").addEventListener("click", relaunchAsAdmin);
   $("import-arg").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doImport();
   });
@@ -827,6 +882,7 @@ async function init() {
   await loadSplit();
   await loadSysProxy();
   await loadLocalWg();
+  await loadAdminState();
   setStatus(await invoke("proxy_status"));
 }
 
