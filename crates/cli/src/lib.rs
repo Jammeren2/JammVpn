@@ -193,6 +193,26 @@ pub fn log_line(msg: &str) {
     {
         let _ = writeln!(f, "[{secs}] {msg}");
     }
+    maybe_rotate_log(&path);
+}
+
+/// Хранимый максимум строк в файле лога.
+const LOG_MAX_LINES: usize = 1000;
+
+/// Раз в ~200 записей обрезает лог до последних [`LOG_MAX_LINES`] строк.
+fn maybe_rotate_log(path: &Path) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    if N.fetch_add(1, Ordering::Relaxed) % 200 != 0 {
+        return;
+    }
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let lines: Vec<&str> = content.lines().collect();
+        if lines.len() > LOG_MAX_LINES {
+            let start = lines.len() - LOG_MAX_LINES;
+            let _ = std::fs::write(path, lines[start..].join("\n") + "\n");
+        }
+    }
 }
 
 /// Путь к файлу лога.

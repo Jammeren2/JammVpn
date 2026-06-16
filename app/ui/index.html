@@ -29,12 +29,17 @@
         <section class="panel hero">
           <div class="hero-ring"></div>
           <div class="hero-mid">
-            <div id="status" class="status off">прокси остановлен</div>
+            <div id="status" class="status off">остановлено</div>
             <p class="hero-sub" id="hero-node-label">Авто — по правилам конфига</p>
           </div>
+          <div class="hero-modes">
+            <button class="mode-toggle" id="mode-socks" data-mode="socks" title="Локальный SOCKS5/HTTP-прокси (TCP+UDP)">SOCKS5</button>
+            <button class="mode-toggle" id="mode-split" data-mode="split" title="Раздельное туннелирование выбранных приложений (NDIS, нужен админ)">Split</button>
+            <button class="mode-toggle" id="mode-wg" data-mode="wg" title="Локальный WireGuard-сервер для других устройств">WG-сервер</button>
+          </div>
           <div class="hero-actions">
-            <button id="btn-start">Запустить туннель</button>
-            <button id="btn-stop" class="ghost" disabled>Остановить</button>
+            <button id="btn-start">Старт</button>
+            <button id="btn-stop" class="ghost" disabled>Стоп</button>
           </div>
           <p class="hint" id="proxy-hint"></p>
         </section>
@@ -326,6 +331,7 @@
           <div class="panel-head">
             <h2>Логи</h2>
             <div class="panel-actions">
+              <label class="check">строк <input id="log-lines" type="number" min="10" max="1000" step="10" value="100" style="width: 72px" /></label>
               <label class="check"><input id="log-auto" type="checkbox" checked /> авто-обновление</label>
               <button id="btn-log-refresh" class="ghost">Обновить</button>
               <button id="btn-log-clear" class="ghost">Очистить</button>

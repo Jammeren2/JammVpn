@@ -239,10 +239,10 @@ fn local_wg_qr() -> Result<String, String> {
     ctl::local_wg_qr()
 }
 
-/// Последние строки лога (вкладка «Логи»).
+/// Последние `lines` строк лога (вкладка «Логи»; по умолчанию 100).
 #[tauri::command]
-fn read_log() -> String {
-    ctl::read_log(2000)
+fn read_log(lines: Option<usize>) -> String {
+    ctl::read_log(lines.unwrap_or(100).clamp(10, 1000))
 }
 
 /// Очистить лог.

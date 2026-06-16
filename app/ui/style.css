@@ -948,6 +948,33 @@ button.mini:hover:not(:disabled) {
   gap: 12px;
   align-items: center;
 }
+.hero-modes {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin: 14px 0 4px;
+  flex-wrap: wrap;
+}
+.mode-toggle {
+  padding: 7px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted, #8a93a6);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.mode-toggle:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+  color: var(--text, #cdd6e4);
+}
+.mode-toggle.on {
+  background: var(--accent, #4c8dff);
+  border-color: var(--accent, #4c8dff);
+  color: #fff;
+}
 .group-head td {
   padding-top: 16px;
   font-weight: 600;

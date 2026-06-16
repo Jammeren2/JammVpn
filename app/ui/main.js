@@ -3,16 +3,63 @@ const { invoke } = window.__TAURI__.core;
 
 const $ = (id) => document.getElementById(id);
 
-function setStatus(addr) {
+// --- Режимы (SOCKS5 / Split / WG-сервер) ---
+const DEFAULT_MODES = { socks: true, split: false, wg: false };
+function getModes() {
+  try {
+    return Object.assign(
+      {},
+      DEFAULT_MODES,
+      JSON.parse(localStorage.getItem("jamm_modes") || "{}")
+    );
+  } catch (e) {
+    return { ...DEFAULT_MODES };
+  }
+}
+function saveModes(m) {
+  localStorage.setItem("jamm_modes", JSON.stringify(m));
+}
+function renderModes() {
+  const m = getModes();
+  for (const k of ["socks", "split", "wg"]) {
+    const el = $("mode-" + k);
+    if (el) el.classList.toggle("on", !!m[k]);
+  }
+}
+function toggleMode(k) {
+  const m = getModes();
+  m[k] = !m[k];
+  saveModes(m);
+  renderModes();
+}
+
+// Что реально запущено сейчас.
+async function runningModes() {
+  const out = { socks: null, split: false, wg: false };
+  try {
+    out.socks = await invoke("proxy_status");
+  } catch (e) {}
+  try {
+    out.split = await invoke("split_status");
+  } catch (e) {}
+  try {
+    const i = await invoke("local_wg_status");
+    out.wg = !!(i && i.running);
+  } catch (e) {}
+  return out;
+}
+
+async function updateHeroStatus() {
+  const r = await runningModes();
+  const parts = [];
+  if (r.socks) parts.push("SOCKS5 " + r.socks);
+  if (r.split) parts.push("Split");
+  if (r.wg) parts.push("WG-сервер");
+  const on = parts.length > 0;
   const el = $("status");
-  const running = !!addr;
-  el.textContent = running ? `прокси на ${addr}` : "прокси остановлен";
-  el.className = "status " + (running ? "on" : "off");
-  $("btn-start").disabled = running;
-  $("btn-stop").disabled = !running;
-  $("proxy-hint").textContent = running
-    ? `SOCKS5 + HTTP (TCP и UDP) на ${addr}. Проверка: curl --socks5-hostname ${addr} https://icanhazip.com`
-    : "";
+  el.textContent = on ? parts.join(" · ") : "остановлено";
+  el.className = "status " + (on ? "on" : "off");
+  $("btn-stop").disabled = !on;
 }
 
 async function refreshNodes() {
@@ -329,75 +376,84 @@ async function updateSubs() {
   }
 }
 
+// Запускает только SOCKS5-прокси (внутреннее). Бросает при ошибке.
 async function startProxy() {
   const listen = $("listen").value.trim() || "127.0.0.1:1080";
   const server = $("server").value || null;
-  $("proxy-hint").textContent = "запуск…";
-  try {
-    const addr = await invoke("proxy_start", { listen, server });
-    setStatus(addr);
-    checkConnectivity(addr); // авто-тест доступности сети
-    autoSplit(); // split активируется вместе с туннелем
-  } catch (e) {
-    $("proxy-hint").textContent = "ошибка: " + e;
-    $("proxy-hint").className = "hint err";
+  const addr = await invoke("proxy_start", { listen, server });
+  checkConnectivity(addr);
+  return addr;
+}
+
+// Старт всех включённых режимов через выбранный узел.
+async function startAll() {
+  const m = getModes();
+  const node = $("server").value || null;
+  const errs = [];
+  const hint = $("proxy-hint");
+  hint.className = "hint";
+  hint.textContent = "запуск…";
+
+  if (m.socks) {
+    try {
+      await startProxy();
+    } catch (e) {
+      if (!String(e).includes("уже запущен")) errs.push("SOCKS5: " + e);
+    }
+  }
+  if (m.split) {
+    try {
+      await invoke("split_apply");
+      setSplitState(true);
+    } catch (e) {
+      if (!String(e).includes("уже применён")) errs.push("Split: " + e);
+    }
+  }
+  if (m.wg) {
+    try {
+      await invoke("local_wg_start", { upstreamNode: node });
+    } catch (e) {
+      if (!String(e).includes("уже запущен")) errs.push("WG-сервер: " + e);
+    }
+  }
+
+  await updateHeroStatus();
+  await loadLocalWg();
+  if (errs.length) {
+    hint.textContent = "не всё запустилось — " + errs.join("; ");
+    hint.className = "hint err";
+  } else if (!m.socks) {
+    hint.textContent = "";
   }
 }
 
-// Авто-активация split вместе с туннелем (если заданы приложения и есть права).
-async function autoSplit() {
-  let opts;
+// Стоп всех режимов.
+async function stopAll() {
   try {
-    opts = await invoke("get_split");
-  } catch (e) {
-    return;
-  }
-  if (!opts || !opts.captured_apps || opts.captured_apps.length === 0) return;
+    await invoke("proxy_stop");
+  } catch (e) {}
   try {
-    await invoke("split_apply");
-    setSplitState(true);
-    if ($("split-msg")) {
-      $("split-msg").textContent = "split активирован вместе с туннелем (" + opts.captured_apps.join(", ") + ")";
-      $("split-msg").className = "hint ok";
-    }
-  } catch (e) {
-    if ($("split-msg")) {
-      $("split-msg").textContent = "split не запущен: " + e;
-      $("split-msg").className = "hint err";
-    }
-  }
+    await invoke("split_clear");
+    setSplitState(false);
+  } catch (e) {}
+  try {
+    await invoke("local_wg_stop");
+  } catch (e) {}
+  $("proxy-hint").textContent = "";
+  $("proxy-hint").className = "hint";
+  await updateHeroStatus();
+  await loadSysProxy();
+  await loadLocalWg();
 }
 
-// Смена выбранного узла: сохранить и, если прокси/split запущены — перезапустить
-// их с новым узлом (иначе трафик продолжал идти через старый).
+// Смена узла: если что-то запущено — перезапускаем всё на новый узел, чтобы
+// трафик во всех режимах (SOCKS/Split/WG) пошёл через него.
 async function onNodeChange() {
   await saveConnection();
-  // Перезапуск split на новый узел (если активен).
-  let splitOn = false;
-  try {
-    splitOn = await invoke("split_status");
-  } catch (e) {
-    /* ignore */
-  }
-  if (splitOn) {
-    try {
-      await invoke("split_clear");
-      await invoke("split_apply");
-    } catch (e) {
-      if ($("split-msg")) {
-        $("split-msg").textContent = "split не перезапущен на новый узел: " + e;
-        $("split-msg").className = "hint err";
-      }
-    }
-  }
-  // Перезапуск основного прокси (если запущен).
-  if ($("status").classList.contains("on")) {
-    try {
-      await invoke("proxy_stop");
-    } catch (e) {
-      /* ignore */
-    }
-    await startProxy();
+  const r = await runningModes();
+  if (r.socks || r.split || r.wg) {
+    await stopAll();
+    await startAll();
   }
 }
 
@@ -405,27 +461,15 @@ async function onNodeChange() {
 async function checkConnectivity(addr) {
   const hint = $("proxy-hint");
   hint.className = "hint";
-  hint.textContent = `прокси на ${addr} · проверка сети…`;
+  hint.textContent = `SOCKS5 на ${addr} · проверка сети…`;
   try {
     const ip = await invoke("proxy_self_test");
-    hint.textContent = `сеть доступна ✓ внешний IP: ${ip} (прокси ${addr})`;
+    hint.textContent = `сеть доступна ✓ внешний IP: ${ip} (SOCKS5 ${addr})`;
     hint.className = "hint ok";
   } catch (e) {
-    hint.textContent = `прокси на ${addr}, но сеть недоступна: ${e}`;
+    hint.textContent = `SOCKS5 на ${addr}, но сеть недоступна: ${e}`;
     hint.className = "hint err";
   }
-}
-
-async function stopProxy() {
-  await invoke("proxy_stop");
-  try {
-    await invoke("split_clear"); // split снимается вместе с туннелем
-    setSplitState(false);
-  } catch (e) {
-    /* ignore */
-  }
-  setStatus(null);
-  await loadSysProxy(); // бэкенд снимает системный прокси при остановке
 }
 
 async function refreshSubs() {
@@ -607,6 +651,7 @@ async function applySplit() {
     await invoke("set_split", { killSwitch: $("sp-kill").checked }); // сохранить перед применением
     await invoke("split_apply");
     setSplitState(true);
+    await updateHeroStatus();
     msg.textContent = "split применён";
     msg.className = "hint ok";
   } catch (e) {
@@ -620,6 +665,7 @@ async function clearSplit() {
   try {
     await invoke("split_clear");
     setSplitState(false);
+    await updateHeroStatus();
     msg.textContent = "split снят";
     msg.className = "hint ok";
   } catch (e) {
@@ -665,8 +711,9 @@ async function relaunchAsAdmin() {
 async function loadLog() {
   const view = $("log-view");
   if (!view) return;
+  const lines = parseInt(($("log-lines") || {}).value, 10) || 100;
   try {
-    const text = await invoke("read_log");
+    const text = await invoke("read_log", { lines });
     const atBottom =
       view.scrollHeight - view.scrollTop - view.clientHeight < 40;
     view.textContent = text || "(лог пуст)";
@@ -903,8 +950,12 @@ function esc(s) {
 }
 
 async function init() {
-  $("btn-start").addEventListener("click", startProxy);
-  $("btn-stop").addEventListener("click", stopProxy);
+  $("btn-start").addEventListener("click", startAll);
+  $("btn-stop").addEventListener("click", stopAll);
+  for (const k of ["socks", "split", "wg"]) {
+    const el = $("mode-" + k);
+    if (el) el.addEventListener("click", () => toggleMode(k));
+  }
   $("btn-refresh").addEventListener("click", refreshNodes);
   $("btn-test").addEventListener("click", testLatencies);
   $("btn-import").addEventListener("click", doImport);
@@ -934,6 +985,7 @@ async function init() {
   $("btn-split-elevate").addEventListener("click", relaunchAsAdmin);
   $("btn-log-refresh").addEventListener("click", loadLog);
   $("btn-log-clear").addEventListener("click", clearLog);
+  $("log-lines").addEventListener("change", loadLog);
   // Загрузка лога при открытии вкладки + авто-обновление, пока она активна.
   const logsTab = document.querySelector('.tab[data-tab="logs"]');
   if (logsTab) logsTab.addEventListener("click", loadLog);
@@ -960,7 +1012,8 @@ async function init() {
   await loadSysProxy();
   await loadLocalWg();
   await loadAdminState();
-  setStatus(await invoke("proxy_status"));
+  renderModes();
+  await updateHeroStatus();
 }
 
 window.addEventListener("DOMContentLoaded", init);
