@@ -36,6 +36,7 @@ pub mod urltest;
 mod util;
 #[allow(dead_code, clippy::all)]
 mod vision;
+pub mod netstack;
 pub mod vless;
 pub mod wgserver;
 pub mod wireguard;
