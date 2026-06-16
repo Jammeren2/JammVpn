@@ -348,9 +348,29 @@ async function autoSplit() {
   }
 }
 
-// Смена выбранного узла: сохранить и, если прокси запущен, перезапустить с ним.
+// Смена выбранного узла: сохранить и, если прокси/split запущены — перезапустить
+// их с новым узлом (иначе трафик продолжал идти через старый).
 async function onNodeChange() {
   await saveConnection();
+  // Перезапуск split на новый узел (если активен).
+  let splitOn = false;
+  try {
+    splitOn = await invoke("split_status");
+  } catch (e) {
+    /* ignore */
+  }
+  if (splitOn) {
+    try {
+      await invoke("split_clear");
+      await invoke("split_apply");
+    } catch (e) {
+      if ($("split-msg")) {
+        $("split-msg").textContent = "split не перезапущен на новый узел: " + e;
+        $("split-msg").className = "hint err";
+      }
+    }
+  }
+  // Перезапуск основного прокси (если запущен).
   if ($("status").classList.contains("on")) {
     try {
       await invoke("proxy_stop");
@@ -621,6 +641,35 @@ async function relaunchAsAdmin() {
   }
 }
 
+// --- Логи ---
+async function loadLog() {
+  const view = $("log-view");
+  if (!view) return;
+  try {
+    const text = await invoke("read_log");
+    const atBottom =
+      view.scrollHeight - view.scrollTop - view.clientHeight < 40;
+    view.textContent = text || "(лог пуст)";
+    if (atBottom) view.scrollTop = view.scrollHeight; // держим прокрутку внизу
+  } catch (e) {
+    view.textContent = "ошибка чтения лога: " + e;
+  }
+}
+
+async function clearLog() {
+  try {
+    await invoke("clear_log");
+    await loadLog();
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+function logsTabActive() {
+  const p = document.querySelector('[data-tab-panel="logs"]');
+  return p && p.classList.contains("active");
+}
+
 // --- Правила маршрутизации ---
 
 let rulesCache = [];
@@ -863,6 +912,14 @@ async function init() {
   $("btn-lwg-export").addEventListener("click", exportLocalWgConf);
   $("btn-lwg-qr").addEventListener("click", showLocalWgQr);
   $("btn-split-elevate").addEventListener("click", relaunchAsAdmin);
+  $("btn-log-refresh").addEventListener("click", loadLog);
+  $("btn-log-clear").addEventListener("click", clearLog);
+  // Загрузка лога при открытии вкладки + авто-обновление, пока она активна.
+  const logsTab = document.querySelector('.tab[data-tab="logs"]');
+  if (logsTab) logsTab.addEventListener("click", loadLog);
+  setInterval(() => {
+    if (logsTabActive() && $("log-auto") && $("log-auto").checked) loadLog();
+  }, 2000);
   $("import-arg").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doImport();
   });

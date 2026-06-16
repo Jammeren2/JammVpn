@@ -127,13 +127,32 @@ pub fn secret_store() -> Box<dyn SecretStore> {
 
 /// Загружает конфиг (расшифровывая секреты); при ошибке возвращает пустой.
 pub fn load_config(path: &Path, store: &dyn SecretStore) -> AppConfig {
-    if path.exists() {
+    let mut cfg = if path.exists() {
         AppConfig::load_protected(path, store).unwrap_or_else(|e| {
             eprintln!("предупреждение: не удалось загрузить конфиг ({e}); беру пустой");
             AppConfig::default()
         })
     } else {
         AppConfig::default()
+    };
+    sanitize_config(&mut cfg);
+    cfg
+}
+
+/// Чинит заведомо-битые значения конфига (self-heal), чтобы не плодить
+/// предупреждения. Сейчас: некорректный FakeIP-диапазон → дефолт.
+fn sanitize_config(cfg: &mut AppConfig) {
+    fn valid_cidr(s: &str) -> bool {
+        match s.split_once('/') {
+            Some((ip, pfx)) => {
+                ip.trim().parse::<std::net::Ipv4Addr>().is_ok()
+                    && pfx.trim().parse::<u8>().map(|p| p <= 32).unwrap_or(false)
+            }
+            None => false,
+        }
+    }
+    if !valid_cidr(&cfg.dns.fakeip.range) {
+        cfg.dns.fakeip.range = "198.18.0.0/15".to_string();
     }
 }
 
@@ -172,6 +191,27 @@ pub fn log_line(msg: &str) {
     {
         let _ = writeln!(f, "[{secs}] {msg}");
     }
+}
+
+/// Путь к файлу лога.
+fn log_path() -> PathBuf {
+    config_path()
+        .parent()
+        .map(|p| p.join("jammvpn.log"))
+        .unwrap_or_else(|| PathBuf::from("jammvpn.log"))
+}
+
+/// Последние `max_lines` строк лога (для вкладки «Логи»).
+pub fn read_log(max_lines: usize) -> String {
+    let content = std::fs::read_to_string(log_path()).unwrap_or_default();
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
+}
+
+/// Очищает файл лога.
+pub fn clear_log() {
+    let _ = std::fs::write(log_path(), b"");
 }
 
 /// Список узлов из конфига.
@@ -353,17 +393,21 @@ pub async fn update_subscriptions() -> Result<Vec<SubUpdate>, String> {
             Ok(servers) => {
                 let n = servers.len();
                 subscription::merge_subscription(&mut cfg, sub, servers);
+                log_line(&format!("подписка {}: {n} узлов", sub.url));
                 out.push(SubUpdate {
                     url: sub.url.clone(),
                     count: Some(n),
                     error: None,
                 });
             }
-            Err(e) => out.push(SubUpdate {
-                url: sub.url.clone(),
-                count: None,
-                error: Some(e.to_string()),
-            }),
+            Err(e) => {
+                log_line(&format!("подписка {}: ОШИБКА {e}", sub.url));
+                out.push(SubUpdate {
+                    url: sub.url.clone(),
+                    count: None,
+                    error: Some(e.to_string()),
+                })
+            }
         }
     }
     save_config(&path, &cfg, store.as_ref())?;
@@ -1075,9 +1119,18 @@ impl ProxyController {
     /// правилам), спавнит обслуживание. Возвращается после успешного бинда.
     pub async fn start(listen: &str, server: Option<String>) -> Result<Self, String> {
         let cfg = load();
-        let engine = build_engine(&cfg, server.as_deref())?;
-        let listener = TcpListener::bind(listen).await.map_err(|e| e.to_string())?;
+        let engine = build_engine(&cfg, server.as_deref()).inspect_err(|e| {
+            log_line(&format!("прокси: ошибка движка (узел {server:?}): {e}"));
+        })?;
+        let listener = TcpListener::bind(listen).await.map_err(|e| {
+            log_line(&format!("прокси: bind {listen} не удался: {e}"));
+            e.to_string()
+        })?;
         let addr = listener.local_addr().map_err(|e| e.to_string())?;
+        log_line(&format!(
+            "прокси запущен на {addr}; узел: {}",
+            server.as_deref().unwrap_or("по правилам")
+        ));
         let engine = Arc::new(engine);
         let handle = tokio::spawn(async move {
             let _ = serve_socks_routed(listener, engine).await;

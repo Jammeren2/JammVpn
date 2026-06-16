@@ -948,6 +948,21 @@ button.mini:hover:not(:disabled) {
   gap: 12px;
   align-items: center;
 }
+.log-view {
+  margin-top: 12px;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 14px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.08));
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text, #cdd6e4);
+}
 .lwg-qr {
   margin-top: 14px;
 }

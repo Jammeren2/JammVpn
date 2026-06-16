@@ -239,6 +239,18 @@ fn local_wg_qr() -> Result<String, String> {
     ctl::local_wg_qr()
 }
 
+/// Последние строки лога (вкладка «Логи»).
+#[tauri::command]
+fn read_log() -> String {
+    ctl::read_log(2000)
+}
+
+/// Очистить лог.
+#[tauri::command]
+fn clear_log() {
+    ctl::clear_log()
+}
+
 /// Запущен ли процесс от администратора (для подсказки про split).
 #[tauri::command]
 fn is_admin() -> bool {
@@ -473,6 +485,8 @@ fn main() {
             local_wg_qr,
             is_admin,
             relaunch_as_admin,
+            read_log,
+            clear_log,
             list_subscriptions,
             add_subscription,
             remove_subscription,

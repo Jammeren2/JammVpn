@@ -18,6 +18,7 @@
         <button class="tab" data-tab="routes">Маршруты</button>
         <button class="tab" data-tab="stats">Статистика</button>
         <button class="tab" data-tab="advanced">Дополнительно</button>
+        <button class="tab" data-tab="logs">Логи</button>
       </nav>
       <div class="appbar-status off" id="appbar-status">—</div>
     </div>
@@ -316,6 +317,22 @@
         <section class="panel">
           <h2>Конфигурация</h2>
           <div class="config-line">путь: <span id="config-path"></span></div>
+        </section>
+      </section>
+
+      <!-- ====================== ЛОГИ ====================== -->
+      <section class="tabpanel" data-tab-panel="logs">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Логи</h2>
+            <div class="panel-actions">
+              <label class="check"><input id="log-auto" type="checkbox" checked /> авто-обновление</label>
+              <button id="btn-log-refresh" class="ghost">Обновить</button>
+              <button id="btn-log-clear" class="ghost">Очистить</button>
+            </div>
+          </div>
+          <p class="hint">Диагностика прокси, split-туннелирования, подписок и локального WG. Файл: <span id="log-path">%APPDATA%\jammvpn\jammvpn.log</span></p>
+          <pre id="log-view" class="log-view">—</pre>
         </section>
       </section>
     </main>
