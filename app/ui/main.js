@@ -62,8 +62,15 @@ async function updateHeroStatus() {
   $("btn-stop").disabled = !on;
 }
 
+// Маппинг группа(тег подписки) → URL, для кнопки обновления группы (читает ui.js).
+window.SUB_URLS = {};
+
 async function refreshNodes() {
   const nodes = await invoke("list_nodes");
+  try {
+    const subs = await invoke("list_subscriptions");
+    window.SUB_URLS = Object.fromEntries(subs.map((s) => [s.group, s.url]));
+  } catch (e) {}
   const body = $("nodes-body");
   body.innerHTML = "";
   const sel = $("server");
@@ -104,6 +111,7 @@ async function refreshNodes() {
         ? `<button class="x" title="Сохранить .conf" data-export="${esc(n.name)}">⤓</button>`
         : "";
       const tr = document.createElement("tr");
+      tr.dataset.group = n.group || "";
       tr.innerHTML = `<td>${idx}</td><td>${esc(n.name)}</td><td>${esc(
         n.protocol
       )}</td><td>${esc(n.address)}:${n.port}</td><td class="lat" data-name="${esc(
@@ -1090,6 +1098,8 @@ async function init() {
   // Сплеш: проверки при старте (с ограничением по времени), затем скрыть.
   await Promise.race([startupChecks(), sleep(2800)]);
   hideSplash();
+  // Тест задержек доступных узлов в фоне (badge'и в списке обновятся).
+  testLatencies();
 }
 
 window.addEventListener("DOMContentLoaded", init);

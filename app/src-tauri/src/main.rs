@@ -239,6 +239,18 @@ fn local_wg_qr() -> Result<String, String> {
     ctl::local_wg_qr()
 }
 
+/// Обновить одну подписку по URL; вернуть число узлов.
+#[tauri::command]
+async fn update_one_subscription(url: String) -> Result<usize, String> {
+    ctl::update_one_subscription(&url).await
+}
+
+/// Удалить из конфига узлы подписок (оставить ручные ключи); вернуть число.
+#[tauri::command]
+fn clear_subscription_nodes() -> Result<usize, String> {
+    ctl::clear_subscription_nodes()
+}
+
 /// Версия приложения.
 #[tauri::command]
 fn app_version() -> String {
@@ -501,6 +513,8 @@ fn main() {
             clear_log,
             app_version,
             check_update,
+            update_one_subscription,
+            clear_subscription_nodes,
             list_subscriptions,
             add_subscription,
             remove_subscription,

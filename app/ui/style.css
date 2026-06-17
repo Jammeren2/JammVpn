@@ -948,6 +948,77 @@ button.mini:hover:not(:disabled) {
   gap: 12px;
   align-items: center;
 }
+/* Таблица узлов скрыта — служит источником данных для node-picker. */
+#nodes {
+  display: none;
+}
+.np-group {
+  margin-top: 4px;
+}
+.np-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  border: none;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 10px;
+  color: var(--muted, #8a93a6);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.np-group-head:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.np-group-head.has-sel {
+  color: var(--accent, #4c8dff);
+}
+.np-caret {
+  width: 14px;
+}
+.np-gname {
+  flex: 1;
+}
+.np-gcount {
+  padding: 0 8px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+}
+.np-refresh {
+  padding: 2px 7px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.np-refresh:hover {
+  background: var(--accent, #4c8dff);
+  color: #fff;
+}
+.np-acts {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.np-item:hover .np-acts {
+  opacity: 1;
+}
+.np-act {
+  padding: 2px 7px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--muted, #8a93a6);
+}
+.np-act:hover {
+  background: rgba(255, 80, 80, 0.18);
+  color: #fff;
+}
+.np-act[data-export]:hover {
+  background: var(--accent, #4c8dff);
+}
 .splash {
   position: fixed;
   inset: 0;

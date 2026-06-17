@@ -57,8 +57,11 @@
     const heroLabel = document.getElementById("hero-node-label");
     if (!picker || !sel) return;
 
-    // Данные берём из таблицы узлов (имя / протокол / адрес / задержка) —
-    // она богаче опций select. Если таблицы нет — падаем на опции select.
+    const invoke =
+      window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+    const expanded = new Set(); // развёрнутые группы подписок (по умолчанию свёрнуты)
+
+    // Данные из (скрытой) таблицы узлов: имя/протокол/адрес/задержка/группа.
     function rows() {
       const trs = nodesBody
         ? [...nodesBody.querySelectorAll("tr")].filter(
@@ -82,12 +85,13 @@
                   ? "err"
                   : ""
               : "",
+            group: tr.dataset.group || "",
           };
         });
       }
       return [...sel.options]
         .filter((o) => o.value !== "")
-        .map((o) => ({ value: o.value, name: o.textContent, proto: "", addr: "", lat: "", latClass: "" }));
+        .map((o) => ({ value: o.value, name: o.textContent, proto: "", addr: "", lat: "", latClass: "", group: "" }));
     }
 
     function item(r, selected, auto) {
@@ -98,6 +102,15 @@
         !auto && r.lat && r.lat !== "—"
           ? `<span class="np-lat ${r.latClass}">${esc(r.lat)}</span>`
           : "";
+      // Действия только у своих ключей (не из подписки): экспорт .conf (WG) + удаление.
+      let acts = "";
+      if (!auto && !r.group) {
+        const isWg = /wireguard|amnezia|awg/i.test(r.proto);
+        const exp = isWg
+          ? `<span class="np-act" data-export="${esc(r.name)}" title="Сохранить .conf">⤓</span>`
+          : "";
+        acts = `<span class="np-acts">${exp}<span class="np-act" data-del="${esc(r.name)}" title="Удалить">✕</span></span>`;
+      }
       return `<button type="button" class="np-item${auto ? " np-auto" : ""}${
         selected ? " selected" : ""
       }" data-value="${esc(r.value)}">
@@ -105,17 +118,37 @@
         <span class="np-main"><span class="np-name">${esc(
           auto ? "Авто" : r.name
         )}</span><span class="np-sub">${esc(sub)}</span></span>
-        ${latBadge}
+        ${latBadge}${acts}
       </button>`;
     }
 
     function render() {
       const val = sel.value || "";
       const list = rows();
+      const own = list.filter((r) => !r.group);
+      const groups = new Map();
+      for (const r of list) {
+        if (!r.group) continue;
+        if (!groups.has(r.group)) groups.set(r.group, []);
+        groups.get(r.group).push(r);
+      }
       let html = item({ value: "" }, val === "", true);
-      for (const r of list) html += item(r, val === r.value, false);
+      for (const r of own) html += item(r, val === r.value, false);
+      for (const [g, gl] of groups) {
+        const open = expanded.has(g);
+        const hasSel = gl.some((r) => r.value === val);
+        html += `<div class="np-group">
+          <button type="button" class="np-group-head${hasSel ? " has-sel" : ""}" data-group="${esc(g)}">
+            <span class="np-caret">${open ? "▾" : "▸"}</span>
+            <span class="np-gname">📡 ${esc(g)}</span>
+            <span class="np-gcount">${gl.length}</span>
+            <span class="np-refresh" data-refresh="${esc(g)}" title="Обновить подписку">⟳</span>
+          </button>`;
+        if (open) for (const r of gl) html += item(r, val === r.value, false);
+        html += `</div>`;
+      }
       if (!list.length)
-        html += `<p class="np-empty">Узлов нет — добавьте их на вкладке «Узлы».</p>`;
+        html += `<p class="np-empty">Узлов нет — нажмите «+ Добавить».</p>`;
       picker.innerHTML = html;
 
       if (heroLabel) {
@@ -126,7 +159,40 @@
       }
     }
 
-    picker.addEventListener("click", (e) => {
+    picker.addEventListener("click", async (e) => {
+      const refresh = e.target.closest(".np-refresh");
+      if (refresh) {
+        e.stopPropagation();
+        const url = (window.SUB_URLS || {})[refresh.dataset.refresh];
+        if (url && invoke) {
+          refresh.textContent = "…";
+          try {
+            await invoke("update_one_subscription", { url });
+          } catch (err) {}
+          if (window.refreshNodes) await window.refreshNodes();
+        }
+        return;
+      }
+      const exp = e.target.closest(".np-act[data-export]");
+      if (exp) {
+        e.stopPropagation();
+        if (window.exportNode) window.exportNode(exp.dataset.export);
+        return;
+      }
+      const del = e.target.closest(".np-act[data-del]");
+      if (del) {
+        e.stopPropagation();
+        if (window.removeNode) await window.removeNode(del.dataset.del);
+        return;
+      }
+      const head = e.target.closest(".np-group-head");
+      if (head) {
+        const g = head.dataset.group;
+        if (expanded.has(g)) expanded.delete(g);
+        else expanded.add(g);
+        render();
+        return;
+      }
       const btn = e.target.closest(".np-item");
       if (!btn) return;
       sel.value = btn.dataset.value;

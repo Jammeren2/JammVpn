@@ -74,6 +74,8 @@ pub struct SubscriptionInfo {
     pub url: String,
     pub tag: Option<String>,
     pub update_interval_hours: u32,
+    /// Эффективный тег-группа (явный tag или хост из URL) — для связи с группой узлов.
+    pub group: String,
 }
 
 /// Состояние geo-баз: пути и наличие файлов на диске (индикатор в UI).
@@ -437,6 +439,48 @@ pub async fn update_subscriptions() -> Result<Vec<SubUpdate>, String> {
     Ok(out)
 }
 
+/// Обновляет ОДНУ подписку по её URL. Возвращает число узлов.
+pub async fn update_one_subscription(url: &str) -> Result<usize, String> {
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    let sub = cfg
+        .subscriptions
+        .iter()
+        .find(|s| s.url == url)
+        .cloned()
+        .ok_or_else(|| format!("подписка не найдена: {url}"))?;
+    let servers = subscription::update_subscription(&sub, subscription::DEFAULT_TIMEOUT)
+        .await
+        .map_err(|e| e.to_string())?;
+    let n = servers.len();
+    subscription::merge_subscription(&mut cfg, &sub, servers);
+    save_config(&path, &cfg, store.as_ref())?;
+    log_line(&format!("подписка {url}: {n} узлов (обновление группы)"));
+    Ok(n)
+}
+
+/// Удаляет из конфига узлы, полученные из подписок (по тегам подписок).
+/// Возвращает число удалённых. Ручные ключи остаются.
+pub fn clear_subscription_nodes() -> Result<usize, String> {
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    let tags: Vec<String> = cfg
+        .subscriptions
+        .iter()
+        .map(jammvpn_net::subscription::sub_tag)
+        .collect();
+    let before = cfg.servers.len();
+    // Узел из подписки = есть тег подписки ИЛИ имя в формате «Группа · узел»
+    // (легаси-узлы добавлялись без тега до введения тегирования).
+    cfg.servers
+        .retain(|s| !s.tags.iter().any(|t| tags.contains(t)) && !s.name.contains(" · "));
+    let removed = before - cfg.servers.len();
+    save_config(&path, &cfg, store.as_ref())?;
+    Ok(removed)
+}
+
 /// Информация об обновлении (для сплеша).
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateInfo {
@@ -621,6 +665,7 @@ pub fn list_subscriptions() -> Vec<SubscriptionInfo> {
         .subscriptions
         .into_iter()
         .map(|s| SubscriptionInfo {
+            group: jammvpn_net::subscription::sub_tag(&s),
             url: s.url,
             tag: s.tag,
             update_interval_hours: s.update_interval_hours,

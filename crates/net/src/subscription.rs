@@ -63,7 +63,12 @@ pub fn merge_subscription(
     new_servers: Vec<ServerProfile>,
 ) {
     let tag = sub_tag(sub);
-    cfg.servers.retain(|s| !s.tags.iter().any(|t| t == &tag));
+    let incoming: std::collections::HashSet<&str> =
+        new_servers.iter().map(|s| s.name.as_str()).collect();
+    // Удаляем прежние узлы этой подписки: по тегу ИЛИ по совпадению имени
+    // (дедуп — на случай легаси-узлов без тега).
+    cfg.servers
+        .retain(|s| !s.tags.iter().any(|t| t == &tag) && !incoming.contains(s.name.as_str()));
     cfg.servers.extend(new_servers);
 }
 
