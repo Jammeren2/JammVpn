@@ -460,6 +460,33 @@ fn dns_server_from_config(c: &DnsServerConfig) -> Option<DnsServer> {
 const MAX_CONNECTIONS: usize = 1024;
 /// Таймаут на SOCKS5-рукопожатие: висящий клиент не должен держать ресурсы.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Сколько раз пытаться установить исходящее соединение перед сдачей.
+const CONNECT_ATTEMPTS: usize = 3;
+/// Таймаут одной попытки дозвона+рукопожатия (зависший апстрим → ретрай).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Устанавливает исходящее соединение через `ob`, повторяя при ошибке/таймауте
+/// до [`CONNECT_ATTEMPTS`] раз с короткой нарастающей паузой.
+///
+/// Ретраится ТОЛЬКО установка соединения (рукопожатие до передачи данных
+/// клиента — поэтому безопасно). Это сглаживает транзиентные сбои дозвона: без
+/// этого одиночный сбой роняет под-ресурс страницы (стиль/картинку), а браузеры
+/// под-ресурсы не перезапрашивают — отсюда «иногда не подгружаются стили».
+async fn connect_with_retry(ob: &Outbound, target: &Target) -> io::Result<crate::BoxedStream> {
+    let mut last: Option<io::Error> = None;
+    for attempt in 0..CONNECT_ATTEMPTS {
+        match tokio::time::timeout(CONNECT_TIMEOUT, ob.connect_tcp(target)).await {
+            Ok(Ok(up)) => return Ok(up),
+            Ok(Err(e)) => last = Some(e),
+            Err(_) => last = Some(io::Error::new(io::ErrorKind::TimedOut, "таймаут дозвона")),
+        }
+        if attempt + 1 < CONNECT_ATTEMPTS {
+            // 60мс, 180мс — гасим короткий флап, не задерживая надолго.
+            tokio::time::sleep(Duration::from_millis(60 * (attempt as u64 * 2 + 1))).await;
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("дозвон не удался")))
+}
 
 /// SOCKS5-сервер с маршрутизацией: на каждое соединение применяет правила
 /// движка и проксирует через выбранный исходящий (либо блокирует). Число
@@ -507,7 +534,8 @@ async fn serve_routed(
                 SocksRequest::Connect(target) => {
                     let routed = eng.route(&target).await;
                     match routed.decision {
-                        Decision::Connect(ob) => match ob.connect_tcp(&routed.target).await {
+                        Decision::Connect(ob) => match connect_with_retry(&ob, &routed.target).await
+                        {
                             Ok(up) => {
                                 let _ = client.write_all(&reply(0x00)).await;
                                 let g = crate::conn::register(
@@ -565,7 +593,7 @@ async fn handle_http(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
         let (host, port) = split_host_port(&target_str, 443);
         let routed = engine.route(&Target::Domain(host, port)).await;
         match routed.decision {
-            Decision::Connect(ob) => match ob.connect_tcp(&routed.target).await {
+            Decision::Connect(ob) => match connect_with_retry(&ob, &routed.target).await {
                 Ok(up) => {
                     client
                         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -591,7 +619,7 @@ async fn handle_http(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
         };
         let routed = engine.route(&Target::Domain(host, port)).await;
         match routed.decision {
-            Decision::Connect(ob) => match ob.connect_tcp(&routed.target).await {
+            Decision::Connect(ob) => match connect_with_retry(&ob, &routed.target).await {
                 Ok(mut up) => {
                     // Переписываем строку запроса в origin-form, сохраняя заголовки.
                     let headers_block = head
@@ -706,7 +734,7 @@ where
             // SOCKS), поэтому подключаем исходящий и копируем напрямую, без
             // относящегося к SOCKS ответа.
             if let Decision::Connect(ob) = routed.decision {
-                if let Ok(upstream) = ob.connect_tcp(&routed.target).await {
+                if let Ok(upstream) = connect_with_retry(&ob, &routed.target).await {
                     let g = crate::conn::register(target_label(&routed.target), via_label(&ob));
                     let _ = crate::conn::copy_counted(client, upstream, &g).await;
                 }
