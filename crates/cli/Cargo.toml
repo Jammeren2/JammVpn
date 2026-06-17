@@ -22,6 +22,10 @@ all = "warn"
 jammvpn-core = { path = "../core" }
 jammvpn-net = { path = "../net" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Хранилище конфига — SQLite (раздел 7). `bundled` компилирует SQLite из исходников
+# (cc/MSVC) → системный sqlite3 не нужен.
+rusqlite = { version = "0.32", features = ["bundled"] }
 # QR-код клиентского .conf локального WG (SVG; без image-фичи — лишних зависимостей нет).
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tokio = { version = "1", features = [

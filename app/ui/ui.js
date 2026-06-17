@@ -1,446 +1,966 @@
-// JammVPN — UI-слой поверх логики: вкладки, зеркало статуса, монитор статистики.
-// Аддитивный файл: НЕ трогает main.js и его id/классы-крючки.
+// JammVPN — слой представления поверх main.js (бэкенд через Tauri).
+// main.js — канонический источник: пишет в скрытые #status / #server / #nodes-body
+// и владеет всеми invoke-командами. Этот файл рисует дизайн «Атлас/Центр/Минимал»:
+// сайдбар-навигация, мировая карта с пинами, варианты главной, слайд-овер узлов,
+// статистика с графиком, переключатели. Данные берём из бэкенда, не из моков.
 (function () {
+  const app = document.getElementById("app");
+  const $ = (id) => document.getElementById(id);
+  const tauriCore = window.__TAURI__ && window.__TAURI__.core;
+  const invoke = tauriCore ? tauriCore.invoke : null;
+
   function ready(fn) {
     if (document.readyState !== "loading") fn();
     else document.addEventListener("DOMContentLoaded", fn);
-  }
-
-  ready(function () {
-    setupTabs();
-    setupStatusMirror();
-    setupNodePicker();
-    setupStats();
-  });
-
-  // --- Вкладки ---
-  function setupTabs() {
-    const tabs = [...document.querySelectorAll(".tab")];
-    const panels = [...document.querySelectorAll(".tabpanel")];
-    function activate(name) {
-      tabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
-      panels.forEach((p) =>
-        p.classList.toggle("active", p.dataset.tabPanel === name)
-      );
-    }
-    tabs.forEach((t) => t.addEventListener("click", () => activate(t.dataset.tab)));
-  }
-
-  // --- Зеркало статуса в app-bar + состояние кольца на «Главной» ---
-  function setupStatusMirror() {
-    const status = document.getElementById("status");
-    const mirror = document.getElementById("appbar-status");
-    const hero = document.querySelector(".hero");
-    if (!status) return;
-    function sync() {
-      const on = status.classList.contains("on");
-      if (mirror) {
-        mirror.textContent = status.textContent || "—";
-        mirror.className = "appbar-status " + (on ? "on" : "off");
-      }
-      if (hero) hero.classList.toggle("is-on", on);
-    }
-    new MutationObserver(sync).observe(status, {
-      attributes: true,
-      childList: true,
-      characterData: true,
-      subtree: true,
-    });
-    sync();
-  }
-
-  // --- Список узлов на Главной (зеркало скрытого #server, который ведёт main.js) ---
-  function setupNodePicker() {
-    const picker = document.getElementById("node-picker");
-    const sel = document.getElementById("server");
-    const nodesBody = document.getElementById("nodes-body");
-    const heroLabel = document.getElementById("hero-node-label");
-    if (!picker || !sel) return;
-
-    const invoke =
-      window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
-    const expanded = new Set(); // развёрнутые группы подписок (по умолчанию свёрнуты)
-
-    // Данные из (скрытой) таблицы узлов: имя/протокол/адрес/задержка/группа.
-    function rows() {
-      const trs = nodesBody
-        ? [...nodesBody.querySelectorAll("tr")].filter(
-            (tr) => !tr.classList.contains("group-head")
-          )
-        : [];
-      if (trs.length) {
-        return trs.map((tr) => {
-          const td = tr.querySelectorAll("td");
-          const lat = tr.querySelector(".lat");
-          return {
-            value: td[1] ? td[1].textContent : "",
-            name: td[1] ? td[1].textContent : "",
-            proto: td[2] ? td[2].textContent : "",
-            addr: td[3] ? td[3].textContent : "",
-            lat: lat ? lat.textContent.trim() : "",
-            latClass: lat
-              ? lat.classList.contains("ok")
-                ? "ok"
-                : lat.classList.contains("err")
-                  ? "err"
-                  : ""
-              : "",
-            group: tr.dataset.group || "",
-          };
-        });
-      }
-      return [...sel.options]
-        .filter((o) => o.value !== "")
-        .map((o) => ({ value: o.value, name: o.textContent, proto: "", addr: "", lat: "", latClass: "", group: "" }));
-    }
-
-    function item(r, selected, auto) {
-      const sub = auto
-        ? "по правилам конфига"
-        : [r.proto, r.addr].filter(Boolean).join(" · ");
-      const latBadge =
-        !auto && r.lat && r.lat !== "—"
-          ? `<span class="np-lat ${r.latClass}">${esc(r.lat)}</span>`
-          : "";
-      // Действия: тест задержки (всем), копировать vless:// (VLESS), экспорт
-      // .conf + удаление (только свои ключи, не из подписки).
-      let acts = "";
-      if (!auto) {
-        const isWg = /wireguard|amnezia|awg/i.test(r.proto);
-        const isVless = /vless/i.test(r.proto);
-        let inner = `<span class="np-act" data-ping="${esc(r.name)}" title="Тест задержки">⚡</span>`;
-        if (isVless)
-          inner += `<span class="np-act" data-vless="${esc(r.name)}" title="Копировать vless://">⧉</span>`;
-        if (!r.group) {
-          if (isWg)
-            inner += `<span class="np-act" data-export="${esc(r.name)}" title="Сохранить .conf">⤓</span>`;
-          inner += `<span class="np-act" data-del="${esc(r.name)}" title="Удалить">✕</span>`;
-        }
-        acts = `<span class="np-acts">${inner}</span>`;
-      }
-      return `<button type="button" class="np-item${auto ? " np-auto" : ""}${
-        selected ? " selected" : ""
-      }" data-value="${esc(r.value)}">
-        <span class="np-radio"></span>
-        <span class="np-main"><span class="np-name">${esc(
-          auto ? "Авто" : r.name
-        )}</span><span class="np-sub">${esc(sub)}</span></span>
-        ${latBadge}${acts}
-      </button>`;
-    }
-
-    function render() {
-      const val = sel.value || "";
-      const list = rows();
-      const own = list.filter((r) => !r.group);
-      const groups = new Map();
-      // Сначала — все подписки (даже пустые, чтобы было что обновить).
-      for (const g of Object.keys(window.SUB_URLS || {})) groups.set(g, []);
-      for (const r of list) {
-        if (!r.group) continue;
-        if (!groups.has(r.group)) groups.set(r.group, []);
-        groups.get(r.group).push(r);
-      }
-      let html = item({ value: "" }, val === "", true);
-      for (const r of own) html += item(r, val === r.value, false);
-      for (const [g, gl] of groups) {
-        const open = expanded.has(g);
-        const hasSel = gl.some((r) => r.value === val);
-        html += `<div class="np-group">
-          <button type="button" class="np-group-head${hasSel ? " has-sel" : ""}" data-group="${esc(g)}">
-            <span class="np-caret">${open ? "▾" : "▸"}</span>
-            <span class="np-gname">📡 ${esc(g)}</span>
-            <span class="np-gcount">${gl.length}</span>
-            <span class="np-refresh" data-refresh="${esc(g)}" title="Обновить подписку">⟳</span>
-            <span class="np-refresh" data-delsub="${esc(g)}" title="Удалить подписку">✕</span>
-          </button>`;
-        if (open) for (const r of gl) html += item(r, val === r.value, false);
-        html += `</div>`;
-      }
-      if (!list.length)
-        html += `<p class="np-empty">Узлов нет — нажмите «+ Добавить».</p>`;
-      picker.innerHTML = html;
-
-      if (heroLabel) {
-        const cur = list.find((r) => r.value === val);
-        heroLabel.innerHTML = val
-          ? "Через <b>" + esc(cur ? cur.name : val) + "</b>"
-          : "Авто — по правилам конфига";
-      }
-    }
-
-    picker.addEventListener("click", async (e) => {
-      // Удалить подписку (с подтверждением).
-      const delsub = e.target.closest(".np-refresh[data-delsub]");
-      if (delsub) {
-        e.stopPropagation();
-        const g = delsub.dataset.delsub;
-        const url = (window.SUB_URLS || {})[g];
-        if (url && invoke) {
-          const ok = window.customConfirm
-            ? await window.customConfirm(`Удалить подписку «${g}» и её узлы?`)
-            : true;
-          if (!ok) return;
-          try {
-            await invoke("remove_subscription", { url });
-          } catch (err) {}
-          if (window.refreshNodes) await window.refreshNodes();
-        }
-        return;
-      }
-      // Обновить подписку.
-      const refresh = e.target.closest(".np-refresh[data-refresh]");
-      if (refresh) {
-        e.stopPropagation();
-        const url = (window.SUB_URLS || {})[refresh.dataset.refresh];
-        if (url && invoke) {
-          refresh.textContent = "…";
-          try {
-            await invoke("update_one_subscription", { url });
-          } catch (err) {}
-          if (window.refreshNodes) await window.refreshNodes();
-        }
-        return;
-      }
-      // Тест задержки одного узла.
-      const ping = e.target.closest(".np-act[data-ping]");
-      if (ping && invoke) {
-        e.stopPropagation();
-        const name = ping.dataset.ping;
-        ping.textContent = "…";
-        try {
-          const r = await invoke("test_node_latency", { name });
-          // Обновляем ячейку задержки в скрытой таблице → перерисует пикер.
-          const cell = nodesBody
-            ? [...nodesBody.querySelectorAll(".lat")].find(
-                (c) => c.dataset.name === name
-              )
-            : null;
-          if (cell) {
-            if (r.latency_ms != null) {
-              cell.textContent = r.latency_ms + " ms";
-              cell.className = "lat ok";
-            } else {
-              cell.textContent = "ошибка";
-              cell.className = "lat err";
-            }
-          }
-        } catch (err) {}
-        return;
-      }
-      // Копировать vless://.
-      const vl = e.target.closest(".np-act[data-vless]");
-      if (vl && invoke) {
-        e.stopPropagation();
-        try {
-          const link = await invoke("export_vless_link", { name: vl.dataset.vless });
-          if (navigator.clipboard) await navigator.clipboard.writeText(link);
-          vl.textContent = "✓";
-          setTimeout(() => (vl.textContent = "⧉"), 1000);
-        } catch (err) {}
-        return;
-      }
-      const exp = e.target.closest(".np-act[data-export]");
-      if (exp) {
-        e.stopPropagation();
-        if (window.exportNode) window.exportNode(exp.dataset.export);
-        return;
-      }
-      const del = e.target.closest(".np-act[data-del]");
-      if (del) {
-        e.stopPropagation();
-        if (window.removeNode) await window.removeNode(del.dataset.del);
-        return;
-      }
-      const head = e.target.closest(".np-group-head");
-      if (head) {
-        const g = head.dataset.group;
-        if (expanded.has(g)) expanded.delete(g);
-        else expanded.add(g);
-        render();
-        return;
-      }
-      const btn = e.target.closest(".np-item");
-      if (!btn) return;
-      sel.value = btn.dataset.value;
-      sel.dispatchEvent(new Event("change", { bubbles: true }));
-      render();
-    });
-
-    // Кнопка-дублёр «Тест задержек» на Главной: запускает реальный #btn-test
-    // (его слушает main.js) и зеркалит его состояние (disabled / «Тестирую…»).
-    const testReal = document.getElementById("btn-test");
-    const testHome = document.getElementById("btn-test-home");
-    if (testReal && testHome) {
-      testHome.addEventListener("click", () => {
-        if (!testReal.disabled) testReal.click();
-      });
-      const mirror = () => {
-        testHome.disabled = testReal.disabled;
-        testHome.textContent = testReal.disabled ? "Тестирую…" : "Тест задержек";
-      };
-      new MutationObserver(mirror).observe(testReal, {
-        attributes: true,
-        childList: true,
-        characterData: true,
-        subtree: true,
-      });
-      mirror();
-    }
-
-    // main.js перестраивает #server (childList) и обновляет задержки в #nodes-body.
-    new MutationObserver(render).observe(sel, { childList: true });
-    // Восстановление выбора из настроек (main.js шлёт change) — перерисовать.
-    sel.addEventListener("change", render);
-    if (nodesBody)
-      new MutationObserver(render).observe(nodesBody, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-      });
-
-    render();
-  }
-
-  // --- Статистика соединений (живой опрос бэкенда) ---
-  // Реальные данные из движка: invoke("list_connections") → [{target, via, up, down}].
-  function setupStats() {
-    const body = document.getElementById("st-body");
-    if (!body) return;
-    const invoke =
-      window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
-
-    let sortKey = "down"; // proc|dest|down — сортировка
-    let paused = false;
-
-    // Состояние для расчёта скорости (дельта байт по соединениям между опросами).
-    let prevBytes = new Map(); // id -> {up, down}
-    let prevT = Date.now();
-
-    function fmtBytes(n) {
-      if (!n) return "—";
-      if (n < 1024) return n + " Б";
-      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " КБ";
-      return (n / 1024 / 1024).toFixed(1) + " МБ";
-    }
-    function fmtSpeed(bps) {
-      return fmtBytes(Math.round(bps)).replace("—", "0 Б") + "/с";
-    }
-
-    // Скорость = прирост байт текущих соединений за интервал; обновляет бейджи
-    // на главной (↓ приём / ↑ отправка).
-    function updateSpeeds(list) {
-      const now = Date.now();
-      const dt = Math.max(0.2, (now - prevT) / 1000);
-      let dUp = 0,
-        dDown = 0;
-      const cur = new Map();
-      for (const c of list) {
-        cur.set(c.id, { up: c.up, down: c.down });
-        const p = prevBytes.get(c.id);
-        if (p) {
-          dUp += Math.max(0, c.up - p.up);
-          dDown += Math.max(0, c.down - p.down);
-        } else {
-          dUp += c.up;
-          dDown += c.down;
-        }
-      }
-      prevBytes = cur;
-      prevT = now;
-      setText("hero-up", "↑ " + fmtSpeed(dUp / dt));
-      setText("hero-down", "↓ " + fmtSpeed(dDown / dt));
-    }
-
-    function row(c) {
-      const node = c.via === "direct" ? "напрямую" : "прокси";
-      return `<div class="conn">
-        <div class="conn-proc"><span class="conn-dot ${esc(c.via)}"></span>—</div>
-        <div class="conn-dest">${esc(c.target)}</div>
-        <div class="conn-node">${esc(node)}</div>
-        <div class="conn-up num">${fmtBytes(c.up)}</div>
-        <div class="conn-down num">${fmtBytes(c.down)}</div>
-        <div class="conn-kill"><button class="x" data-kill="${c.id}" title="Закрыть соединение">✕</button></div>
-      </div>`;
-    }
-
-    // Делегированный клик: «дропнуть» соединение по id.
-    body.addEventListener("click", (e) => {
-      const btn = e.target.closest("button[data-kill]");
-      if (!btn) return;
-      invoke("drop_connection", { id: parseInt(btn.dataset.kill, 10) }).then(poll);
-    });
-
-    function render(list) {
-      list.sort((a, b) => {
-        if (sortKey === "down") return b.down - a.down;
-        if (sortKey === "ip") return b.up - a.up; // «IP» → по отдаче
-        return String(a.target).localeCompare(String(b.target)); // proc/dest → по цели
-      });
-      body.innerHTML = list.length
-        ? list.map(row).join("")
-        : '<p class="np-empty">Нет активных соединений.</p>';
-      setText("st-active", list.length);
-      setText("st-up", fmtBytes(list.reduce((s, c) => s + c.up, 0)));
-      setText("st-down", fmtBytes(list.reduce((s, c) => s + c.down, 0)));
-    }
-
-    async function poll() {
-      if (!invoke) return;
-      try {
-        const list = await invoke("list_connections");
-        updateSpeeds(list); // скорость обновляем всегда (даже на паузе списка)
-        if (!paused) render(list);
-      } catch (_) {
-        /* прокси не запущен / нет данных */
-      }
-    }
-
-    // Клик по бейджам скорости на главной → вкладка «Статистика».
-    const heroSpeeds = document.getElementById("hero-speeds");
-    if (heroSpeeds) {
-      heroSpeeds.addEventListener("click", () => {
-        const t = document.querySelector('.tab[data-tab="stats"]');
-        if (t) t.click();
-      });
-    }
-
-    if (!invoke) {
-      // Предпросмотр в браузере без бэкенда.
-      body.innerHTML = '<p class="np-empty">Нет данных (бэкенд недоступен).</p>';
-      return;
-    }
-
-    // Сортировка.
-    const seg = document.getElementById("st-sort");
-    if (seg)
-      seg.addEventListener("click", (e) => {
-        const btn = e.target.closest(".seg-btn");
-        if (!btn) return;
-        sortKey = btn.dataset.sort;
-        seg.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b === btn));
-        poll();
-      });
-    // Пауза.
-    const pauseBtn = document.getElementById("st-pause");
-    if (pauseBtn)
-      pauseBtn.addEventListener("click", () => {
-        paused = !paused;
-        pauseBtn.classList.toggle("paused", paused);
-        pauseBtn.textContent = paused ? "▶ Продолжить" : "❚❚ Пауза";
-      });
-
-    poll();
-    setInterval(poll, 1500);
-  }
-
-  function setText(id, v) {
-    const el = document.getElementById(id);
-    if (el) el.textContent = v;
   }
   function esc(s) {
     return String(s).replace(/[&<>"]/g, (c) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
     );
   }
+  // Копирование с фолбэком: navigator.clipboard может молча не работать в webview
+  // (контекст/права), поэтому при сбое — скрытый textarea + execCommand("copy").
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) {}
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (ok) return true;
+    } catch (_) {}
+    throw new Error("clipboard unavailable");
+  }
+
+  // --- Проекция карты (как в дизайне) ---
+  const LON0 = -170, LON1 = 190, LAT0 = -56, LAT1 = 80;
+  function proj(lon, lat) {
+    return { x: (lon - LON0) / (LON1 - LON0), y: (LAT1 - lat) / (LAT1 - LAT0) };
+  }
+  // «Точка отправления» (наша геопозиция). По умолчанию — центр, затем уточняем по IP.
+  let USER = { lon: 10, lat: 30 };
+
+  // Реальная гео-привязка по IP (онлайн, geojs.io; домены резолвим через DoH):
+  // кешируем host → {lon,lat}. Недоступен (офлайн/блокировка) — фолбэк на хеш.
+  const GEO_CACHE_KEY = "jamm_geo";
+  let geoCache = {};
+  try { geoCache = JSON.parse(localStorage.getItem(GEO_CACHE_KEY) || "{}") || {}; } catch (e) {}
+  function saveGeoCache() {
+    try { localStorage.setItem(GEO_CACHE_KEY, JSON.stringify(geoCache)); } catch (e) {}
+  }
+  function hostOf(addr) {
+    return String(addr || "").trim().replace(/^\[/, "").replace(/\]?:\d+$/, "").replace(/\]$/, "");
+  }
+  function hashStr(s) {
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+  // Запасная (декоративная) позиция, пока/если реальная неизвестна.
+  function hashedPos(key) {
+    const h = hashStr(key || "x");
+    return { lon: -160 + (h % 320), lat: -40 + ((h >> 9) % 95) };
+  }
+  function nodeGeo(addr) {
+    const h = hostOf(addr);
+    if (h && geoCache[h]) return geoCache[h];
+    return hashedPos(h || addr || "x");
+  }
+
+  // Домен → IP через DNS-over-HTTPS (geojs принимает только IP). IP отдаём как есть.
+  const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+  async function resolveIp(host) {
+    if (!host) return "";
+    if (IPV4_RE.test(host) || host.includes(":")) return host; // уже IP-литерал
+    try {
+      const r = await fetch("https://dns.google/resolve?name=" + encodeURIComponent(host) + "&type=A", { cache: "no-store" });
+      const j = await r.json();
+      const a = (j.Answer || []).find((x) => x.type === 1 && x.data);
+      if (a) return a.data;
+    } catch (e) {}
+    return null;
+  }
+
+  // Запрос гео по IP/домену; "" → наш собственный IP. Кешируется.
+  async function geoLookup(host) {
+    const key = host || "__self__";
+    if (geoCache[key]) return geoCache[key];
+    try {
+      let url = "https://get.geojs.io/v1/ip/geo.json"; // свой IP
+      if (host) {
+        const ip = await resolveIp(host);
+        if (!ip) return null;
+        url = "https://get.geojs.io/v1/ip/geo/" + encodeURIComponent(ip) + ".json";
+      }
+      const r = await fetch(url, { cache: "no-store" });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const lat = parseFloat(j && j.latitude);
+      const lon = parseFloat(j && j.longitude);
+      if (isFinite(lat) && isFinite(lon)) {
+        const pos = { lon, lat };
+        geoCache[key] = pos;
+        if (host) geoCache[host] = pos;
+        saveGeoCache();
+        return pos;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  let lastGeoKey = "";
+  async function geolocateAll() {
+    const self = await geoLookup("");
+    if (self) USER = self;
+    const hosts = [...new Set(rows().map((r) => hostOf(r.addr)).filter(Boolean))];
+    for (const h of hosts) {
+      if (!geoCache[h]) await geoLookup(h);
+    }
+    buildPins(); // переставить пины на реальные координаты (дуга обновится сама в loop)
+  }
+  // Запускаем гео-привязку при появлении новых хостов (с кешем — без лишних запросов).
+  function maybeGeolocate() {
+    const key = rows().map((r) => hostOf(r.addr)).sort().join(",");
+    if (key === lastGeoKey) return;
+    lastGeoKey = key;
+    geolocateAll();
+  }
+
+  // ----------------------------------------------------------------
+  // Данные узлов из скрытой таблицы (#nodes-body), которую ведёт main.js.
+  // ----------------------------------------------------------------
+  function rows() {
+    const body = $("nodes-body");
+    const trs = body
+      ? [...body.querySelectorAll("tr")].filter((tr) => !tr.classList.contains("group-head"))
+      : [];
+    if (trs.length) {
+      return trs.map((tr) => {
+        const td = tr.querySelectorAll("td");
+        const lat = tr.querySelector(".lat");
+        return {
+          value: td[1] ? td[1].textContent : "",
+          name: td[1] ? td[1].textContent : "",
+          proto: td[2] ? td[2].textContent : "",
+          addr: td[3] ? td[3].textContent : "",
+          lat: lat ? lat.textContent.trim() : "",
+          latClass: lat
+            ? lat.classList.contains("ok") ? "ok" : lat.classList.contains("err") ? "err" : ""
+            : "",
+          group: tr.dataset.group || "",
+        };
+      });
+    }
+    // Фолбэк: из опций скрытого #server (без бэкенда / до первой отрисовки).
+    const sel = $("server");
+    return sel
+      ? [...sel.options]
+          .filter((o) => o.value !== "")
+          .map((o) => ({ value: o.value, name: o.textContent, proto: "", addr: "", lat: "", latClass: "", group: "" }))
+      : [];
+  }
+  function curRow() {
+    const v = ($("server") || {}).value || "";
+    if (!v) return null;
+    return rows().find((r) => r.value === v) || null;
+  }
+  function ccFromName(name) {
+    const letters = String(name).replace(/[^A-Za-zА-Яа-я]/g, "");
+    return (letters.slice(0, 2) || "··").toUpperCase();
+  }
+
+  // ----------------------------------------------------------------
+  // Статус: зеркало скрытого #status (его пишет main.js) во весь UI.
+  // ----------------------------------------------------------------
+  let connecting = false;
+  let connectedSince = null;
+
+  function statusOn() {
+    const s = $("status");
+    return !!(s && s.classList.contains("on"));
+  }
+  function applyStatus() {
+    const on = statusOn();
+    const state = connecting ? "connecting" : on ? "on" : "off";
+    app.dataset.state = state;
+    if (state === "on" && !connectedSince) connectedSince = Date.now();
+    if (state === "off") connectedSince = null;
+
+    const friendly = state === "on" ? "Защищено" : state === "connecting" ? "Подключение…" : "Не защищено";
+    const txtCol = state === "on" ? "#6ee7b7" : state === "connecting" ? "#fde047" : "#fca5a5";
+    const glow = state === "on" ? "#34d399" : state === "connecting" ? "#facc15" : "#f87171";
+
+    document.querySelectorAll("[data-statusdot]").forEach((e) => {
+      e.style.background = glow;
+      e.style.boxShadow = "0 0 9px " + glow;
+      e.style.animation = state === "connecting" ? "blink 1s infinite" : "none";
+    });
+    document.querySelectorAll("[data-statustext], [data-statustext-c]").forEach((e) => {
+      e.textContent = friendly;
+      e.style.color = txtCol;
+    });
+    document.querySelectorAll("[data-statuspill]").forEach((e) => {
+      e.style.background =
+        state === "on" ? "rgba(52,211,153,.13)" : state === "connecting" ? "rgba(250,204,21,.12)" : "rgba(248,113,113,.12)";
+      e.style.border =
+        "1px solid " + (state === "on" ? "rgba(52,211,153,.28)" : state === "connecting" ? "rgba(250,204,21,.28)" : "rgba(248,113,113,.26)");
+    });
+    document.querySelectorAll("[data-connect].btn-connect").forEach((e) => {
+      e.textContent = state === "on" ? "Отключиться" : state === "connecting" ? "Подключение…" : "Подключиться";
+    });
+    document.querySelectorAll("[data-ringtitle]").forEach((e) => {
+      e.textContent = state === "on" ? "Вкл" : state === "connecting" ? "…" : "Выкл";
+    });
+    const sc = state === "on" ? "#22d3ee" : state === "connecting" ? "#facc15" : "#5b6479";
+    document.querySelectorAll("[data-shield]").forEach((e) => e.setAttribute("stroke", sc));
+    markDirty(); // состояние сменилось — перерисовать карту/график
+  }
+
+  async function onConnect() {
+    if (connecting) return;
+    if (statusOn()) {
+      if (window.stopAll) await window.stopAll();
+    } else {
+      connecting = true;
+      applyStatus();
+      try {
+        if (window.startAll) await window.startAll();
+      } finally {
+        connecting = false;
+        applyStatus();
+      }
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // Режимы (SOCKS5 / Split / WG-сервер) — UI поверх getModes/toggleMode.
+  // ----------------------------------------------------------------
+  const MODE_DEFS = [["socks", "SOCKS5"], ["split", "Split"], ["wg", "WG-сервер"]];
+  function curModes() {
+    return window.getModes ? window.getModes() : { socks: true, split: false, wg: false };
+  }
+  function buildModes() {
+    const m = curModes();
+    document.querySelectorAll("[data-modes]").forEach((box) => {
+      const lbl = box.querySelector(".mlbl");
+      box.innerHTML = "";
+      if (lbl) box.appendChild(lbl);
+      MODE_DEFS.forEach(([k, label]) => {
+        const b = document.createElement("button");
+        b.className = "mode" + (m[k] ? " on" : "");
+        b.dataset.mode = k;
+        b.textContent = label;
+        b.addEventListener("click", () => {
+          if (window.toggleMode) window.toggleMode(k);
+          syncModes();
+        });
+        box.appendChild(b);
+      });
+    });
+  }
+  function syncModes() {
+    const m = curModes();
+    document.querySelectorAll("[data-mode]").forEach((b) => b.classList.toggle("on", !!m[b.dataset.mode]));
+  }
+
+  // ----------------------------------------------------------------
+  // Слайд-овер «Серверы и узлы» (#nodeList) + пины на карте.
+  // ----------------------------------------------------------------
+  const expanded = new Set();
+
+  function nodeRowHtml(r, selected) {
+    const isWg = /wireguard|amnezia|awg/i.test(r.proto);
+    const isVless = /vless/i.test(r.proto);
+    const isSs = /shadowsocks|ss-?2022/i.test(r.proto);
+    let acts = `<span class="node-act" data-ping="${esc(r.name)}" title="Тест задержки">⚡</span>`;
+    if (isVless) acts += `<span class="node-act" data-vless="${esc(r.name)}" title="Копировать vless://">⧉</span>`;
+    if (isSs) acts += `<span class="node-act" data-ss="${esc(r.name)}" title="Копировать ss://">⧉</span>`;
+    if (!r.group) {
+      if (isWg) acts += `<span class="node-act" data-export="${esc(r.name)}" title="Экспорт .conf">⤓</span>`;
+      acts += `<span class="node-act del" data-del="${esc(r.name)}" title="Удалить">✕</span>`;
+    }
+    const lat = r.lat && r.lat !== "—" ? `<span class="node-lat ${r.latClass}">${esc(r.lat)}</span>` : "";
+    const sub = [r.proto, r.addr].filter(Boolean).join(" · ");
+    return `<div class="node-row${selected ? " sel" : ""}" data-pick="${esc(r.value)}">
+      <span class="node-radio"></span>
+      <span class="node-nm"><span class="c">${esc(r.name)}</span><span class="k">${esc(sub)}</span></span>
+      ${lat}<span class="node-acts">${acts}</span></div>`;
+  }
+
+  function renderNodes() {
+    const list = $("nodeList");
+    if (!list) return;
+    const val = ($("server") || {}).value || "";
+    const all = rows();
+    const own = all.filter((r) => !r.group);
+    const groups = new Map();
+    for (const g of Object.keys(window.SUB_URLS || {})) groups.set(g, []);
+    for (const r of all) {
+      if (!r.group) continue;
+      if (!groups.has(r.group)) groups.set(r.group, []);
+      groups.get(r.group).push(r);
+    }
+
+    let html = `<div class="node-row auto${val === "" ? " sel" : ""}" data-pick="">
+      <span class="node-radio"></span>
+      <span class="node-nm"><span class="c">Авто</span><span class="k">по правилам конфига</span></span></div>`;
+    if (own.length) {
+      html += `<div class="node-sec">🔑 Свои ключи</div>`;
+      for (const r of own) html += nodeRowHtml(r, val === r.value);
+    }
+    for (const [g, gl] of groups) {
+      const open = expanded.has(g);
+      const hasSel = gl.some((r) => r.value === val);
+      html += `<div class="sub-head${hasSel ? " has-sel" : ""}" data-sub="${esc(g)}">
+        <span class="sub-caret">${open ? "▾" : "▸"}</span>
+        <span class="sub-name">📡 ${esc(g)}</span>
+        <span class="sub-count">${gl.length}</span>
+        <span class="sub-icon" data-refresh="${esc(g)}" title="Обновить подписку">⟳</span>
+        <span class="sub-icon" data-delsub="${esc(g)}" title="Удалить подписку">✕</span></div>`;
+      if (open) {
+        html += `<div class="sub-kids">`;
+        for (const r of gl) html += nodeRowHtml(r, val === r.value);
+        html += `</div>`;
+      }
+    }
+    if (!all.length && !Object.keys(window.SUB_URLS || {}).length) {
+      html += `<p class="np-empty">Узлов нет — нажмите «+ Добавить».</p>`;
+    }
+    list.innerHTML = html;
+  }
+
+  function selectByValue(v) {
+    const sel = $("server");
+    if (!sel) return;
+    sel.value = v;
+    sel.dispatchEvent(new Event("change", { bubbles: true })); // main.js: onNodeChange
+    app.classList.remove("sp-open");
+  }
+
+  function setupNodeList() {
+    const list = $("nodeList");
+    if (!list) return;
+    list.addEventListener("click", async (e) => {
+      const t = e.target;
+      let a;
+      if ((a = t.closest(".node-act[data-ping]"))) {
+        e.stopPropagation();
+        if (!invoke) return;
+        const name = a.dataset.ping;
+        const row = a.closest(".node-row");
+        // Показываем "…" в ячейке задержки рядом с узлом на время проверки.
+        let latEl = row && row.querySelector(".node-lat");
+        if (row && !latEl) {
+          latEl = document.createElement("span");
+          row.insertBefore(latEl, row.querySelector(".node-acts"));
+        }
+        if (latEl) { latEl.className = "node-lat"; latEl.textContent = "…"; }
+        try {
+          const r = await invoke("test_node_latency", { name });
+          if (latEl) {
+            if (r.latency_ms != null) { latEl.textContent = r.latency_ms + " ms"; latEl.className = "node-lat ok"; }
+            else { latEl.textContent = "ошибка"; latEl.className = "node-lat err"; }
+          }
+        } catch (_) {
+          if (latEl) { latEl.textContent = "ошибка"; latEl.className = "node-lat err"; }
+        }
+        return;
+      }
+      if ((a = t.closest(".node-act[data-vless], .node-act[data-ss]"))) {
+        e.stopPropagation();
+        if (!invoke) return;
+        const isSs = a.hasAttribute("data-ss");
+        const name = isSs ? a.dataset.ss : a.dataset.vless;
+        try {
+          const link = await invoke(isSs ? "export_ss_link" : "export_vless_link", { name });
+          await copyText(link);
+          a.textContent = "✓";
+          setTimeout(() => (a.textContent = "⧉"), 1000);
+        } catch (_) {
+          a.textContent = "✗";
+          setTimeout(() => (a.textContent = "⧉"), 1000);
+        }
+        return;
+      }
+      if ((a = t.closest(".node-act[data-export]"))) {
+        e.stopPropagation();
+        if (window.exportNode) window.exportNode(a.dataset.export);
+        return;
+      }
+      if ((a = t.closest(".node-act[data-del]"))) {
+        e.stopPropagation();
+        if (window.removeNode) await window.removeNode(a.dataset.del);
+        return;
+      }
+      if ((a = t.closest(".sub-icon[data-refresh]"))) {
+        e.stopPropagation();
+        if (!invoke) return;
+        const url = (window.SUB_URLS || {})[a.dataset.refresh];
+        if (url) {
+          a.textContent = "…";
+          try { await invoke("update_one_subscription", { url }); } catch (_) {}
+          if (window.refreshNodes) await window.refreshNodes();
+        }
+        return;
+      }
+      if ((a = t.closest(".sub-icon[data-delsub]"))) {
+        e.stopPropagation();
+        const g = a.dataset.delsub;
+        const url = (window.SUB_URLS || {})[g];
+        if (url && invoke) {
+          const ok = window.customConfirm ? await window.customConfirm(`Удалить подписку «${g}» и её узлы?`) : true;
+          if (!ok) return;
+          try { await invoke("remove_subscription", { url }); } catch (_) {}
+          if (window.refreshNodes) await window.refreshNodes();
+        }
+        return;
+      }
+      if ((a = t.closest(".sub-head[data-sub]"))) {
+        const g = a.dataset.sub;
+        if (expanded.has(g)) expanded.delete(g); else expanded.add(g);
+        renderNodes();
+        return;
+      }
+      if ((a = t.closest(".node-row[data-pick]"))) {
+        selectByValue(a.dataset.pick);
+        return;
+      }
+    });
+
+    // «Тест задержек» в шапке панели → реальный скрытый #btn-test (main.js).
+    const testAll = $("btn-test-all");
+    const testReal = $("btn-test");
+    if (testAll && testReal) {
+      testAll.addEventListener("click", () => { if (!testReal.disabled) testReal.click(); });
+      const mirror = () => {
+        testAll.disabled = testReal.disabled;
+        testAll.textContent = testReal.disabled ? "Тестирую…" : "Тест задержек";
+      };
+      new MutationObserver(mirror).observe(testReal, { attributes: true, childList: true, characterData: true, subtree: true });
+      mirror();
+    }
+  }
+
+  // --- Пины на карте ---
+  function buildPins() {
+    const layer = $("pinLayer");
+    if (!layer) return;
+    const all = rows();
+    layer.innerHTML = "";
+    for (const r of all) {
+      const g = nodeGeo(r.addr || r.name);
+      const p = proj(g.lon, g.lat);
+      const b = document.createElement("button");
+      b.className = "pin";
+      b.style.left = (p.x * 100).toFixed(2) + "%";
+      b.style.top = (p.y * 100).toFixed(2) + "%";
+      b.dataset.value = r.value;
+      b.innerHTML = `<span class="pdot"></span><span class="plabel">${esc(r.name)}</span>`;
+      b.addEventListener("click", () => selectByValue(r.value));
+      layer.appendChild(b);
+    }
+    markPins();
+    markMapDirty();
+  }
+  function markPins() {
+    const val = ($("server") || {}).value || "";
+    const layer = $("pinLayer");
+    if (layer) layer.querySelectorAll(".pin").forEach((p) => p.classList.toggle("sel", p.dataset.value === val));
+  }
+  function selNodePos() {
+    const r = curRow();
+    return r ? nodeGeo(r.addr || r.name) : null;
+  }
+
+  // --- Выбранный узел во все варианты ---
+  function applySel() {
+    const r = curRow();
+    const city = r ? r.name : "Авто";
+    const cc = r ? ccFromName(r.name) : "AUTO";
+    const ep = r ? r.addr : "по правилам конфига";
+    const pingNum = r && r.lat && r.lat !== "—" ? r.lat.replace(/\s*ms$/i, "") : "—";
+    const meta = r ? ep : "по правилам конфига";
+    document.querySelectorAll("[data-selcity]").forEach((e) => (e.textContent = city));
+    document.querySelectorAll("[data-selcc]").forEach((e) => (e.textContent = cc));
+    document.querySelectorAll("[data-selep]").forEach((e) => (e.textContent = ep));
+    document.querySelectorAll("[data-selping]").forEach((e) => (e.textContent = pingNum));
+    document.querySelectorAll("[data-selload]").forEach((e) => (e.textContent = "—"));
+    document.querySelectorAll("[data-selmeta]").forEach((e) => (e.textContent = meta));
+    document.querySelectorAll("[data-metarow]").forEach((e) => (e.style.opacity = r ? "1" : ".5"));
+    markPins();
+    markMapDirty(); // выбранный узел сменился — обновить дугу/подсветку на карте
+  }
+
+  function refreshNodeUI() {
+    renderNodes();
+    buildPins();
+    applySel();
+    maybeGeolocate();
+  }
+
+  // ----------------------------------------------------------------
+  // Переключатели: визуальный .toggle ↔ скрытый <input type=checkbox>,
+  // который читает/пишет main.js. syncToggles вызывает main.js после load*.
+  // ----------------------------------------------------------------
+  function setupToggles() {
+    document.querySelectorAll("[data-tg-for]").forEach((btn) => {
+      const cb = $(btn.dataset.tgFor);
+      btn.addEventListener("click", () => {
+        if (!cb) { btn.classList.toggle("on"); return; }
+        cb.checked = !cb.checked;
+        btn.classList.toggle("on", cb.checked);
+        cb.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    });
+    syncToggles();
+  }
+  function syncToggles() {
+    document.querySelectorAll("[data-tg-for]").forEach((btn) => {
+      const cb = $(btn.dataset.tgFor);
+      if (cb) btn.classList.toggle("on", cb.checked);
+    });
+  }
+  window.syncToggles = syncToggles;
+
+  // ----------------------------------------------------------------
+  // Статистика соединений (живой опрос бэкенда) + скорости + график.
+  // ----------------------------------------------------------------
+  let measured = { d: 0, u: 0 }; // байт/с
+  let prevBytes = new Map();
+  let prevT = Date.now();
+  let paused = false;
+  let sortKey = "proc";
+
+  function fmtBytes(n) {
+    if (!n) return "—";
+    if (n < 1024) return Math.round(n) + " Б";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " КБ";
+    return (n / 1048576).toFixed(1) + " МБ";
+  }
+  function fmtSpeed(bps) {
+    if (bps < 1) return "0 Б/с";
+    if (bps < 1024) return Math.round(bps) + " Б/с";
+    if (bps < 1048576) return (bps / 1024).toFixed(1) + " КБ/с";
+    return (bps / 1048576).toFixed(2) + " МБ/с";
+  }
+
+  function updateSpeeds(list) {
+    const now = Date.now();
+    const dt = Math.max(0.2, (now - prevT) / 1000);
+    let dUp = 0, dDown = 0;
+    const cur = new Map();
+    for (const c of list) {
+      cur.set(c.id, { up: c.up, down: c.down });
+      const p = prevBytes.get(c.id);
+      if (p) { dUp += Math.max(0, c.up - p.up); dDown += Math.max(0, c.down - p.down); }
+      else { dUp += c.up; dDown += c.down; }
+    }
+    prevBytes = cur;
+    prevT = now;
+    measured = { d: dDown / dt, u: dUp / dt };
+  }
+
+  function connRow(c) {
+    const via = c.via === "direct" ? "direct" : c.via === "block" ? "block" : "proxy";
+    const viaLabel = via === "direct" ? "напрямую" : via === "block" ? "заблок." : "прокси";
+    return `<div class="conn-row">
+      <span class="conn-proc"><span class="conn-dot ${via}"></span><span>—</span></span>
+      <span class="conn-dest">${esc(c.target)}</span>
+      <span class="conn-via">${viaLabel}</span>
+      <span class="conn-up">${fmtBytes(c.up)}</span>
+      <span class="conn-down">${fmtBytes(c.down)}</span>
+      <span class="conn-kill"><button data-kill="${c.id}" title="Закрыть соединение">✕</button></span></div>`;
+  }
+  function renderConns(list) {
+    const box = $("conns");
+    if (!box) return;
+    list.sort((a, b) => {
+      if (sortKey === "ip") return b.up - a.up;
+      if (sortKey === "proc" || sortKey === "dest") return String(a.target).localeCompare(String(b.target));
+      return b.down - a.down;
+    });
+    box.innerHTML = list.length ? list.map(connRow).join("") : '<div class="empty">Нет активных соединений.</div>';
+    const cc = document.querySelector("[data-conncount]");
+    if (cc) cc.textContent = list.length;
+  }
+
+  async function poll() {
+    if (!invoke || document.hidden) return; // в фоне не дёргаем бэкенд и UI
+    try {
+      const list = await invoke("list_connections");
+      updateSpeeds(list);
+      if (!paused) renderConns(list);
+      if (measured.d || measured.u) wake(); // есть трафик — оживить индикаторы скорости
+    } catch (_) {
+      measured = { d: 0, u: 0 };
+    }
+  }
+
+  function setupStats() {
+    const box = $("conns");
+    if (box) {
+      box.addEventListener("click", (e) => {
+        const b = e.target.closest("button[data-kill]");
+        if (b && invoke) invoke("drop_connection", { id: parseInt(b.dataset.kill, 10) }).then(poll);
+      });
+    }
+    const seg = $("st-sort");
+    if (seg) {
+      seg.addEventListener("click", (e) => {
+        const b = e.target.closest(".seg-btn");
+        if (!b) return;
+        sortKey = b.dataset.sort;
+        seg.querySelectorAll(".seg-btn").forEach((x) => x.classList.toggle("active", x === b));
+        poll();
+      });
+    }
+    const pause = $("st-pause");
+    if (pause) {
+      pause.addEventListener("click", () => {
+        paused = !paused;
+        pause.classList.toggle("paused", paused);
+        pause.textContent = paused ? "▶ Продолжить" : "❚❚ Пауза";
+      });
+    }
+    if (!invoke && box) box.innerHTML = '<div class="empty">Нет данных (бэкенд недоступен).</div>';
+    poll();
+    setInterval(poll, 1500);
+  }
+
+  // ----------------------------------------------------------------
+  // Анимация: карта, график, скорости, параллакс (rAF-цикл).
+  // Цикл экономный: ~30 fps, останавливается в простое и при сворачивании
+  // окна (иначе webview жёг бы CPU постоянно, даже в фоне).
+  // ----------------------------------------------------------------
+  const DREF = 3 * 1048576, UREF = 512 * 1024; // шкала индикаторов скорости
+  const FRAME_MS = 1000 / 30;
+  const spd = { d: 0, u: 0 };
+  const hist = new Array(140).fill(0);
+  let t = 0, lastHist = 0, prevFrame = performance.now();
+  const par = { x: 0, y: 0 }, parT = { x: 0, y: 0 };
+
+  let timer = null, running = true;
+  let mapDirty = true, graphDirty = true;
+  let lastSpdD = "", lastSpdU = "", lastUptime = "";
+  // Кеш DOM-элементов (не меняются после старта) — чтобы не сканировать документ каждый кадр.
+  let elSpdD = [], elSpdU = [], elBarD = [], elBarU = [], elUptime = [], elBg = null, elMi = null;
+  function cacheEls() {
+    elSpdD = [...document.querySelectorAll('[data-spd="d"]')];
+    elSpdU = [...document.querySelectorAll('[data-spd="u"]')];
+    elBarD = [...document.querySelectorAll('[data-bar="d"]')];
+    elBarU = [...document.querySelectorAll('[data-bar="u"]')];
+    elUptime = [...document.querySelectorAll("[data-uptime]")];
+    elBg = $("bgLayer"); elMi = $("mapInner");
+  }
+
+  function markMapDirty() { mapDirty = true; wake(); }
+  function markDirty() { mapDirty = true; graphDirty = true; wake(); }
+  // Планировщик на setTimeout (~30 fps) — меньше пробуждений, чем rAF на 60–144 Гц.
+  function wake() { if (running && timer == null) timer = setTimeout(frame, 0); }
+  function setRunning(v) {
+    if (v === running) return;
+    running = v;
+    if (running) { prevFrame = performance.now(); markDirty(); }
+    else if (timer != null) { clearTimeout(timer); timer = null; }
+  }
+
+  function setupParallax() {
+    app.addEventListener("mousemove", (e) => {
+      const r = app.getBoundingClientRect();
+      parT.x = ((e.clientX - r.left) / r.width - 0.5) * 2;
+      parT.y = ((e.clientY - r.top) / r.height - 0.5) * 2;
+      wake();
+    });
+  }
+
+  let dots = null, twinkle = [];
+  fetch("world-dots.json")
+    .then((r) => r.json())
+    .then((j) => { dots = j.dots; for (let i = 0; i < 70; i++) twinkle.push(Math.floor(Math.random() * dots.length)); markMapDirty(); })
+    .catch(() => { dots = []; });
+
+  function qb(a, b, c, tt) { const m = 1 - tt; return m * m * a + 2 * m * tt * b + tt * tt * c; }
+
+  // Статичные точки карты — один раз в offscreen-слой; каждый кадр только blit.
+  let dotsLayer = null, dotsLW = 0, dotsLH = 0;
+  function buildDotsLayer(w, h, dpr) {
+    dotsLayer = document.createElement("canvas");
+    dotsLayer.width = Math.round(w * dpr);
+    dotsLayer.height = Math.round(h * dpr);
+    const d = dotsLayer.getContext("2d");
+    d.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const ds = Math.max(1.3, w / 640);
+    d.fillStyle = "rgba(118,162,205,0.18)";
+    for (let i = 0; i < dots.length; i++) d.fillRect(dots[i][0] * w, dots[i][1] * h, ds, ds);
+    dotsLW = w; dotsLH = h;
+  }
+
+  function drawMap(on, isConnecting) {
+    const active = on || isConnecting;
+    const c = $("mapCanvas");
+    if (!c) return;
+    const w = c.clientWidth, h = c.clientHeight;
+    if (!w || !h) return;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+    const ctx = c.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    if (dots && dots.length) {
+      if (!dotsLayer || dotsLW !== w || dotsLH !== h) buildDotsLayer(w, h, dpr);
+      ctx.drawImage(dotsLayer, 0, 0, w, h);
+      if (active) { // мерцание — только в активном состоянии (иначе карта статична)
+        const ds = Math.max(1.3, w / 640);
+        ctx.fillStyle = "rgba(170,225,255,0.95)";
+        for (let j = 0; j < twinkle.length; j++) {
+          const d = dots[twinkle[j]];
+          if (!d) continue;
+          ctx.globalAlpha = 0.25 + 0.55 * (0.5 + 0.5 * Math.sin(t * 1.7 + twinkle[j]));
+          ctx.fillRect(d[0] * w - 0.4, d[1] * h - 0.4, ds + 1, ds + 1);
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+    const u = proj(USER.lon, USER.lat);
+    const ux = u.x * w, uy = u.y * h;
+    const np = selNodePos();
+    if (np) {
+      const s = proj(np.lon, np.lat);
+      const sx = s.x * w, sy = s.y * h;
+      if (on) {
+        const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, 95);
+        g.addColorStop(0, "rgba(34,211,238,0.26)");
+        g.addColorStop(1, "rgba(34,211,238,0)");
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(sx, sy, 95, 0, 7); ctx.fill();
+      }
+      if (on || isConnecting) {
+        const mx = (ux + sx) / 2, my = (uy + sy) / 2 - Math.hypot(sx - ux, sy - uy) * 0.3;
+        const col = isConnecting ? "rgba(250,204,21,0.85)" : "rgba(34,211,238,0.9)";
+        ctx.lineWidth = 1.6; ctx.strokeStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 11;
+        ctx.setLineDash([2, 7]); ctx.lineDashOffset = -t * 24;
+        ctx.beginPath(); ctx.moveTo(ux, uy); ctx.quadraticCurveTo(mx, my, sx, sy); ctx.stroke();
+        ctx.setLineDash([]); ctx.shadowBlur = 0;
+        if (on) {
+          const tt = (t * 0.33) % 1, bx = qb(ux, mx, sx, tt), by = qb(uy, my, sy, tt);
+          ctx.fillStyle = "#eaffff"; ctx.shadowColor = "#22d3ee"; ctx.shadowBlur = 13;
+          ctx.beginPath(); ctx.arc(bx, by, 3, 0, 7); ctx.fill(); ctx.shadowBlur = 0;
+        }
+      }
+    }
+    ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,0.85)";
+    ctx.beginPath(); ctx.arc(ux, uy, 4.2, 0, 7); ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    ctx.beginPath(); ctx.arc(ux, uy, 1.7, 0, 7); ctx.fill();
+  }
+
+  function drawGraph(on) {
+    const c = $("graphCanvas");
+    if (!c) return;
+    const w = c.clientWidth, h = c.clientHeight;
+    if (!w || !h) return;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+    const ctx = c.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    let max = 1;
+    for (const v of hist) if (v > max) max = v;
+    const n = hist.length, step = w / (n - 1);
+    let i, x, y;
+    ctx.beginPath();
+    for (i = 0; i < n; i++) { x = i * step; y = h - Math.min(1, hist[i] / max) * (h - 6) - 3; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+    const g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, "rgba(34,211,238,0.35)");
+    g.addColorStop(1, "rgba(34,211,238,0)");
+    ctx.fillStyle = g; ctx.fill();
+    ctx.beginPath();
+    for (i = 0; i < n; i++) { x = i * step; y = h - Math.min(1, hist[i] / max) * (h - 6) - 3; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.strokeStyle = on ? "rgba(34,211,238,0.95)" : "rgba(120,150,180,0.5)";
+    ctx.lineWidth = 1.6; ctx.stroke();
+  }
+
+  function parSettled() {
+    return Math.abs(parT.x - par.x) <= 0.002 && Math.abs(parT.y - par.y) <= 0.002;
+  }
+  // Простой = ничего не анимируется → можно остановить rAF (нулевой CPU).
+  function isSettled() {
+    const active = statusOn() || connecting;
+    return !active && !mapDirty && !graphDirty && parSettled() && spd.d === 0 && spd.u === 0;
+  }
+
+  function step(dt) {
+    t += dt;
+    const on = statusOn(), isConnecting = connecting, active = on || isConnecting;
+
+    // Скорости плавно тянутся к измеренным (или к нулю, если выключено).
+    const tgt = active ? measured : { d: 0, u: 0 };
+    spd.d += (tgt.d - spd.d) * 0.2;
+    spd.u += (tgt.u - spd.u) * 0.2;
+    if (Math.abs(spd.d - tgt.d) < 1) spd.d = tgt.d;
+    if (Math.abs(spd.u - tgt.u) < 1) spd.u = tgt.u;
+
+    const sD = fmtSpeed(spd.d), sU = fmtSpeed(spd.u);
+    if (sD !== lastSpdD) {
+      lastSpdD = sD;
+      for (const e of elSpdD) e.textContent = sD;
+      const wd = Math.min(100, (spd.d / DREF) * 100) + "%";
+      for (const e of elBarD) e.style.width = wd;
+    }
+    if (sU !== lastSpdU) {
+      lastSpdU = sU;
+      for (const e of elSpdU) e.textContent = sU;
+      const wu = Math.min(100, (spd.u / UREF) * 100) + "%";
+      for (const e of elBarU) e.style.width = wu;
+    }
+
+    if (active && t - lastHist > 0.18) { lastHist = t; hist.push(spd.d); hist.shift(); graphDirty = true; }
+
+    const upStr = connectedSince ? hms(Date.now() - connectedSince) : "—";
+    if (upStr !== lastUptime) { lastUptime = upStr; for (const e of elUptime) e.textContent = upStr; }
+
+    if (!parSettled()) {
+      par.x += (parT.x - par.x) * 0.08;
+      par.y += (parT.y - par.y) * 0.08;
+      if (elBg) elBg.style.transform = "scale(1.08) translate(" + par.x * -16 + "px," + par.y * -16 + "px)";
+      if (elMi) elMi.style.transform = "translate(" + par.x * 9 + "px," + par.y * 9 + "px)";
+      mapDirty = true;
+    }
+
+    // Рисуем только видимый холст; флаг «dirty» невидимого — сразу снимаем,
+    // иначе он навсегда держал бы цикл «не в простое».
+    const tab = app.dataset.tab;
+    if (tab === "home") { if (active || mapDirty) drawMap(on, isConnecting); }
+    mapDirty = false;
+    if (tab === "stats") { if (active || graphDirty) drawGraph(on); }
+    graphDirty = false;
+  }
+
+  function frame() {
+    timer = null;
+    if (!running) return;
+    const now = performance.now();
+    const dt = Math.min(0.05, (now - prevFrame) / 1000);
+    prevFrame = now;
+    step(dt);
+    if (!isSettled()) timer = setTimeout(frame, FRAME_MS); // в простое — останавливаемся
+  }
+  function hms(ms) {
+    const s = Math.floor(ms / 1000);
+    const p = (x) => String(x).padStart(2, "0");
+    return p(Math.floor(s / 3600)) + ":" + p(Math.floor((s % 3600) / 60)) + ":" + p(s % 60);
+  }
+
+  // ----------------------------------------------------------------
+  // Навигация, варианты, версия.
+  // ----------------------------------------------------------------
+  function setupNav() {
+    document.querySelectorAll("[data-nav]").forEach((b) => {
+      b.addEventListener("click", () => {
+        app.dataset.tab = b.dataset.nav;
+        document.querySelectorAll("[data-nav]").forEach((x) => x.classList.toggle("active", x === b));
+        if (b.dataset.nav === "logs" && window.loadLog) window.loadLog();
+        markDirty(); // показалась карта/график — перерисовать
+      });
+    });
+  }
+  function setupVariants() {
+    let variant = "C";
+    try { variant = localStorage.getItem("jamm_variant") || "C"; } catch (e) {}
+    app.dataset.variant = variant;
+    document.querySelectorAll("[data-var]").forEach((b) => {
+      b.classList.toggle("active", b.dataset.var === variant);
+      b.addEventListener("click", () => {
+        variant = b.dataset.var;
+        try { localStorage.setItem("jamm_variant", variant); } catch (e) {}
+        app.dataset.variant = variant;
+        document.querySelectorAll("[data-var]").forEach((x) => x.classList.toggle("active", x === b));
+      });
+    });
+  }
+  function setupServerPanel() {
+    document.querySelectorAll("[data-openservers]").forEach((b) => b.addEventListener("click", () => app.classList.add("sp-open")));
+    document.querySelectorAll("[data-closeservers]").forEach((b) => b.addEventListener("click", () => app.classList.remove("sp-open")));
+  }
+  function setupConnect() {
+    document.querySelectorAll("[data-connect]").forEach((b) => b.addEventListener("click", onConnect));
+  }
+  function setupVersion() {
+    const btn = $("ver-btn");
+    if (btn) btn.addEventListener("click", () => window.open("https://github.com/Jammeren2/JammVpn/releases", "_blank", "noopener"));
+    if (invoke) {
+      invoke("app_version")
+        .then((v) => {
+          if (!v) return;
+          if (btn && btn.firstChild) btn.firstChild.nodeValue = "v" + v + " ";
+          const sub = $("acct-sub");
+          if (sub) sub.textContent = "v" + v;
+        })
+        .catch(() => {});
+    }
+  }
+
+  // ----------------------------------------------------------------
+  ready(function () {
+    setupNav();
+    setupVariants();
+    setupServerPanel();
+    setupConnect();
+    setupVersion();
+    buildModes();
+    syncModes();
+    setupNodeList();
+    setupToggles();
+    setupStats();
+    setupParallax();
+
+    // Перерисовка узлов/пинов при изменениях, которые делает main.js.
+    const sel = $("server");
+    const body = $("nodes-body");
+    if (sel) {
+      new MutationObserver(refreshNodeUI).observe(sel, { childList: true });
+      sel.addEventListener("change", () => { renderNodes(); applySel(); });
+    }
+    if (body) new MutationObserver(refreshNodeUI).observe(body, { childList: true, subtree: true, characterData: true });
+
+    // Зеркало статуса: следим за скрытым #status (его пишет main.js).
+    const status = $("status");
+    if (status) {
+      new MutationObserver(applyStatus).observe(status, { attributes: true, childList: true, characterData: true, subtree: true });
+    }
+
+    // Док подсказки запуска прокси показываем только когда в #proxy-hint есть текст.
+    const ph = $("proxy-hint");
+    const dock = ph && ph.closest(".hint-dock");
+    if (ph && dock) {
+      const syncDock = () => dock.classList.toggle("show", ph.textContent.trim() !== "");
+      new MutationObserver(syncDock).observe(ph, { childList: true, characterData: true, subtree: true });
+      syncDock();
+    }
+
+    // Пауза анимации, когда окно скрыто/свёрнуто в трей — иначе webview
+    // продолжает жечь CPU в фоне. Возобновляем при возврате.
+    document.addEventListener("visibilitychange", () => setRunning(!document.hidden));
+    window.addEventListener("focus", () => setRunning(!document.hidden));
+    window.addEventListener("blur", () => { if (document.hidden) setRunning(false); });
+    window.addEventListener("resize", markDirty);
+
+    cacheEls();
+    refreshNodeUI();
+    applyStatus();
+    running = !document.hidden;
+    markDirty();
+    wake();
+  });
 })();

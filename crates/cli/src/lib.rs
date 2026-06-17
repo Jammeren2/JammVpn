@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
+mod store;
+
 /// Узел в списке (для UI/CLI).
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeInfo {
@@ -129,13 +131,31 @@ pub fn secret_store() -> Box<dyn SecretStore> {
     Box::new(jammvpn_core::NoopStore)
 }
 
-/// Загружает конфиг (расшифровывая секреты); при ошибке возвращает пустой.
+/// Загружает конфиг из SQLite (расшифровывая секреты); при ошибке — пустой.
+///
+/// `path` — историческое имя JSON-файла (используется как якорь каталога). Само
+/// хранилище — `store::db_path_for(path)` (рядом, `config.db`). При наличии только
+/// старого JSON он одноразово мигрируется в БД, а файл переименовывается в `.bak`.
 pub fn load_config(path: &Path, store: &dyn SecretStore) -> AppConfig {
-    let mut cfg = if path.exists() {
-        AppConfig::load_protected(path, store).unwrap_or_else(|e| {
-            eprintln!("предупреждение: не удалось загрузить конфиг ({e}); беру пустой");
+    let db = store::db_path_for(path);
+    let mut cfg = if db.exists() {
+        store::load(&db, store).unwrap_or_else(|e| {
+            eprintln!("предупреждение: не удалось загрузить БД ({e}); беру пустой");
             AppConfig::default()
         })
+    } else if path.exists() {
+        // Миграция со старого JSON-конфига в SQLite (одноразово).
+        let c = AppConfig::load_protected(path, store).unwrap_or_else(|e| {
+            eprintln!("предупреждение: не удалось загрузить старый конфиг ({e}); беру пустой");
+            AppConfig::default()
+        });
+        if let Err(e) = store::save(&db, &c, store) {
+            eprintln!("предупреждение: не удалось мигрировать конфиг в SQLite: {e}");
+        } else {
+            // Старый файл → .bak: и бэкап, и защита от повторной миграции.
+            let _ = std::fs::rename(path, path.with_extension("json.bak"));
+        }
+        c
     } else {
         AppConfig::default()
     };
@@ -160,12 +180,13 @@ fn sanitize_config(cfg: &mut AppConfig) {
     }
 }
 
-/// Сохраняет конфиг (шифруя секреты), создавая каталог при необходимости.
+/// Сохраняет конфиг в SQLite (шифруя секреты), создавая каталог при необходимости.
 pub fn save_config(path: &Path, cfg: &AppConfig, store: &dyn SecretStore) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
+    let db = store::db_path_for(path);
+    if let Some(dir) = db.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    cfg.save_protected(path, store).map_err(|e| e.to_string())
+    store::save(&db, cfg, store)
 }
 
 /// Загружает текущий конфиг штатным хранилищем.
@@ -459,6 +480,51 @@ fn node_to_vless_link(p: &ServerProfile) -> Option<String> {
         "vless://{uuid}@{}:{}{query}{frag}",
         p.address, p.port
     ))
+}
+
+/// Строит `ss://`-ссылку (SIP002: `ss://base64(method:password)@host:port?params#name`).
+/// `password` для multi-user SS-2022 — это цепочка `iPSK:uPSK` (как в подписке).
+fn node_to_ss_link(p: &ServerProfile) -> Option<String> {
+    if p.protocol != jammvpn_core::ProtocolKind::Shadowsocks {
+        return None;
+    }
+    let method = p.param("method")?;
+    let password = p.param("password")?;
+    let userinfo = jammvpn_core::base64::encode_standard(format!("{method}:{password}").as_bytes());
+    // Параметры транспорта (если есть): security/sni/alpn/fp/type.
+    let mut q = Vec::new();
+    for k in ["security", "sni", "alpn", "fp", "type"] {
+        if let Some(v) = p.param(k) {
+            if !v.is_empty() {
+                q.push(format!("{k}={}", pct(v)));
+            }
+        }
+    }
+    let query = if q.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", q.join("&"))
+    };
+    let frag = if p.name.is_empty() {
+        String::new()
+    } else {
+        format!("#{}", pct(&p.name))
+    };
+    Some(format!(
+        "ss://{userinfo}@{}:{}{query}{frag}",
+        p.address, p.port
+    ))
+}
+
+/// `ss://`-ссылка узла по имени (для копирования). Ошибка — если не Shadowsocks.
+pub fn export_ss_link(name: &str) -> Result<String, String> {
+    let cfg = load();
+    let node = cfg
+        .servers
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("узел не найден: {name}"))?;
+    node_to_ss_link(node).ok_or_else(|| "ссылка ss:// доступна только для Shadowsocks-узлов".into())
 }
 
 /// Percent-encoding значения (всё, кроме unreserved RFC 3986).
@@ -2070,6 +2136,7 @@ PersistentKeepalive = 25
             Some("11111111-2222-3333-4444-555555555555")
         );
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(store::db_path_for(&path)); // SQLite-хранилище
     }
 
     #[test]

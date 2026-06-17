@@ -93,13 +93,16 @@ async function refreshNodes() {
   const sel = $("server");
   const dsel = $("default-proxy");
   const lsel = $("lwg-node");
+  const tsel = $("r-tag"); // тег узла в редакторе правил (теперь это <select>)
   // сохраняем выбранные значения
   const prev = sel.value;
   const prevDefault = dsel ? dsel.value : "";
   const prevLwg = lsel ? lsel.value : "";
+  const prevTag = tsel ? tsel.value : "";
   sel.innerHTML = '<option value="">— по правилам конфига —</option>';
   if (dsel) dsel.innerHTML = '<option value="">— первый доступный —</option>';
   if (lsel) lsel.innerHTML = '<option value="">— по правилам конфига —</option>';
+  if (tsel) tsel.innerHTML = '<option value="">— дефолтный —</option>';
 
   // Группируем: свои ключи отдельно, узлы подписок — по источнику.
   const own = nodes.filter((n) => !n.group);
@@ -144,11 +147,13 @@ async function refreshNodes() {
       sel.appendChild(opt);
       if (dsel) dsel.appendChild(opt.cloneNode(true));
       if (lsel) lsel.appendChild(opt.cloneNode(true));
+      if (tsel) tsel.appendChild(opt.cloneNode(true));
     }
   }
   sel.value = prev;
   if (dsel) dsel.value = prevDefault;
   if (lsel) lsel.value = prevLwg;
+  if (tsel) tsel.value = prevTag;
   for (const btn of body.querySelectorAll("button.x[data-name]")) {
     btn.addEventListener("click", () => removeNode(btn.dataset.name));
   }
@@ -193,6 +198,7 @@ async function loadSettings() {
     // Уведомляем node-picker (ui.js) перерисовать выбор.
     $("server").dispatchEvent(new Event("change", { bubbles: true }));
   }
+  window.syncToggles && window.syncToggles(); // отразить чекбоксы в тумблерах UI
 }
 
 // Персист настроек подключения (адрес прокси + выбранный узел). Тихо игнорируем
@@ -673,6 +679,7 @@ async function loadAutostart() {
     $("autostart-msg").textContent = "не удалось прочитать статус: " + e;
     $("autostart-msg").className = "hint err";
   }
+  window.syncToggles && window.syncToggles();
 }
 
 async function toggleAutostart() {
@@ -698,6 +705,7 @@ async function loadSysProxy() {
   } catch (e) {
     $("sysproxy").checked = false;
   }
+  window.syncToggles && window.syncToggles();
 }
 
 async function toggleSysProxy() {
@@ -730,6 +738,7 @@ async function loadSplit() {
     "Перехватываемые приложения: " +
     (apps.length ? apps.join(", ") : "— (добавьте правило с процессом и действием «проксировать»)");
   setSplitState(await invoke("split_status"));
+  window.syncToggles && window.syncToggles();
 }
 
 async function saveSplit() {
@@ -872,8 +881,8 @@ async function clearLog() {
 }
 
 function logsTabActive() {
-  const p = document.querySelector('[data-tab-panel="logs"]');
-  return p && p.classList.contains("active");
+  const app = document.getElementById("app");
+  return !!(app && app.dataset.tab === "logs");
 }
 
 // --- Правила маршрутизации ---
@@ -911,41 +920,40 @@ function buildRuleInfo() {
   };
 }
 
-function ruleSummary(r) {
-  const parts = [];
-  if (r.domains.length) parts.push("дом: " + r.domains.join(", "));
-  if (r.ip_cidrs.length) parts.push("ip: " + r.ip_cidrs.join(", "));
-  if (r.processes.length) parts.push("proc: " + r.processes.join(", "));
-  if (r.ports.length) parts.push("порт: " + r.ports.join(", "));
-  if (r.geosite.length) parts.push("geosite: " + r.geosite.join(", "));
-  if (r.geoip.length) parts.push("geoip: " + r.geoip.join(", "));
-  return parts.length ? parts.join(" · ") : "любой трафик (catch-all)";
-}
+const ACT_LABEL = { proxy: "проксировать", direct: "напрямую", block: "блокировать" };
 
-function actionLabel(r) {
-  if (r.action === "proxy")
-    return "→ proxy" + (r.proxy_tag ? `(${r.proxy_tag})` : "");
-  if (r.action === "block") return "✖ block";
-  return "→ direct";
+// Критерии правила → отдельные чипы (для карточки на вкладке «Маршруты»).
+function ruleChips(r) {
+  const out = [];
+  (r.domains || []).forEach((d) => out.push("domain: " + d));
+  (r.ip_cidrs || []).forEach((d) => out.push("ip: " + d));
+  (r.processes || []).forEach((d) => out.push("process: " + d));
+  (r.ports || []).forEach((d) => out.push("port: " + d));
+  (r.geosite || []).forEach((d) => out.push("geosite: " + d));
+  (r.geoip || []).forEach((d) => out.push("geoip: " + d));
+  return out.length ? out : ["любой трафик (catch-all)"];
 }
 
 async function refreshRules() {
   rulesCache = await invoke("list_rules");
-  const body = $("rules-body");
-  body.innerHTML = "";
+  const box = $("rules");
+  box.innerHTML = "";
   rulesCache.forEach((r, i) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${i + 1}</td><td class="crit">${esc(
-      ruleSummary(r)
-    )}</td><td class="act ${esc(r.action)}">${esc(
-      actionLabel(r)
-    )}</td><td class="rule-ctl">
-      <button class="mini" data-i="${i}" data-act="up" title="выше">▲</button>
-      <button class="mini" data-i="${i}" data-act="down" title="ниже">▼</button>
-      <button class="mini" data-i="${i}" data-act="edit" title="изменить">✎</button>
-      <button class="x" data-i="${i}" data-act="del" title="удалить">✕</button>
-    </td>`;
-    body.appendChild(tr);
+    const div = document.createElement("div");
+    div.className = "rule";
+    const chips = ruleChips(r).map((c) => `<span class="chip">${esc(c)}</span>`).join("");
+    const node = r.action === "proxy" ? r.proxy_tag || "дефолт" : "—";
+    div.innerHTML = `<span class="n">${i + 1}</span>
+      <div class="crit">${chips}</div>
+      <span class="node">${esc(node)}</span>
+      <span class="act ${esc(r.action)}">${esc(ACT_LABEL[r.action] || r.action)}</span>
+      <span class="rule-ctl">
+        <button class="mini" data-i="${i}" data-act="up" title="выше">▲</button>
+        <button class="mini" data-i="${i}" data-act="down" title="ниже">▼</button>
+        <button class="mini" data-i="${i}" data-act="edit" title="изменить">✎</button>
+        <button class="x" data-i="${i}" data-act="del" title="удалить">✕</button>
+      </span>`;
+    box.appendChild(div);
   });
   $("rules-empty").style.display = rulesCache.length ? "none" : "block";
 }
@@ -1103,10 +1111,14 @@ function hideSplash() {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const GITHUB_URL = "https://github.com/Jammeren2/JammVpn";
+
 async function startupChecks() {
   let v = "";
   try {
     v = await invoke("app_version");
+    const vn = $("ver-num");
+    if (vn) vn.textContent = "v" + v;
   } catch (e) {}
   try {
     const nodes = await invoke("list_nodes");
@@ -1182,6 +1194,13 @@ async function init() {
   }
   $("btn-refresh").addEventListener("click", refreshNodes);
   $("btn-test").addEventListener("click", testLatencies);
+  // Кнопка версии слева сверху → страница проекта в браузере по умолчанию.
+  const verBtn = $("ver-btn");
+  if (verBtn) {
+    verBtn.addEventListener("click", () => {
+      invoke("open_url", { url: GITHUB_URL }).catch(() => {});
+    });
+  }
   // Модалка «Добавить».
   $("btn-add-node").addEventListener("click", openAddModal);
   $("add-close").addEventListener("click", closeAddModal);
@@ -1205,7 +1224,7 @@ async function init() {
   $("btn-rule-save").addEventListener("click", saveRule);
   $("btn-rule-cancel").addEventListener("click", resetRuleForm);
   $("r-action").addEventListener("change", updateTagVisibility);
-  $("rules-body").addEventListener("click", onRulesClick);
+  $("rules").addEventListener("click", onRulesClick);
   $("presets").addEventListener("click", onPresetClick);
   $("autostart").addEventListener("change", toggleAutostart);
   $("sysproxy").addEventListener("change", toggleSysProxy);
@@ -1228,8 +1247,7 @@ async function init() {
   $("btn-log-clear").addEventListener("click", clearLog);
   $("log-lines").addEventListener("change", loadLog);
   // Загрузка лога при открытии вкладки + авто-обновление, пока она активна.
-  const logsTab = document.querySelector('.tab[data-tab="logs"]');
-  if (logsTab) logsTab.addEventListener("click", loadLog);
+  // (Переключение на вкладку «Логи» дергает loadLog из ui.js — слоя навигации.)
   setInterval(() => {
     if (logsTabActive() && $("log-auto") && $("log-auto").checked) loadLog();
   }, 2000);

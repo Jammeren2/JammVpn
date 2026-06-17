@@ -45,7 +45,8 @@ fn drop_connection(id: u64) -> bool {
 
 #[tauri::command]
 fn config_path() -> String {
-    ctl::config_path().display().to_string()
+    // Хранилище — SQLite рядом с историческим JSON-путём (config.db).
+    ctl::config_path().with_extension("db").display().to_string()
 }
 
 #[tauri::command]
@@ -74,6 +75,26 @@ async fn test_node_latency(name: String) -> ctl::LatencyResult {
 #[tauri::command]
 fn export_vless_link(name: String) -> Result<String, String> {
     ctl::export_vless_link(&name)
+}
+
+/// `ss://`-ссылка узла Shadowsocks (для копирования).
+#[tauri::command]
+fn export_ss_link(name: String) -> Result<String, String> {
+    ctl::export_ss_link(&name)
+}
+
+/// Открывает URL в браузере по умолчанию (для кнопки версии → страница проекта).
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    // Разрешаем только http/https — не запускаем произвольные команды.
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("недопустимый URL".into());
+    }
+    std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Записать `.conf` узла в выбранный путь (после диалога «Сохранить как»).
@@ -586,6 +607,8 @@ fn main() {
             download_geo,
             test_node_latency,
             export_vless_link,
+            export_ss_link,
+            open_url,
             export_node_conf_to,
             local_wg_export_conf_to,
             list_subscriptions,
