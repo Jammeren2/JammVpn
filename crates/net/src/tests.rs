@@ -321,6 +321,7 @@ async fn outbound_shadowsocks_against_mock() {
         server: server.to_string(),
         method,
         password: "pw".to_string(),
+        tls: None,
     });
     let mut s = ob
         .connect_tcp(&Target::Domain("example.com".to_string(), 443))

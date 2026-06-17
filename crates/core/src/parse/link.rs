@@ -129,10 +129,10 @@ fn parse_shadowsocks(s: &str) -> Result<ServerProfile, ParseError> {
         Some(i) => (&rest[..i], Some(percent_decode(&rest[i + 1..]))),
         None => (rest, None),
     };
-    // Плагин-параметры (`?plugin=...`) пока отбрасываем.
-    let body = match before_frag.find('?') {
-        Some(i) => &before_frag[..i],
-        None => before_frag,
+    // Тело до query; query сохраняем (TLS-транспорт: security/sni/alpn/...).
+    let (body, query) = match before_frag.find('?') {
+        Some(i) => (&before_frag[..i], &before_frag[i + 1..]),
+        None => (before_frag, ""),
     };
 
     let (method, password, host, port) = if let Some(at) = body.rfind('@') {
@@ -149,6 +149,20 @@ fn parse_shadowsocks(s: &str) -> Result<ServerProfile, ParseError> {
     let mut params = BTreeMap::new();
     params.insert("method".to_string(), method);
     params.insert("password".to_string(), password);
+    // Параметры транспорта (Xray streamSettings): security=tls, sni, alpn, fp,
+    // allowInsecure/insecure. `plugin` пока игнорируем.
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (k, v) = match pair.split_once('=') {
+            Some((k, v)) => (k, percent_decode(v)),
+            None => (pair, String::new()),
+        };
+        match k {
+            "security" | "sni" | "alpn" | "fp" | "insecure" | "allowInsecure" | "allow_insecure" => {
+                params.insert(k.replace("allowInsecure", "allow_insecure"), v);
+            }
+            _ => {}
+        }
+    }
     Ok(make_profile(
         ProtocolKind::Shadowsocks,
         host,
@@ -242,6 +256,20 @@ mod tests {
         assert_eq!(p.param("method"), Some("aes-256-gcm"));
         assert_eq!(p.param("password"), Some("pass"));
         assert_eq!(p.name, "ss-node");
+    }
+
+    #[test]
+    fn parse_ss_keeps_tls_transport_params() {
+        // SS с TLS-транспортом (Xray streamSettings): параметры должны сохраниться.
+        let p = parse_link(
+            "ss://YWVzLTI1Ni1nY206cGFzcw==@1.2.3.4:8388?security=tls&sni=ex.com&alpn=h2%2Chttp%2F1.1&fp=chrome#n",
+        )
+        .unwrap();
+        assert_eq!(p.protocol, ProtocolKind::Shadowsocks);
+        assert_eq!(p.port, 8388);
+        assert_eq!(p.param("security"), Some("tls"));
+        assert_eq!(p.param("sni"), Some("ex.com"));
+        assert_eq!(p.param("alpn"), Some("h2,http/1.1"));
     }
 
     #[test]

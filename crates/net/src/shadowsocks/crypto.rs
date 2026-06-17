@@ -121,6 +121,48 @@ pub fn session_subkey_2022(method: Method, psk: &[u8], salt: &[u8]) -> Vec<u8> {
     derived[..method.key_len()].to_vec()
 }
 
+/// Подключ идентификации SS-2022 (SIP022, EIH):
+/// `BLAKE3_derive_key("shadowsocks 2022 identity subkey", iPSK || salt)[..key_len]`.
+pub fn identity_subkey_2022(method: Method, ipsk: &[u8], salt: &[u8]) -> Vec<u8> {
+    let mut material = Vec::with_capacity(ipsk.len() + salt.len());
+    material.extend_from_slice(ipsk);
+    material.extend_from_slice(salt);
+    let derived = blake3::derive_key("shadowsocks 2022 identity subkey", &material);
+    derived[..method.key_len()].to_vec()
+}
+
+/// 16-байтный идентификационный хеш PSK для EIH: `BLAKE3(psk)[..16]`.
+pub fn psk_hash_16(psk: &[u8]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&blake3::hash(psk).as_bytes()[..16]);
+    out
+}
+
+/// Строит Extensible Identity Headers (SIP022) для multi-user SS-2022.
+/// `identity_psks` — цепочка iPSK (внешний→внутренний), `session_psk` — uPSK.
+/// Для каждой iPSK: `AES-ECB(identity_subkey(iPSK, salt), BLAKE3(next_psk)[..16])`,
+/// где next_psk — следующая iPSK или uPSK для последней. Возвращает конкатенацию
+/// 16-байтных блоков (пусто, если identity-PSK нет).
+pub fn build_identity_headers(
+    method: Method,
+    identity_psks: &[Vec<u8>],
+    session_psk: &[u8],
+    salt: &[u8],
+) -> io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(identity_psks.len() * 16);
+    for (i, ipsk) in identity_psks.iter().enumerate() {
+        let next = identity_psks
+            .get(i + 1)
+            .map(Vec::as_slice)
+            .unwrap_or(session_psk);
+        let subkey = identity_subkey_2022(method, ipsk, salt);
+        let mut block = psk_hash_16(next);
+        aes_ecb_encrypt_block(&subkey, &mut block)?;
+        out.extend_from_slice(&block);
+    }
+    Ok(out)
+}
+
 enum AeadKey {
     Aes128(Box<Aes128Gcm>),
     Aes256(Box<Aes256Gcm>),
@@ -258,6 +300,24 @@ fn incr_nonce(nonce: &mut [u8; 12]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eih_recovers_next_psk_hash() {
+        // Multi-user (SIP022): EIH должен расшифровываться identity-подключом обратно
+        // в BLAKE3(uPSK)[..16] — так сервер опознаёт пользователя.
+        for method in [Method::Ss2022Aes256Gcm, Method::Ss2022Aes128Gcm] {
+            let ipsk = vec![0x11u8; method.key_len()];
+            let upsk = vec![0x22u8; method.key_len()];
+            let salt = vec![0x33u8; method.salt_len()];
+            let eih = build_identity_headers(method, &[ipsk.clone()], &upsk, &salt).unwrap();
+            assert_eq!(eih.len(), 16);
+            // Сервер: расшифровать EIH identity-подключом → получить hash(uPSK)[..16].
+            let subkey = identity_subkey_2022(method, &ipsk, &salt);
+            let mut block: [u8; 16] = eih.as_slice().try_into().unwrap();
+            aes_ecb_decrypt_block(&subkey, &mut block).unwrap();
+            assert_eq!(block, psk_hash_16(&upsk));
+        }
+    }
 
     #[test]
     fn evp_key_deterministic_and_sized() {

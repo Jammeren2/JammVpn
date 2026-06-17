@@ -14,8 +14,8 @@
 //! ответ `type(1) | timestamp(8) | client_session_id(8) | padding_len(2) | … `.
 
 use super::crypto::{
-    aes_ecb_decrypt_block, aes_ecb_encrypt_block, open_nonce, seal_nonce, session_subkey_2022,
-    Method,
+    aes_ecb_decrypt_block, aes_ecb_encrypt_block, open_nonce, psk_hash_16, seal_nonce,
+    session_subkey_2022, Method,
 };
 use super::udp::{encode_address, parse_address};
 use crate::target::Target;
@@ -119,17 +119,30 @@ fn xchacha_open(psk: &[u8], nonce: &[u8; 24], ct: &[u8]) -> io::Result<Vec<u8>> 
 pub struct Ss2022UdpSession {
     method: Method,
     psk: Vec<u8>,
+    /// identity-PSK (iPSK) для multi-user (SIP022 EIH); пусто для single-user.
+    identity_psks: Vec<Vec<u8>>,
     session_id: [u8; 8],
     next_packet_id: AtomicU64,
     replay: Mutex<Replay>,
 }
 
 impl Ss2022UdpSession {
-    /// Создаёт сессию (генерирует случайный `session_id`). Ошибка — при сбое ГСЧ.
+    /// Создаёт single-user сессию (генерирует `session_id`). Ошибка — при сбое ГСЧ.
     pub fn new(method: Method, psk: Vec<u8>) -> io::Result<Self> {
+        Self::with_identity(method, psk, Vec::new())
+    }
+
+    /// Создаёт сессию с цепочкой identity-PSK (multi-user, SIP022 EIH).
+    /// `psk` — сессионная uPSK, `identity_psks` — iPSK (внешний→внутренний).
+    pub fn with_identity(
+        method: Method,
+        psk: Vec<u8>,
+        identity_psks: Vec<Vec<u8>>,
+    ) -> io::Result<Self> {
         Ok(Self {
             method,
             psk,
+            identity_psks,
             session_id: random_bytes::<8>()?,
             next_packet_id: AtomicU64::new(0),
             replay: Mutex::new(Replay::default()),
@@ -169,11 +182,36 @@ impl Ss2022UdpSession {
             header[..8].copy_from_slice(&self.session_id);
             header[8..].copy_from_slice(&packet_id.to_be_bytes());
             let nonce: [u8; 12] = header[4..16].try_into().unwrap(); // из ПЛЕЙНТЕКСТА
+            // AEAD-тело шифруется сессионной (uPSK) подключом.
             let subkey = session_subkey_2022(self.method, &self.psk, &self.session_id);
             let sealed = seal_nonce(self.method, &subkey, &nonce, &body)?;
-            aes_ecb_encrypt_block(&self.psk, &mut header)?;
-            let mut out = Vec::with_capacity(16 + sealed.len());
-            out.extend_from_slice(&header);
+
+            // multi-user (SIP022 EIH): для каждой iPSK — AES-ECB(iPSK,
+            // BLAKE3(next_psk)[..16] XOR плейнтекст-заголовок). Заголовки идут
+            // между separate header и AEAD-телом.
+            let mut id_headers = Vec::with_capacity(self.identity_psks.len() * 16);
+            for (i, ipsk) in self.identity_psks.iter().enumerate() {
+                let next = self
+                    .identity_psks
+                    .get(i + 1)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&self.psk);
+                let mut block = psk_hash_16(next);
+                for j in 0..16 {
+                    block[j] ^= header[j];
+                }
+                aes_ecb_encrypt_block(ipsk, &mut block)?;
+                id_headers.extend_from_slice(&block);
+            }
+            // separate header шифруется внешней iPSK (для single-user — самой PSK).
+            let header_key = self.identity_psks.first().map(Vec::as_slice).unwrap_or(&self.psk);
+            let mut hk = [0u8; 16];
+            hk.copy_from_slice(&header);
+            aes_ecb_encrypt_block(header_key, &mut hk)?;
+
+            let mut out = Vec::with_capacity(16 + id_headers.len() + sealed.len());
+            out.extend_from_slice(&hk);
+            out.extend_from_slice(&id_headers);
             out.extend_from_slice(&sealed);
             Ok(out)
         }

@@ -74,6 +74,20 @@ pub struct ShadowsocksConfig {
     pub method: Method,
     /// Пароль (из него выводится мастер-ключ).
     pub password: String,
+    /// TLS-транспорт (`security=tls` в ссылке): SS работает внутри TLS-туннеля.
+    /// `None` — обычный SS поверх голого TCP.
+    pub tls: Option<SsTls>,
+}
+
+/// Параметры TLS-транспорта для Shadowsocks (Xray streamSettings `security=tls`).
+#[derive(Debug, Clone)]
+pub struct SsTls {
+    /// SNI / server_name (пусто → берётся хост сервера).
+    pub sni: String,
+    /// ALPN-протоколы (например `["h2", "http/1.1"]`).
+    pub alpn: Vec<String>,
+    /// Пропускать проверку цепочки сертификата.
+    pub insecure: bool,
 }
 
 /// Настройки Trojan-исходящего.
@@ -146,15 +160,16 @@ impl Outbound {
                 let server = resolve_host(&cfg.server).await?;
                 let sock = bind_connected(server).await?;
                 if cfg.method.is_2022() {
-                    // SS-2022: PSK = base64-декодированный пароль длиной key_len.
-                    let psk = base64::decode_loose(&cfg.password)
-                        .map_err(|_| proto_err("ss2022: пароль не base64"))?;
-                    if psk.len() != cfg.method.key_len() {
-                        return Err(proto_err("ss2022: длина PSK не совпадает с методом"));
-                    }
+                    // SS-2022: пароль — base64-PSK (или цепочка iPSK:uPSK для multi-user).
+                    let (session_psk, identity_psks) =
+                        parse_ss2022_psks(&cfg.password, cfg.method.key_len())?;
                     Ok(UdpSession::Ss2022 {
                         sock,
-                        session: crate::shadowsocks::Ss2022UdpSession::new(cfg.method, psk)?,
+                        session: crate::shadowsocks::Ss2022UdpSession::with_identity(
+                            cfg.method,
+                            session_psk,
+                            identity_psks,
+                        )?,
                         target: target.clone(),
                     })
                 } else {
@@ -650,22 +665,53 @@ fn encode_ss_address(target: &Target) -> Vec<u8> {
     b
 }
 
-async fn shadowsocks_connect(cfg: &ShadowsocksConfig, target: &Target) -> io::Result<BoxedStream> {
-    let tcp = TcpStream::connect(&cfg.server).await?;
-    if cfg.method.is_2022() {
-        // SS-2022: пароль — base64-кодированный PSK длиной key_len; адрес цели —
-        // в структурном заголовке (формируется в new), флашим его сразу.
-        let psk = base64::decode_loose(&cfg.password)
-            .map_err(|_| proto_err("ss2022: пароль не base64"))?;
-        if psk.len() != cfg.method.key_len() {
+/// Разбирает пароль SS-2022 в `(session_psk, identity_psks)`.
+///
+/// Формат single-user — `base64(PSK)`; multi-user (SIP022) —
+/// `base64(iPSK0):…:base64(uPSK)`, где ПОСЛЕДНЯЯ PSK сессионная (uPSK), а
+/// предшествующие — identity-PSK (iPSK) для Extensible Identity Headers.
+/// Каждая PSK должна быть длиной `key_len`.
+pub(crate) fn parse_ss2022_psks(
+    password: &str,
+    key_len: usize,
+) -> io::Result<(Vec<u8>, Vec<Vec<u8>>)> {
+    let mut psks = Vec::new();
+    for part in password.split(':') {
+        let raw = base64::decode_loose(part).map_err(|_| proto_err("ss2022: PSK не base64"))?;
+        if raw.len() != key_len {
             return Err(proto_err("ss2022: длина PSK не совпадает с методом"));
         }
-        let mut stream = Ss2022Stream::new(tcp, cfg.method, psk, encode_ss_address(target))?;
+        psks.push(raw);
+    }
+    let session = psks.pop().ok_or_else(|| proto_err("ss2022: пустой пароль"))?;
+    Ok((session, psks)) // в psks остались identity-PSK по порядку
+}
+
+async fn shadowsocks_connect(cfg: &ShadowsocksConfig, target: &Target) -> io::Result<BoxedStream> {
+    let tcp = TcpStream::connect(&cfg.server).await?;
+    // При security=tls SS работает внутри TLS-туннеля (Xray streamSettings).
+    let inner: BoxedStream = match &cfg.tls {
+        Some(t) => Box::new(
+            crate::tlsutil::proxy_tls_connect(tcp, &t.sni, t.insecure, &t.alpn).await?,
+        ),
+        None => Box::new(tcp),
+    };
+    if cfg.method.is_2022() {
+        // SS-2022: пароль — base64-PSK (или цепочка iPSK:uPSK для multi-user);
+        // адрес цели — в структурном заголовке (формируется в new), флашим сразу.
+        let (session_psk, identity_psks) = parse_ss2022_psks(&cfg.password, cfg.method.key_len())?;
+        let mut stream = Ss2022Stream::new(
+            inner,
+            cfg.method,
+            session_psk,
+            identity_psks,
+            encode_ss_address(target),
+        )?;
         stream.flush().await?;
         Ok(Box::new(stream))
     } else {
         let master = evp_bytes_to_key(cfg.password.as_bytes(), cfg.method.key_len());
-        let mut stream = ShadowsocksStream::new(tcp, cfg.method, master);
+        let mut stream = ShadowsocksStream::new(inner, cfg.method, master);
         stream.write_all(&encode_ss_address(target)).await?;
         Ok(Box::new(stream))
     }

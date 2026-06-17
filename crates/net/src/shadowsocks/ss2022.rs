@@ -6,7 +6,7 @@
 //! seal(первый payload[len]) | чанки`. После заголовка payload — стандартные
 //! AEAD-чанки `[seal(len:2)][seal(data)]`. nonce — счётчик с нуля (на направление).
 
-use super::crypto::{session_subkey_2022, Crypto, Method};
+use super::crypto::{build_identity_headers, session_subkey_2022, Crypto, Method};
 use std::io;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
@@ -47,8 +47,16 @@ impl<S> Ss2022Stream<S> {
     /// fixed/variable) в `wbuf` — вызывающий должен сделать `flush`, чтобы сервер
     /// получил запрос (важно для server-speaks-first протоколов).
     ///
-    /// `psk` — PSK (key_len байт), `addr` — закодированный SOCKS-адрес цели.
-    pub fn new(inner: S, method: Method, psk: Vec<u8>, addr: Vec<u8>) -> io::Result<Self> {
+    /// `psk` — сессионная PSK (uPSK, key_len байт); `identity_psks` — цепочка
+    /// identity-PSK (iPSK) для multi-user (SIP022 EIH), пустая для single-user;
+    /// `addr` — закодированный SOCKS-адрес цели.
+    pub fn new(
+        inner: S,
+        method: Method,
+        psk: Vec<u8>,
+        identity_psks: Vec<Vec<u8>>,
+        addr: Vec<u8>,
+    ) -> io::Result<Self> {
         let mut salt = vec![0u8; method.salt_len()];
         getrandom::getrandom(&mut salt).map_err(|e| io::Error::other(format!("getrandom: {e}")))?;
         let subkey = session_subkey_2022(method, &psk, &salt);
@@ -65,6 +73,10 @@ impl<S> Ss2022Stream<S> {
 
         let mut wbuf = Vec::new();
         wbuf.extend_from_slice(&salt);
+        // multi-user: Extensible Identity Headers идут сразу после соли, до AEAD.
+        if !identity_psks.is_empty() {
+            wbuf.extend_from_slice(&build_identity_headers(method, &identity_psks, &psk, &salt)?);
+        }
         wbuf.extend_from_slice(&send.seal(&fixed)?);
         wbuf.extend_from_slice(&send.seal(&variable)?);
 
@@ -420,7 +432,7 @@ mod tests {
 
             let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
             let mut stream =
-                Ss2022Stream::new(tcp, method, psk, ss_addr("example.com", 443)).unwrap();
+                Ss2022Stream::new(tcp, method, psk, Vec::new(), ss_addr("example.com", 443)).unwrap();
             stream.flush().await.unwrap();
             stream.write_all(b"hello ss2022").await.unwrap();
 
@@ -469,7 +481,7 @@ mod tests {
         });
 
         let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        let mut stream = Ss2022Stream::new(tcp, method, psk, ss_addr("h", 1)).unwrap();
+        let mut stream = Ss2022Stream::new(tcp, method, psk, Vec::new(), ss_addr("h", 1)).unwrap();
         stream.flush().await.unwrap();
         stream.write_all(b"x").await.unwrap();
         let mut buf = [0u8; 1];

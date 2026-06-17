@@ -4,7 +4,8 @@
 //! из распарсенной ссылки/подписки получить готовый к подключению [`Outbound`].
 
 use crate::outbound::{
-    HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, TrojanConfig, VlessConfig,
+    HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, SsTls, Transport, TrojanConfig,
+    VlessConfig,
 };
 use crate::reality_transport::RealityTransport;
 use crate::shadowsocks::Method;
@@ -59,10 +60,37 @@ pub fn outbound_from_profile(p: &ServerProfile) -> Result<Outbound, ProfileError
                 .param("password")
                 .ok_or(ProfileError::MissingField("password"))?
                 .to_string();
+            // TLS-транспорт: SS внутри TLS-туннеля (Xray streamSettings security=tls).
+            let tls = if p.param("security") == Some("tls") {
+                let sni = p
+                    .param("sni")
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&p.address)
+                    .to_string();
+                let alpn = p
+                    .param("alpn")
+                    .map(|s| {
+                        s.split(',')
+                            .map(|a| a.trim().to_string())
+                            .filter(|a| !a.is_empty())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                // Цепочку сертификата у proxy-TLS обычно не проверяют (пустой SNI/IP,
+                // самоподписанные) — реальную защиту даёт сам SS. По умолчанию insecure.
+                let insecure = !matches!(
+                    p.param("allow_insecure").or_else(|| p.param("insecure")),
+                    Some("0") | Some("false")
+                );
+                Some(SsTls { sni, alpn, insecure })
+            } else {
+                None
+            };
             Ok(Outbound::Shadowsocks(ShadowsocksConfig {
                 server,
                 method,
                 password,
+                tls,
             }))
         }
         ProtocolKind::Vless => {

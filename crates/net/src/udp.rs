@@ -400,6 +400,7 @@ mod tests {
                 server: ss_addr.to_string(),
                 method,
                 password: "testpass".into(),
+                tls: None,
             },
         )));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -469,6 +470,7 @@ mod tests {
                 server: ss_addr.to_string(),
                 method,
                 password,
+                tls: None,
             },
         )));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
