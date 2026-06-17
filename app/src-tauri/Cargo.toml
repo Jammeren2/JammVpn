@@ -26,3 +26,5 @@ tokio = { version = "1", features = [
     "sync",
 ] }
 jammvpn-cli = { path = "../../crates/cli" }
+# Нативный диалог «Сохранить как» для экспорта .conf.
+tauri-plugin-dialog = "2"

@@ -1031,6 +1031,30 @@ button.danger:hover {
 .np-act[data-export]:hover {
   background: var(--accent, #4c8dff);
 }
+.admin-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  background: rgba(217, 83, 79, 0.16);
+  border-bottom: 1px solid rgba(217, 83, 79, 0.4);
+  color: #f0c9c7;
+  font-size: 13px;
+}
+.admin-banner button {
+  padding: 6px 14px;
+  border-radius: 8px;
+  background: #d9534f;
+  border: none;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+.admin-banner button:hover {
+  background: #c9302c;
+}
 .splash {
   position: fixed;
   inset: 0;

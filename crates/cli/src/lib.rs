@@ -715,6 +715,23 @@ pub fn export_node_conf(name: &str) -> Result<String, String> {
     Ok(file.to_string_lossy().to_string())
 }
 
+/// Записывает `.conf` WG/AmneziaWG-узла в выбранный путь (диалог «Сохранить как»).
+pub fn export_node_conf_to(name: &str, path: &str) -> Result<(), String> {
+    let cfg = load();
+    let node = cfg
+        .servers
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("узел не найден: {name}"))?;
+    if !matches!(
+        node.protocol,
+        jammvpn_core::ProtocolKind::Wireguard | jammvpn_core::ProtocolKind::AmneziaWg
+    ) {
+        return Err("экспорт .conf доступен только для WireGuard/AmneziaWG".into());
+    }
+    std::fs::write(path, node_to_wg_conf(node)).map_err(|e| e.to_string())
+}
+
 /// Собирает текст `.conf` (WireGuard/AmneziaWG) из параметров узла.
 fn node_to_wg_conf(p: &ServerProfile) -> String {
     let mut s = String::from("[Interface]\n");
@@ -1602,6 +1619,12 @@ pub fn local_wg_export_conf() -> Result<String, String> {
     let file = dir.join("jammvpn-local-wg.conf");
     std::fs::write(&file, conf).map_err(|e| e.to_string())?;
     Ok(file.to_string_lossy().to_string())
+}
+
+/// Записывает клиентский `.conf` локального WG в выбранный путь.
+pub fn local_wg_export_conf_to(path: &str) -> Result<(), String> {
+    let conf = local_wg_client_conf()?;
+    std::fs::write(path, conf).map_err(|e| e.to_string())
 }
 
 /// Запущен ли процесс от администратора.

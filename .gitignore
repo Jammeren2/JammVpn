@@ -6,8 +6,8 @@ NOTES.md
 NOTES.local.md
 TODO.local.md
 
-# Снапшот фронта для передачи дизайнеру (генерируется из app/ui).
-/For designer/
+# Снапшот фронта для передачи дизайнеру (копия app/ui).
+/для дизайнера/
 
 # ─── Rust ──────────────────────────────────────────────────────
 /target/
@@ -57,6 +57,3 @@ config.local.*
 Thumbs.db
 Desktop.ini
 .DS_Store
-
-For designer
-From designer

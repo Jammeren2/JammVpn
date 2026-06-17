@@ -208,15 +208,35 @@ async function saveConnection() {
   }
 }
 
-// Экспорт узла (WG/AmneziaWG) в .conf на диск. Сообщение — в строку статуса узлов.
+// Безопасное имя файла из имени узла.
+function safeFileName(name) {
+  return (name || "node").replace(/[^a-zA-Z0-9._-]+/g, "_");
+}
+// Диалог «Сохранить как» (плагин dialog). null — отмена/недоступен.
+async function pickSavePath(defaultName) {
+  const dialog = window.__TAURI__ && window.__TAURI__.dialog;
+  if (!dialog || !dialog.save) return undefined; // плагин недоступен
+  return await dialog.save({
+    defaultPath: defaultName,
+    filters: [{ name: "WireGuard config", extensions: ["conf"] }],
+  });
+}
+
+// Экспорт узла (WG/AmneziaWG) в .conf — с диалогом выбора места.
 async function exportNode(name) {
   const msg = $("nodes-msg");
   try {
-    const path = await invoke("export_node_conf", { name });
-    if (msg) {
-      msg.textContent = "конфиг сохранён: " + path;
-      msg.className = "hint ok";
+    const path = await pickSavePath(safeFileName(name) + ".conf");
+    if (path === undefined) {
+      // плагин недоступен — фолбэк в каталог конфига
+      const p = await invoke("export_node_conf", { name });
+      if (msg) msg.textContent = "конфиг сохранён: " + p;
+    } else {
+      if (!path) return; // отмена
+      await invoke("export_node_conf_to", { name, path });
+      if (msg) msg.textContent = "конфиг сохранён: " + path;
     }
+    if (msg) msg.className = "hint ok";
   } catch (e) {
     if (msg) {
       msg.textContent = "ошибка экспорта: " + e;
@@ -287,8 +307,15 @@ async function exportLocalWgConf() {
   const hint = $("lwg-hint");
   hint.className = "hint";
   try {
-    const path = await invoke("local_wg_export_conf");
-    hint.textContent = "клиентский .conf сохранён: " + path;
+    const path = await pickSavePath("jammvpn-local-wg.conf");
+    if (path === undefined) {
+      const p = await invoke("local_wg_export_conf"); // фолбэк
+      hint.textContent = "клиентский .conf сохранён: " + p;
+    } else {
+      if (!path) return; // отмена
+      await invoke("local_wg_export_conf_to", { path });
+      hint.textContent = "клиентский .conf сохранён: " + path;
+    }
   } catch (e) {
     hint.textContent = "ошибка экспорта: " + e;
     hint.className = "hint err";
@@ -758,6 +785,8 @@ async function loadAdminState() {
   }
   const btn = $("btn-split-elevate");
   if (btn) btn.style.display = admin ? "none" : "";
+  const banner = $("admin-banner");
+  if (banner) banner.style.display = admin ? "none" : "flex";
   if (!admin) {
     const msg = $("split-msg");
     if (msg) {
@@ -1110,6 +1139,7 @@ async function init() {
   $("btn-lwg-export").addEventListener("click", exportLocalWgConf);
   $("btn-lwg-qr").addEventListener("click", showLocalWgQr);
   $("btn-split-elevate").addEventListener("click", relaunchAsAdmin);
+  $("btn-admin-relaunch").addEventListener("click", relaunchAsAdmin);
   $("btn-log-refresh").addEventListener("click", loadLog);
   $("btn-log-clear").addEventListener("click", clearLog);
   $("log-lines").addEventListener("change", loadLog);

@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Возможности основного окна JammVPN",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default"]
 }

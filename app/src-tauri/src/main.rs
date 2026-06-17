@@ -76,6 +76,18 @@ fn export_vless_link(name: String) -> Result<String, String> {
     ctl::export_vless_link(&name)
 }
 
+/// Записать `.conf` узла в выбранный путь (после диалога «Сохранить как»).
+#[tauri::command]
+fn export_node_conf_to(name: String, path: String) -> Result<(), String> {
+    ctl::export_node_conf_to(&name, &path)
+}
+
+/// Записать клиентский `.conf` локального WG в выбранный путь.
+#[tauri::command]
+fn local_wg_export_conf_to(path: String) -> Result<(), String> {
+    ctl::local_wg_export_conf_to(&path)
+}
+
 #[tauri::command]
 async fn update_subscriptions() -> Result<Vec<ctl::SubUpdate>, String> {
     ctl::update_subscriptions().await
@@ -480,6 +492,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(ProxyState::default())
         .manage(SplitState::default())
         .manage(SysProxyState::default())
@@ -536,6 +549,8 @@ fn main() {
             download_geo,
             test_node_latency,
             export_vless_link,
+            export_node_conf_to,
+            local_wg_export_conf_to,
             list_subscriptions,
             add_subscription,
             remove_subscription,
