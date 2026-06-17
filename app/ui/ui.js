@@ -127,6 +127,8 @@
       const list = rows();
       const own = list.filter((r) => !r.group);
       const groups = new Map();
+      // Сначала — все подписки (даже пустые, чтобы было что обновить).
+      for (const g of Object.keys(window.SUB_URLS || {})) groups.set(g, []);
       for (const r of list) {
         if (!r.group) continue;
         if (!groups.has(r.group)) groups.set(r.group, []);
