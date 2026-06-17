@@ -1128,6 +1128,34 @@ button.mini:hover:not(:disabled) {
   border-color: var(--accent, #4c8dff);
   color: #fff;
 }
+.hero-speeds {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin: 10px 0 2px;
+  cursor: pointer;
+}
+.hero-speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 0.15s;
+}
+.hero-speeds:hover .hero-speed {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+.hero-speed.down {
+  color: #57d38c;
+}
+.hero-speed.up {
+  color: #4c8dff;
+}
 .hero-modes {
   display: flex;
   gap: 8px;

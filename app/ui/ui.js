@@ -248,11 +248,43 @@
     let sortKey = "down"; // proc|dest|down — сортировка
     let paused = false;
 
+    // Состояние для расчёта скорости (дельта байт по соединениям между опросами).
+    let prevBytes = new Map(); // id -> {up, down}
+    let prevT = Date.now();
+
     function fmtBytes(n) {
       if (!n) return "—";
       if (n < 1024) return n + " Б";
       if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " КБ";
       return (n / 1024 / 1024).toFixed(1) + " МБ";
+    }
+    function fmtSpeed(bps) {
+      return fmtBytes(Math.round(bps)).replace("—", "0 Б") + "/с";
+    }
+
+    // Скорость = прирост байт текущих соединений за интервал; обновляет бейджи
+    // на главной (↓ приём / ↑ отправка).
+    function updateSpeeds(list) {
+      const now = Date.now();
+      const dt = Math.max(0.2, (now - prevT) / 1000);
+      let dUp = 0,
+        dDown = 0;
+      const cur = new Map();
+      for (const c of list) {
+        cur.set(c.id, { up: c.up, down: c.down });
+        const p = prevBytes.get(c.id);
+        if (p) {
+          dUp += Math.max(0, c.up - p.up);
+          dDown += Math.max(0, c.down - p.down);
+        } else {
+          dUp += c.up;
+          dDown += c.down;
+        }
+      }
+      prevBytes = cur;
+      prevT = now;
+      setText("hero-up", "↑ " + fmtSpeed(dUp / dt));
+      setText("hero-down", "↓ " + fmtSpeed(dDown / dt));
     }
 
     function row(c) {
@@ -289,12 +321,23 @@
     }
 
     async function poll() {
-      if (paused || !invoke) return;
+      if (!invoke) return;
       try {
-        render(await invoke("list_connections"));
+        const list = await invoke("list_connections");
+        updateSpeeds(list); // скорость обновляем всегда (даже на паузе списка)
+        if (!paused) render(list);
       } catch (_) {
         /* прокси не запущен / нет данных */
       }
+    }
+
+    // Клик по бейджам скорости на главной → вкладка «Статистика».
+    const heroSpeeds = document.getElementById("hero-speeds");
+    if (heroSpeeds) {
+      heroSpeeds.addEventListener("click", () => {
+        const t = document.querySelector('.tab[data-tab="stats"]');
+        if (t) t.click();
+      });
     }
 
     if (!invoke) {
