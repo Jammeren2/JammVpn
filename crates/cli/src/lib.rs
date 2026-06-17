@@ -585,6 +585,76 @@ pub fn clear_subscription_nodes() -> Result<usize, String> {
 /// Репозиторий релизов на GitHub (для проверки/скачивания обновлений).
 const RELEASE_REPO: &str = "Jammeren2/JammVpn";
 
+/// GUID клиента EdgeUpdate для Evergreen WebView2 Runtime.
+const WEBVIEW2_GUID: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+
+/// Проверяет, доступен ли WebView2 Runtime текущему пользователю (системная
+/// установка в HKLM или установка текущего пользователя в HKCU). Установка под
+/// ДРУГИМ пользователем (чужой HKCU) намеренно не считается — Tauri её не увидит.
+pub fn webview2_present() -> bool {
+    let keys = [
+        format!("HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{WEBVIEW2_GUID}"),
+        format!("HKLM\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{WEBVIEW2_GUID}"),
+        format!("HKCU\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{WEBVIEW2_GUID}"),
+    ];
+    for k in keys {
+        let out = std::process::Command::new("reg")
+            .args(["query", &k, "/v", "pv"])
+            .output();
+        if let Ok(out) = out {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                // pv присутствует и не нулевая версия (ключ-«заглушка»).
+                if s.contains("pv") && !s.contains("0.0.0.0") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Гарантирует наличие WebView2 Runtime. Если есть — ничего не делает (`Ok(true)`).
+/// Если нет — скачивает официальный Microsoft Evergreen Bootstrapper и ставит его
+/// тихо, затем перепроверяет. Блокирующая (вызывать ДО создания окна GUI).
+///
+/// Установщик — официальный (go.microsoft.com), это штатный способ доставки
+/// WebView2 (как `downloadBootstrapper` в Tauri). От админа ставит системно, без
+/// прав — для текущего пользователя; в обоих случаях рантайм становится доступен.
+pub fn ensure_webview2() -> Result<bool, String> {
+    if webview2_present() {
+        return Ok(true);
+    }
+    log_line("WebView2 Runtime не найден — скачиваю официальный установщик Microsoft");
+    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let bytes = rt
+        .block_on(jammvpn_net::subscription::fetch_bytes(
+            "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
+            std::time::Duration::from_secs(180),
+        ))
+        .map_err(|e| format!("скачивание WebView2: {e}"))?;
+    if bytes.len() < 100_000 {
+        return Err(format!("установщик WebView2 подозрительно мал ({} байт)", bytes.len()));
+    }
+    let path = std::env::temp_dir().join("MicrosoftEdgeWebview2Setup.exe");
+    std::fs::write(&path, &bytes).map_err(|e| format!("запись установщика: {e}"))?;
+    log_line("устанавливаю WebView2 Runtime (тихий режим)…");
+    let status = std::process::Command::new(&path)
+        .args(["/silent", "/install"])
+        .status()
+        .map_err(|e| format!("запуск установщика WebView2: {e}"))?;
+    let _ = std::fs::remove_file(&path);
+    if !status.success() {
+        return Err(format!(
+            "установщик WebView2 завершился с кодом {:?}",
+            status.code()
+        ));
+    }
+    let ok = webview2_present();
+    log_line(&format!("WebView2 после установки доступен: {ok}"));
+    Ok(ok)
+}
+
 /// Информация об обновлении (для сплеша).
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateInfo {

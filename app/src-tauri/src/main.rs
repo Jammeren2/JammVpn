@@ -515,6 +515,14 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn main() {
+    // Гарантируем WebView2 Runtime ДО создания окна: на ПК без него Tauri иначе
+    // падает с «Could not find the WebView2 Runtime». Если рантайма нет —
+    // тихо ставим официальный установщик Microsoft; если есть — используем его.
+    match ctl::ensure_webview2() {
+        Ok(true) => {}
+        Ok(false) => ctl::log_line("WebView2 поставить не удалось — окно может не открыться"),
+        Err(e) => ctl::log_line(&format!("проверка/установка WebView2: {e}")),
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(ProxyState::default())
