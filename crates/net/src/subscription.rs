@@ -94,6 +94,104 @@ async fn fetch_inner(url: &str) -> io::Result<String> {
     }
 }
 
+/// Скачивает бинарный ресурс, следуя редиректам (для geo-баз с GitHub-релизов).
+pub async fn fetch_bytes(url: &str, timeout: Duration) -> io::Result<Vec<u8>> {
+    let mut current = url.to_string();
+    for _ in 0..6 {
+        let resp = tokio::time::timeout(timeout, fetch_raw(&current))
+            .await
+            .map_err(|_| io::Error::other("таймаут загрузки"))??;
+        match resp.status {
+            200 => return Ok(resp.body),
+            301 | 302 | 303 | 307 | 308 => {
+                let loc = resp
+                    .location
+                    .ok_or_else(|| io::Error::other("редирект без Location"))?;
+                current = if loc.starts_with("http") {
+                    loc
+                } else {
+                    // относительный Location — приклеиваем к схеме+хосту.
+                    let (sch, host, _port, _) = parse_url(&current)?;
+                    let pfx = match sch {
+                        Scheme::Https => "https://",
+                        Scheme::Http => "http://",
+                    };
+                    format!("{pfx}{host}{loc}")
+                };
+            }
+            s => return Err(io::Error::other(format!("HTTP статус {s}"))),
+        }
+    }
+    Err(io::Error::other("слишком много редиректов"))
+}
+
+/// Сырой ответ: статус, Location (для редиректа), тело (бинарь).
+struct RawResp {
+    status: u16,
+    location: Option<String>,
+    body: Vec<u8>,
+}
+
+async fn fetch_raw(url: &str) -> io::Result<RawResp> {
+    let (scheme, host, port, path) = parse_url(url)?;
+    let tcp = TcpStream::connect((host.as_str(), port)).await?;
+    match scheme {
+        Scheme::Http => exchange_raw(tcp, &host, &path).await,
+        Scheme::Https => {
+            let connector = TlsConnector::from(verified_client_config());
+            let name = ServerName::try_from(host.clone())
+                .map_err(|_| io::Error::other("некорректный SNI"))?;
+            let tls = connector.connect(name, tcp).await?;
+            exchange_raw(tls, &host, &path).await
+        }
+    }
+}
+
+async fn exchange_raw<S>(mut stream: S, host: &str, path: &str) -> io::Result<RawResp>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: jammvpn\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).await?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await?;
+    let sep = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| io::Error::other("нет заголовков HTTP"))?;
+    let head = String::from_utf8_lossy(&raw[..sep]);
+    let body = &raw[sep + 4..];
+    let mut lines = head.lines();
+    let status = lines
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse::<u16>().ok())
+        .unwrap_or(0);
+    let mut location = None;
+    let mut chunked = false;
+    for l in lines {
+        let ll = l.to_ascii_lowercase();
+        if let Some(v) = ll.strip_prefix("location:") {
+            // берём из оригинальной строки (без lowercase) значение.
+            location = Some(l[l.find(':').unwrap() + 1..].trim().to_string());
+            let _ = v;
+        }
+        if ll.starts_with("transfer-encoding:") && ll.contains("chunked") {
+            chunked = true;
+        }
+    }
+    let body = if chunked { dechunk(body)? } else { body.to_vec() };
+    Ok(RawResp {
+        status,
+        location,
+        body,
+    })
+}
+
 /// Один HTTP/1.1 обмен (GET с `Connection: close`), возвращает тело.
 async fn http_exchange<S>(mut stream: S, host: &str, path: &str) -> io::Result<String>
 where

@@ -600,6 +600,24 @@ async function saveGeo() {
   }
 }
 
+async function downloadGeo() {
+  const msg = $("geo-msg");
+  const btn = $("btn-geo-download");
+  btn.disabled = true;
+  msg.textContent = "загрузка geo-баз… (несколько МБ)";
+  msg.className = "hint";
+  try {
+    msg.textContent = await invoke("download_geo");
+    msg.className = "hint ok";
+    await loadGeo();
+  } catch (e) {
+    msg.textContent = "ошибка загрузки: " + e;
+    msg.className = "hint err";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function loadAutostart() {
   try {
     $("autostart").checked = await invoke("autostart_status");
@@ -1048,6 +1066,7 @@ async function init() {
   $("btn-save-settings").addEventListener("click", saveSettings);
   $("btn-add-sub").addEventListener("click", addSub);
   $("btn-save-geo").addEventListener("click", saveGeo);
+  $("btn-geo-download").addEventListener("click", downloadGeo);
   $("btn-rule-save").addEventListener("click", saveRule);
   $("btn-rule-cancel").addEventListener("click", resetRuleForm);
   $("r-action").addEventListener("change", updateTagVisibility);

@@ -760,6 +760,42 @@ pub fn set_geo_paths(geosite: Option<String>, geoip: Option<String>) -> Result<(
     save_config(&path, &cfg, store.as_ref())
 }
 
+/// Скачивает стандартные geo-базы (Loyalsoldier/v2ray-rules-dat) рядом с
+/// конфигом и прописывает пути. Возвращает сообщение с размерами.
+pub async fn download_geo() -> Result<String, String> {
+    const BASE: &str =
+        "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download";
+    let dir = config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let mut paths: Vec<(String, String)> = Vec::new(); // (имя, путь)
+    let mut sizes = Vec::new();
+    for name in ["geosite.dat", "geoip.dat"] {
+        log_line(&format!("geo: загрузка {name}…"));
+        let bytes = jammvpn_net::subscription::fetch_bytes(
+            &format!("{BASE}/{name}"),
+            std::time::Duration::from_secs(90),
+        )
+        .await
+        .map_err(|e| format!("{name}: {e}"))?;
+        if bytes.len() < 1024 {
+            return Err(format!("{name}: подозрительно мал ({} Б)", bytes.len()));
+        }
+        let file = dir.join(name);
+        std::fs::write(&file, &bytes).map_err(|e| e.to_string())?;
+        sizes.push(format!("{name} {} КБ", bytes.len() / 1024));
+        paths.push((name.to_string(), file.to_string_lossy().to_string()));
+        log_line(&format!("geo: {name} сохранён ({} КБ)", bytes.len() / 1024));
+    }
+    let geosite = paths.iter().find(|(n, _)| n == "geosite.dat").map(|(_, p)| p.clone());
+    let geoip = paths.iter().find(|(n, _)| n == "geoip.dat").map(|(_, p)| p.clone());
+    set_geo_paths(geosite, geoip)?;
+    Ok(format!("geo-базы загружены: {}", sizes.join(", ")))
+}
+
 // --- Правила маршрутизации (CRUD + конвертеры core::Rule ↔ RuleInfo) ---
 
 fn domain_to_string(d: &DomainRule) -> String {

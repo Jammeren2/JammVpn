@@ -251,6 +251,12 @@ fn clear_subscription_nodes() -> Result<usize, String> {
     ctl::clear_subscription_nodes()
 }
 
+/// Скачать стандартные geo-базы и прописать пути.
+#[tauri::command]
+async fn download_geo() -> Result<String, String> {
+    ctl::download_geo().await
+}
+
 /// Версия приложения.
 #[tauri::command]
 fn app_version() -> String {
@@ -515,6 +521,7 @@ fn main() {
             check_update,
             update_one_subscription,
             clear_subscription_nodes,
+            download_geo,
             list_subscriptions,
             add_subscription,
             remove_subscription,
