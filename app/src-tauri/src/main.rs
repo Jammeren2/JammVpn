@@ -64,6 +64,18 @@ async fn test_latencies() -> Vec<ctl::LatencyResult> {
     ctl::test_latencies(None).await
 }
 
+/// Тест задержки одного узла.
+#[tauri::command]
+async fn test_node_latency(name: String) -> ctl::LatencyResult {
+    ctl::test_node_latency(&name).await
+}
+
+/// `vless://`-ссылка узла (для копирования).
+#[tauri::command]
+fn export_vless_link(name: String) -> Result<String, String> {
+    ctl::export_vless_link(&name)
+}
+
 #[tauri::command]
 async fn update_subscriptions() -> Result<Vec<ctl::SubUpdate>, String> {
     ctl::update_subscriptions().await
@@ -522,6 +534,8 @@ fn main() {
             update_one_subscription,
             clear_subscription_nodes,
             download_geo,
+            test_node_latency,
+            export_vless_link,
             list_subscriptions,
             add_subscription,
             remove_subscription,

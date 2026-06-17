@@ -384,6 +384,106 @@ pub fn import_config(text: &str) -> Result<String, String> {
 
 /// Тест задержек всех узлов (по умолчанию generate_204), отсортировано по
 /// возрастанию задержки (ошибки — в конце).
+/// Тест задержки одного узла по имени.
+pub async fn test_node_latency(name: &str) -> LatencyResult {
+    let cfg = load();
+    let engine = Engine::from_config(&cfg);
+    let ob = match engine.outbounds().get(name) {
+        Some(o) => o.clone(),
+        None => {
+            return LatencyResult {
+                name: name.to_string(),
+                latency_ms: None,
+                error: Some("узел не найден".into()),
+            }
+        }
+    };
+    let mut one = std::collections::HashMap::new();
+    one.insert(name.to_string(), ob);
+    let results =
+        urltest::test_outbounds(&one, urltest::DEFAULT_TEST_URL, urltest::DEFAULT_TIMEOUT).await;
+    match results.into_iter().next() {
+        Some((n, res)) => LatencyResult {
+            name: n,
+            latency_ms: res.as_ref().ok().map(|d| d.as_millis() as u64),
+            error: res.err().map(|e| e.to_string()),
+        },
+        None => LatencyResult {
+            name: name.to_string(),
+            latency_ms: None,
+            error: Some("нет результата".into()),
+        },
+    }
+}
+
+/// Строит `vless://`-ссылку из узла (для копирования; в т.ч. узлы подписки).
+fn node_to_vless_link(p: &ServerProfile) -> Option<String> {
+    if p.protocol != jammvpn_core::ProtocolKind::Vless {
+        return None;
+    }
+    let uuid = p.param("uuid")?;
+    let keys = [
+        "type",
+        "security",
+        "encryption",
+        "flow",
+        "sni",
+        "pbk",
+        "sid",
+        "fp",
+        "host",
+        "path",
+        "alpn",
+        "serviceName",
+    ];
+    let mut q = Vec::new();
+    for k in keys {
+        if let Some(v) = p.param(k) {
+            if !v.is_empty() {
+                q.push(format!("{k}={}", pct(v)));
+            }
+        }
+    }
+    let query = if q.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", q.join("&"))
+    };
+    let frag = if p.name.is_empty() {
+        String::new()
+    } else {
+        format!("#{}", pct(&p.name))
+    };
+    Some(format!(
+        "vless://{uuid}@{}:{}{query}{frag}",
+        p.address, p.port
+    ))
+}
+
+/// Percent-encoding значения (всё, кроме unreserved RFC 3986).
+fn pct(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// `vless://`-ссылка узла по имени (для копирования). Ошибка — если не VLESS.
+pub fn export_vless_link(name: &str) -> Result<String, String> {
+    let cfg = load();
+    let node = cfg
+        .servers
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("узел не найден: {name}"))?;
+    node_to_vless_link(node).ok_or_else(|| "ссылка vless:// доступна только для VLESS-узлов".into())
+}
+
 pub async fn test_latencies(url: Option<&str>) -> Vec<LatencyResult> {
     let url = url.unwrap_or(urltest::DEFAULT_TEST_URL);
     let cfg = load();
@@ -710,9 +810,15 @@ pub fn add_subscription(
 
 /// Удаляет подписку по URL (чистая логика): была ли удалена.
 fn apply_remove_subscription(cfg: &mut AppConfig, url: &str) -> bool {
-    let before = cfg.subscriptions.len();
+    let Some(sub) = cfg.subscriptions.iter().find(|s| s.url == url).cloned() else {
+        return false;
+    };
+    let tag = jammvpn_net::subscription::sub_tag(&sub);
     cfg.subscriptions.retain(|s| s.url != url);
-    cfg.subscriptions.len() != before
+    // Удаляем и узлы этой подписки (по тегу).
+    cfg.servers
+        .retain(|s| !s.tags.iter().any(|t| t == &tag));
+    true
 }
 
 /// Удаляет подписку по URL (узлы, уже импортированные из неё, остаются —

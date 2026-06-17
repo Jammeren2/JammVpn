@@ -102,14 +102,21 @@
         !auto && r.lat && r.lat !== "—"
           ? `<span class="np-lat ${r.latClass}">${esc(r.lat)}</span>`
           : "";
-      // Действия только у своих ключей (не из подписки): экспорт .conf (WG) + удаление.
+      // Действия: тест задержки (всем), копировать vless:// (VLESS), экспорт
+      // .conf + удаление (только свои ключи, не из подписки).
       let acts = "";
-      if (!auto && !r.group) {
+      if (!auto) {
         const isWg = /wireguard|amnezia|awg/i.test(r.proto);
-        const exp = isWg
-          ? `<span class="np-act" data-export="${esc(r.name)}" title="Сохранить .conf">⤓</span>`
-          : "";
-        acts = `<span class="np-acts">${exp}<span class="np-act" data-del="${esc(r.name)}" title="Удалить">✕</span></span>`;
+        const isVless = /vless/i.test(r.proto);
+        let inner = `<span class="np-act" data-ping="${esc(r.name)}" title="Тест задержки">⚡</span>`;
+        if (isVless)
+          inner += `<span class="np-act" data-vless="${esc(r.name)}" title="Копировать vless://">⧉</span>`;
+        if (!r.group) {
+          if (isWg)
+            inner += `<span class="np-act" data-export="${esc(r.name)}" title="Сохранить .conf">⤓</span>`;
+          inner += `<span class="np-act" data-del="${esc(r.name)}" title="Удалить">✕</span>`;
+        }
+        acts = `<span class="np-acts">${inner}</span>`;
       }
       return `<button type="button" class="np-item${auto ? " np-auto" : ""}${
         selected ? " selected" : ""
@@ -145,6 +152,7 @@
             <span class="np-gname">📡 ${esc(g)}</span>
             <span class="np-gcount">${gl.length}</span>
             <span class="np-refresh" data-refresh="${esc(g)}" title="Обновить подписку">⟳</span>
+            <span class="np-refresh" data-delsub="${esc(g)}" title="Удалить подписку">✕</span>
           </button>`;
         if (open) for (const r of gl) html += item(r, val === r.value, false);
         html += `</div>`;
@@ -162,7 +170,26 @@
     }
 
     picker.addEventListener("click", async (e) => {
-      const refresh = e.target.closest(".np-refresh");
+      // Удалить подписку (с подтверждением).
+      const delsub = e.target.closest(".np-refresh[data-delsub]");
+      if (delsub) {
+        e.stopPropagation();
+        const g = delsub.dataset.delsub;
+        const url = (window.SUB_URLS || {})[g];
+        if (url && invoke) {
+          const ok = window.customConfirm
+            ? await window.customConfirm(`Удалить подписку «${g}» и её узлы?`)
+            : true;
+          if (!ok) return;
+          try {
+            await invoke("remove_subscription", { url });
+          } catch (err) {}
+          if (window.refreshNodes) await window.refreshNodes();
+        }
+        return;
+      }
+      // Обновить подписку.
+      const refresh = e.target.closest(".np-refresh[data-refresh]");
       if (refresh) {
         e.stopPropagation();
         const url = (window.SUB_URLS || {})[refresh.dataset.refresh];
@@ -173,6 +200,44 @@
           } catch (err) {}
           if (window.refreshNodes) await window.refreshNodes();
         }
+        return;
+      }
+      // Тест задержки одного узла.
+      const ping = e.target.closest(".np-act[data-ping]");
+      if (ping && invoke) {
+        e.stopPropagation();
+        const name = ping.dataset.ping;
+        ping.textContent = "…";
+        try {
+          const r = await invoke("test_node_latency", { name });
+          // Обновляем ячейку задержки в скрытой таблице → перерисует пикер.
+          const cell = nodesBody
+            ? [...nodesBody.querySelectorAll(".lat")].find(
+                (c) => c.dataset.name === name
+              )
+            : null;
+          if (cell) {
+            if (r.latency_ms != null) {
+              cell.textContent = r.latency_ms + " ms";
+              cell.className = "lat ok";
+            } else {
+              cell.textContent = "ошибка";
+              cell.className = "lat err";
+            }
+          }
+        } catch (err) {}
+        return;
+      }
+      // Копировать vless://.
+      const vl = e.target.closest(".np-act[data-vless]");
+      if (vl && invoke) {
+        e.stopPropagation();
+        try {
+          const link = await invoke("export_vless_link", { name: vl.dataset.vless });
+          if (navigator.clipboard) await navigator.clipboard.writeText(link);
+          vl.textContent = "✓";
+          setTimeout(() => (vl.textContent = "⧉"), 1000);
+        } catch (err) {}
         return;
       }
       const exp = e.target.closest(".np-act[data-export]");

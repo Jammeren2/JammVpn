@@ -997,6 +997,18 @@ button.mini:hover:not(:disabled) {
   background: var(--accent, #4c8dff);
   color: #fff;
 }
+/* Ключи подписки — с отступом слева (как вложенный список). */
+.np-group .np-item {
+  padding-left: 30px;
+}
+button.danger {
+  background: #d9534f;
+  border-color: #d9534f;
+  color: #fff;
+}
+button.danger:hover {
+  background: #c9302c;
+}
 .np-acts {
   display: flex;
   gap: 4px;

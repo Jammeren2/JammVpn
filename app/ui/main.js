@@ -3,6 +3,23 @@ const { invoke } = window.__TAURI__.core;
 
 const $ = (id) => document.getElementById(id);
 
+// Кастомное модальное подтверждение (Promise<bool>).
+let _confirmResolve = null;
+function customConfirm(text, okLabel) {
+  return new Promise((resolve) => {
+    _confirmResolve = resolve;
+    $("confirm-text").textContent = text;
+    $("confirm-ok").textContent = okLabel || "Удалить";
+    $("confirm-modal").style.display = "flex";
+  });
+}
+function closeConfirm(result) {
+  $("confirm-modal").style.display = "none";
+  const r = _confirmResolve;
+  _confirmResolve = null;
+  if (r) r(result);
+}
+
 // --- Режимы (SOCKS5 / Split / WG-сервер) ---
 const DEFAULT_MODES = { socks: true, split: false, wg: false };
 function getModes() {
@@ -149,10 +166,12 @@ async function refreshNodes() {
     }
   }
   $("nodes-empty").style.display = nodes.length ? "none" : "block";
+  // После любого обновления списка — тест задержек (бейджи в списке).
+  testLatencies();
 }
 
 async function removeNode(name) {
-  if (!confirm(`Удалить узел «${name}»?`)) return;
+  if (!(await customConfirm(`Удалить узел «${name}»?`))) return;
   try {
     await invoke("remove_node", { name });
     await refreshNodes();
@@ -508,8 +527,9 @@ async function checkConnectivity(addr) {
 }
 
 async function refreshSubs() {
-  const subs = await invoke("list_subscriptions");
   const body = $("subs-body");
+  if (!body) return; // панель подписок убрана — подписки видны в списке узлов
+  const subs = await invoke("list_subscriptions");
   body.innerHTML = "";
   for (const s of subs) {
     const tr = document.createElement("tr");
@@ -1062,9 +1082,13 @@ async function init() {
   $("add-modal").addEventListener("click", (e) => {
     if (e.target === $("add-modal")) closeAddModal();
   });
-  $("btn-update").addEventListener("click", updateSubs);
+  // Модалка подтверждения.
+  $("confirm-ok").addEventListener("click", () => closeConfirm(true));
+  $("confirm-cancel").addEventListener("click", () => closeConfirm(false));
+  $("confirm-modal").addEventListener("click", (e) => {
+    if (e.target === $("confirm-modal")) closeConfirm(false);
+  });
   $("btn-save-settings").addEventListener("click", saveSettings);
-  $("btn-add-sub").addEventListener("click", addSub);
   $("btn-save-geo").addEventListener("click", saveGeo);
   $("btn-geo-download").addEventListener("click", downloadGeo);
   $("btn-rule-save").addEventListener("click", saveRule);
@@ -1095,9 +1119,6 @@ async function init() {
   setInterval(() => {
     if (logsTabActive() && $("log-auto") && $("log-auto").checked) loadLog();
   }, 2000);
-  $("sub-url").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") addSub();
-  });
 
   $("config-path").textContent = await invoke("config_path");
   await refreshNodes();
@@ -1117,8 +1138,6 @@ async function init() {
   // Сплеш: проверки при старте (с ограничением по времени), затем скрыть.
   await Promise.race([startupChecks(), sleep(2800)]);
   hideSplash();
-  // Тест задержек доступных узлов в фоне (badge'и в списке обновятся).
-  testLatencies();
 }
 
 window.addEventListener("DOMContentLoaded", init);

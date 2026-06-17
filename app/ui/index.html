@@ -66,48 +66,17 @@
             <option value="">— по правилам конфига —</option>
           </select>
           <div class="node-picker" id="node-picker"></div>
-          <p class="hint">Локальный прокси один: SOCKS5 + HTTP с поддержкой UDP (UDP ASSOCIATE). Выбран узел — весь трафик (TCP и UDP) идёт через него, без разницы VLESS/WG/SS; «Авто» — по правилам конфига. Адрес прокси — на вкладке «Дополнительно».</p>
-        </section>
-
-        <section class="panel">
-          <div class="panel-head">
-            <h2>Серверы</h2>
-            <div class="panel-actions">
-              <button id="btn-test" class="ghost">Тест задержек</button>
-              <button id="btn-refresh" class="ghost">Обновить</button>
-            </div>
-          </div>
-          <table id="nodes">
-            <thead>
-              <tr><th>#</th><th>Имя</th><th>Протокол</th><th>Адрес</th><th>Задержка</th><th></th></tr>
-            </thead>
-            <tbody id="nodes-body"></tbody>
-          </table>
-          <p class="hint" id="nodes-empty">Узлов нет — нажмите «+ Добавить» вверху.</p>
+          <p class="hint" id="nodes-empty" style="display: none">Узлов нет — нажмите «+ Добавить» вверху.</p>
           <p class="hint" id="nodes-msg"></p>
+          <p class="hint">Один локальный прокси: SOCKS5 + HTTP с поддержкой UDP. Выбран узел — весь трафик (TCP и UDP) идёт через него; «Авто» — по правилам. Адрес прокси — на вкладке «Дополнительно».</p>
         </section>
 
-        <section class="panel">
-          <div class="panel-head">
-            <h2>Подписки</h2>
-            <button id="btn-update" class="ghost">Обновить подписки</button>
-          </div>
-          <table id="subs">
-            <thead>
-              <tr><th>URL</th><th>Тег</th><th>Период, ч</th><th></th></tr>
-            </thead>
-            <tbody id="subs-body"></tbody>
-          </table>
-          <p class="hint" id="subs-empty">Подписок нет.</p>
-          <div class="row" style="margin-top: 14px">
-            <input id="sub-url" type="text" placeholder="https://…/subscription" />
-            <input id="sub-tag" type="text" class="narrow" placeholder="тег (необяз.)" />
-            <input id="sub-interval" type="number" class="narrow" min="1" value="12"
-                   title="период автообновления, часов" />
-            <button id="btn-add-sub">Добавить</button>
-          </div>
-          <p class="hint" id="subs-msg">Добавление не скачивает узлы — нажмите «Обновить подписки».</p>
-        </section>
+        <!-- Скрытый источник данных для node-picker (ui.js) + цели для main.js. -->
+        <div style="display: none" aria-hidden="true">
+          <button id="btn-test"></button>
+          <button id="btn-refresh"></button>
+          <table id="nodes"><tbody id="nodes-body"></tbody></table>
+        </div>
       </section>
 
       <!-- ====================== МАРШРУТЫ ====================== -->
@@ -362,6 +331,18 @@
           <button id="add-submit">Добавить</button>
         </div>
         <p class="hint" id="add-msg"></p>
+      </div>
+    </div>
+
+    <!-- ====================== МОДАЛКА ПОДТВЕРЖДЕНИЯ ====================== -->
+    <div id="confirm-modal" class="modal-overlay" style="display: none">
+      <div class="modal" style="width: min(420px, 100%)">
+        <h2 id="confirm-title">Подтвердите</h2>
+        <p class="hint" id="confirm-text" style="font-size: 14px"></p>
+        <div class="row" style="margin-top: 16px; justify-content: flex-end">
+          <button id="confirm-cancel" class="ghost">Отмена</button>
+          <button id="confirm-ok" class="danger">Удалить</button>
+        </div>
       </div>
     </div>
 
