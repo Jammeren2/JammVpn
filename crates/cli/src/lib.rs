@@ -317,6 +317,11 @@ pub async fn import(arg: &str) -> Result<String, String> {
 /// Возвращает (имя формата, результаты парсинга по элементам).
 fn parse_any_config(text: &str) -> (&'static str, Vec<Result<ServerProfile, ParseError>>) {
     let t = text.trim_start();
+    // AmneziaWG / WireGuard .conf — проверяем ПЕРВЫМ: `[Interface]` тоже
+    // начинается с `[`, иначе его перехватит ветка JSON-массива ниже.
+    if text.contains("[Interface]") {
+        return ("AmneziaWG .conf", vec![parse_awg_conf(text)]);
+    }
     // JSON: сначала пробуем sing-box (поле `type`), затем Xray (`protocol`).
     // `[` — массив конфигов (подписка Happ/v2rayN).
     if t.starts_with('{') || t.starts_with('[') {
@@ -329,10 +334,6 @@ fn parse_any_config(text: &str) -> (&'static str, Vec<Result<ServerProfile, Pars
             return ("Xray JSON", xr);
         }
         return ("JSON", sb); // вернём ошибки sing-box для диагностики
-    }
-    // AmneziaWG / WireGuard .conf.
-    if text.contains("[Interface]") {
-        return ("AmneziaWG .conf", vec![parse_awg_conf(text)]);
     }
     // Clash / Clash.Meta YAML (секция proxies:).
     if text.contains("proxies:") {
@@ -581,6 +582,9 @@ pub fn clear_subscription_nodes() -> Result<usize, String> {
     Ok(removed)
 }
 
+/// Репозиторий релизов на GitHub (для проверки/скачивания обновлений).
+const RELEASE_REPO: &str = "Jammeren2/JammVpn";
+
 /// Информация об обновлении (для сплеша).
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateInfo {
@@ -588,13 +592,14 @@ pub struct UpdateInfo {
     pub latest: String,
     pub url: String,
     pub newer: bool,
+    /// Прямая ссылка на .exe-ассет релиза (пусто, если ассета нет).
+    pub download_url: String,
 }
 
 /// Проверяет последний релиз на GitHub (best-effort). `Ok(None)` — не удалось
 /// проверить (приватный репозиторий / нет релизов / сеть) — стартап не блокируем.
 pub async fn check_update(current: &str) -> Result<Option<UpdateInfo>, String> {
-    const REPO: &str = "Jammeren2/jammvpn";
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    let url = format!("https://api.github.com/repos/{RELEASE_REPO}/releases/latest");
     let body =
         match jammvpn_net::subscription::fetch_text(&url, std::time::Duration::from_secs(6)).await {
             Ok(b) => b,
@@ -611,13 +616,85 @@ pub async fn check_update(current: &str) -> Result<Option<UpdateInfo>, String> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // Ищем .exe среди ассетов релиза для авто-обновления.
+    let download_url = root
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .into_iter()
+        .flatten()
+        .find_map(|a| {
+            let name = a.get("name").and_then(|v| v.as_str())?;
+            if name.to_ascii_lowercase().ends_with(".exe") {
+                a.get("browser_download_url")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
     let newer = latest.trim_start_matches('v') != current;
     Ok(Some(UpdateInfo {
         current: current.to_string(),
         latest: latest.to_string(),
         url: html,
         newer,
+        download_url,
     }))
+}
+
+/// Скачивает новый .exe и подменяет текущий бинарник, затем запускает новую
+/// версию. Возвращает `Ok(())` — после чего вызывающий должен завершить процесс
+/// (новый уже запущен). Техника Windows: текущий запущенный exe нельзя
+/// перезаписать, но можно переименовать — поэтому старый отодвигаем в `.old`.
+pub async fn perform_update(download_url: &str) -> Result<(), String> {
+    if download_url.is_empty() {
+        return Err("у релиза нет .exe-ассета для авто-обновления".into());
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe.parent().ok_or("нет родительской папки exe")?;
+    let stem = exe
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("jammvpn-app");
+    let new_path = dir.join(format!("{stem}.new.exe"));
+    let old_path = dir.join(format!("{stem}.old.exe"));
+
+    log_line(&format!("update: скачиваю {download_url}"));
+    let bytes = jammvpn_net::subscription::fetch_bytes(download_url, std::time::Duration::from_secs(120))
+        .await
+        .map_err(|e| format!("не удалось скачать обновление: {e}"))?;
+    if bytes.len() < 1_000_000 {
+        return Err(format!("скачанный файл подозрительно мал ({} байт)", bytes.len()));
+    }
+    std::fs::write(&new_path, &bytes).map_err(|e| format!("запись {new_path:?}: {e}"))?;
+
+    // Отодвигаем текущий exe и ставим новый на его место.
+    let _ = std::fs::remove_file(&old_path);
+    std::fs::rename(&exe, &old_path).map_err(|e| format!("переименование текущего exe: {e}"))?;
+    if let Err(e) = std::fs::rename(&new_path, &exe) {
+        // Откат: вернём старый exe на место.
+        let _ = std::fs::rename(&old_path, &exe);
+        return Err(format!("установка нового exe: {e}"));
+    }
+    log_line("update: новый exe установлен, перезапускаю");
+
+    // Запускаем обновлённый бинарник (detached) и просим вызывающего выйти.
+    std::process::Command::new(&exe)
+        .spawn()
+        .map_err(|e| format!("запуск обновлённого exe: {e}"))?;
+    Ok(())
+}
+
+/// Удаляет временный `<stem>.old.exe`, оставшийся после авто-обновления.
+/// Вызывается на старте; ошибки игнорируются (файл может быть ещё занят).
+pub fn cleanup_after_update() {
+    if let Ok(exe) = std::env::current_exe() {
+        if let (Some(dir), Some(stem)) = (exe.parent(), exe.file_stem().and_then(|s| s.to_str())) {
+            let _ = std::fs::remove_file(dir.join(format!("{stem}.old.exe")));
+            let _ = std::fs::remove_file(dir.join(format!("{stem}.new.exe")));
+        }
+    }
 }
 
 /// Удаляет узел по имени из конфига (чистая логика, для тестов): возвращает,
@@ -1860,6 +1937,7 @@ impl WinpkSplitController {
 mod tests {
     use super::*;
     use jammvpn_core::NoopStore;
+    use jammvpn_core::SplitMode;
 
     #[test]
     fn config_path_ends_correctly() {
@@ -1870,6 +1948,7 @@ mod tests {
     #[test]
     fn wg_conf_export_roundtrips() {
         // Узел AmneziaWG → .conf → парсер: ключевые поля сохраняются.
+        // Синтетические значения (TEST-NET-1 192.0.2.0/24, фейковые ключи).
         let conf = "\
 [Interface]
 PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=

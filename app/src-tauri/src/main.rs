@@ -293,6 +293,18 @@ async fn check_update() -> Result<Option<ctl::UpdateInfo>, String> {
     ctl::check_update(env!("CARGO_PKG_VERSION")).await
 }
 
+/// Скачать и установить обновление, затем перезапустить приложение.
+#[tauri::command]
+async fn perform_update(download_url: String) -> Result<(), String> {
+    ctl::perform_update(&download_url).await?;
+    // Новый процесс уже запущен — закрываем текущий.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        std::process::exit(0);
+    });
+    Ok(())
+}
+
 /// Последние `lines` строк лога (вкладка «Логи»; по умолчанию 100).
 #[tauri::command]
 fn read_log(lines: Option<usize>) -> String {
@@ -510,6 +522,8 @@ fn main() {
         .manage(SysProxyState::default())
         .manage(LocalWgState::default())
         .setup(|app| {
+            // Убираем временные файлы, оставшиеся после авто-обновления.
+            ctl::cleanup_after_update();
             setup_tray(app)?;
             // Автозапуск (флаг --minimized) — стартуем сразу в трей, без окна.
             if std::env::args().any(|a| a == "--minimized") {
@@ -558,6 +572,7 @@ fn main() {
             clear_log,
             app_version,
             check_update,
+            perform_update,
             update_one_subscription,
             clear_subscription_nodes,
             download_geo,

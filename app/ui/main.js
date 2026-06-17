@@ -1118,6 +1118,7 @@ async function startupChecks() {
     const u = await invoke("check_update");
     if (u && u.newer) {
       splashStatus(`доступно обновление ${u.latest} (у вас v${v})`);
+      showUpdateBanner(u);
       // показываем чуть дольше, чтобы заметили
       await sleep(1200);
     } else {
@@ -1125,6 +1126,50 @@ async function startupChecks() {
     }
   } catch (e) {
     splashStatus(`v${v}`);
+  }
+}
+
+let pendingUpdate = null;
+
+function showUpdateBanner(u) {
+  pendingUpdate = u;
+  const banner = $("update-banner");
+  const txt = $("update-banner-text");
+  const btn = $("btn-do-update");
+  if (!banner) return;
+  if (u.download_url) {
+    if (txt) txt.textContent = `🔄 Доступна версия ${u.latest} (у вас v${u.current}).`;
+    if (btn) {
+      btn.style.display = "";
+      btn.textContent = "Обновить";
+      btn.disabled = false;
+    }
+  } else {
+    // У релиза нет .exe — авто-обновление невозможно, ведём на страницу релиза.
+    if (txt) txt.textContent = `🔄 Доступна версия ${u.latest} — откройте страницу релиза.`;
+    if (btn) btn.style.display = "none";
+  }
+  banner.style.display = "flex";
+}
+
+async function doUpdate() {
+  if (!pendingUpdate || !pendingUpdate.download_url) return;
+  const ok = await customConfirm(
+    `Скачать и установить ${pendingUpdate.latest}? Приложение перезапустится.`,
+    "Обновить"
+  );
+  if (!ok) return;
+  const txt = $("update-banner-text");
+  const btn = $("btn-do-update");
+  if (btn) btn.disabled = true;
+  if (txt) txt.textContent = "⏳ Скачиваю и устанавливаю обновление…";
+  try {
+    await invoke("perform_update", { downloadUrl: pendingUpdate.download_url });
+    if (txt) txt.textContent = "✅ Обновление установлено, перезапуск…";
+    // Процесс будет завершён бэкендом, новый уже запускается.
+  } catch (e) {
+    if (txt) txt.textContent = "❌ Не удалось обновить: " + e;
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -1178,6 +1223,7 @@ async function init() {
   $("btn-split-elevate").addEventListener("click", relaunchAsAdmin);
   $("btn-admin-relaunch").addEventListener("click", relaunchAsAdmin);
   $("btn-install-driver").addEventListener("click", installDriver);
+  $("btn-do-update").addEventListener("click", doUpdate);
   $("btn-log-refresh").addEventListener("click", loadLog);
   $("btn-log-clear").addEventListener("click", clearLog);
   $("log-lines").addEventListener("change", loadLog);

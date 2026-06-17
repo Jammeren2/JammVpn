@@ -1055,6 +1055,18 @@ button.danger:hover {
 .admin-banner button:hover {
   background: #c9302c;
 }
+/* Баннер обновления — синий, не «тревожный». */
+.admin-banner.update {
+  background: rgba(74, 144, 226, 0.16);
+  border-bottom: 1px solid rgba(74, 144, 226, 0.4);
+  color: #c7ddf0;
+}
+.admin-banner.update button {
+  background: #4a90e2;
+}
+.admin-banner.update button:hover {
+  background: #357abd;
+}
 .splash {
   position: fixed;
   inset: 0;
