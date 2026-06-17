@@ -9,15 +9,24 @@ pub use message::{TYPE_A, TYPE_AAAA};
 
 use crate::tlsutil::verified_client_config;
 use rustls::pki_types::ServerName;
+use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::Notify;
 use tokio_rustls::TlsConnector;
 
 /// Таймаут одного DNS-запроса по умолчанию.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// TTL положительного ответа в кэше (только для оценки правил маршрутизации —
+/// фактическое соединение резолвится отдельно, поэтому подойдёт щедрый TTL).
+const POSITIVE_TTL: Duration = Duration::from_secs(300);
+/// TTL отрицательного ответа: короткий, чтобы транзиентный сбой не «залипал»
+/// блокировкой надолго, но гасил шторм повторов в рамках одной загрузки страницы.
+const NEGATIVE_TTL: Duration = Duration::from_secs(3);
 
 /// Сервер DNS и его транспорт.
 #[derive(Debug, Clone)]
@@ -30,11 +39,22 @@ pub enum DnsServer {
     Doh(String),
 }
 
-/// Резолвер: транспорт + таймаут. `resolve` запрашивает A и AAAA конкурентно.
+/// Запись кэша: готовый ответ с моментом протухания либо запрос «в полёте».
+#[derive(Debug)]
+enum CacheState {
+    /// Готовые адреса (пустой вектор = отрицательный ответ).
+    Ready { ips: Vec<IpAddr>, expires: Instant },
+    /// Идёт запрос; ждущие будят по `Notify` и перечитывают кэш.
+    InFlight(Arc<Notify>),
+}
+
+/// Резолвер: транспорт + таймаут + кэш с TTL и single-flight (схлопывание
+/// одновременных одинаковых запросов). `resolve` запрашивает A и AAAA конкурентно.
 #[derive(Debug, Clone)]
 pub struct DnsResolver {
     server: DnsServer,
     timeout: Duration,
+    cache: Arc<Mutex<HashMap<String, CacheState>>>,
 }
 
 impl DnsResolver {
@@ -42,6 +62,7 @@ impl DnsResolver {
         Self {
             server,
             timeout: DEFAULT_TIMEOUT,
+            cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -50,9 +71,65 @@ impl DnsResolver {
         self
     }
 
-    /// Резолвит имя в IP-адреса (A + AAAA). Ошибка — если оба запроса неуспешны
-    /// или записей нет.
+    /// Резолвит имя в IP-адреса (A + AAAA) с кэшированием. Десятки соединений к
+    /// одному домену при загрузке страницы дают ОДИН реальный запрос, а не шторм
+    /// (иначе часть запросов таймаутит → fail-closed/обрыв → ERR_CONNECTION_RESET).
     pub async fn resolve(&self, name: &str) -> io::Result<Vec<IpAddr>> {
+        loop {
+            // Проверяем кэш / занимаем роль ведущего запроса под одним локом.
+            let waiter = {
+                let mut cache = self.cache.lock().unwrap();
+                match cache.get(name) {
+                    Some(CacheState::Ready { ips, expires }) if *expires > Instant::now() => {
+                        return cache_result(name, ips);
+                    }
+                    Some(CacheState::InFlight(n)) => Some(n.clone()),
+                    _ => {
+                        cache.insert(name.to_string(), CacheState::InFlight(Arc::new(Notify::new())));
+                        None
+                    }
+                }
+            };
+            match waiter {
+                // Уже есть ведущий — ждём и перечитываем кэш. Таймаут — предохранитель
+                // от гонки notify_waiters/notified (тогда просто перечитываем: Ready уже там).
+                Some(n) => {
+                    let _ = tokio::time::timeout(self.timeout + Duration::from_secs(2), n.notified())
+                        .await;
+                }
+                // Мы ведущий — выполняем реальный резолв и публикуем результат.
+                None => return self.resolve_leader(name).await,
+            }
+        }
+    }
+
+    /// Выполняет настоящий резолв (роль ведущего), кладёт результат в кэш и будит
+    /// ждущих. Положительный ответ кэшируется на [`POSITIVE_TTL`], отрицательный —
+    /// на [`NEGATIVE_TTL`] (короткий, чтобы не залипал блокировкой).
+    async fn resolve_leader(&self, name: &str) -> io::Result<Vec<IpAddr>> {
+        let result = self.resolve_uncached(name).await;
+        let (ips, ttl) = match &result {
+            Ok(v) => (v.clone(), POSITIVE_TTL),
+            Err(_) => (Vec::new(), NEGATIVE_TTL),
+        };
+        let mut cache = self.cache.lock().unwrap();
+        let notify = match cache.insert(
+            name.to_string(),
+            CacheState::Ready { ips, expires: Instant::now() + ttl },
+        ) {
+            Some(CacheState::InFlight(n)) => Some(n),
+            _ => None,
+        };
+        drop(cache);
+        if let Some(n) = notify {
+            n.notify_waiters();
+        }
+        result
+    }
+
+    /// Резолв без кэша: A и AAAA конкурентно. Ошибка — если оба неуспешны или
+    /// записей нет.
+    async fn resolve_uncached(&self, name: &str) -> io::Result<Vec<IpAddr>> {
         let (a, aaaa) = tokio::join!(self.query(name, TYPE_A), self.query(name, TYPE_AAAA));
         let mut ips = Vec::new();
         if let Ok(v) = a {
@@ -75,6 +152,16 @@ impl DnsResolver {
             }
             DnsServer::Doh(url) => doh_query(url, name, qtype, self.timeout).await,
         }
+    }
+}
+
+/// Преобразует закэшированные адреса в результат: пустой вектор — отрицательный
+/// ответ (нет записей), иначе — успех.
+fn cache_result(name: &str, ips: &[IpAddr]) -> io::Result<Vec<IpAddr>> {
+    if ips.is_empty() {
+        Err(io::Error::other(format!("dns: нет записей для {name} (кэш)")))
+    } else {
+        Ok(ips.to_vec())
     }
 }
 
@@ -272,6 +359,68 @@ mod tests {
         // resolver.resolve тоже находит адрес.
         let r = resolver.resolve("example.com").await.unwrap();
         assert!(r.contains(&IpAddr::V4(ip)));
+    }
+
+    /// Mock-UDP-DNS со счётчиком полученных запросов.
+    async fn mock_udp_dns_counted(
+        answer_ip: Ipv4Addr,
+        count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> SocketAddr {
+        use std::sync::atomic::Ordering;
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
+                count.fetch_add(1, Ordering::SeqCst);
+                let mut resp = Vec::new();
+                resp.extend_from_slice(&[buf[0], buf[1]]);
+                resp.extend_from_slice(&0x8180u16.to_be_bytes());
+                resp.extend_from_slice(&1u16.to_be_bytes());
+                resp.extend_from_slice(&1u16.to_be_bytes());
+                resp.extend_from_slice(&[0, 0, 0, 0]);
+                resp.extend_from_slice(&buf[12..n]);
+                resp.extend_from_slice(&[0xC0, 0x0C]);
+                resp.extend_from_slice(&TYPE_A.to_be_bytes());
+                resp.extend_from_slice(&1u16.to_be_bytes());
+                resp.extend_from_slice(&60u32.to_be_bytes());
+                resp.extend_from_slice(&4u16.to_be_bytes());
+                resp.extend_from_slice(&answer_ip.octets());
+                let _ = sock.send_to(&resp, peer).await;
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn resolve_caches_and_single_flights() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ip = Ipv4Addr::new(203, 0, 113, 9);
+        let count = std::sync::Arc::new(AtomicUsize::new(0));
+        let server = mock_udp_dns_counted(ip, count.clone()).await;
+        let resolver = DnsResolver::new(DnsServer::Udp(server));
+
+        // 20 одновременных резолвов одного имени → single-flight → один ведущий
+        // (он шлёт A+AAAA = максимум 2 запроса к серверу, а не 40).
+        let mut tasks = Vec::new();
+        for _ in 0..20 {
+            let r = resolver.clone();
+            tasks.push(tokio::spawn(async move { r.resolve("example.com").await }));
+        }
+        for t in tasks {
+            assert!(t.await.unwrap().is_ok());
+        }
+        let after_burst = count.load(Ordering::SeqCst);
+        assert!(after_burst <= 2, "ожидалось ≤2 запроса, было {after_burst}");
+
+        // Повторный резолв — из кэша, без новых запросов к серверу.
+        let r = resolver.resolve("example.com").await.unwrap();
+        assert!(r.contains(&IpAddr::V4(ip)));
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            after_burst,
+            "второй резолв должен прийти из кэша"
+        );
     }
 
     #[tokio::test]
