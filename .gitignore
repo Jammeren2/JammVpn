@@ -34,6 +34,8 @@ dist-ssr/
 /wfp-driver/build/
 *.sys
 *.obj
+# Но вшиваемый в exe драйвер WinpkFilter (ndisrd) — храним в репо.
+!/crates/platform-windows/drivers/ndisrd/amd64/ndisrd.sys
 
 # ─── Секреты и пользовательские конфиги ────────────────────────
 .env

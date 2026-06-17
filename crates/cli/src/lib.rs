@@ -1652,6 +1652,35 @@ pub fn relaunch_as_admin() -> Result<(), String> {
     }
 }
 
+/// Установлен ли драйвер раздельного туннелирования (WinpkFilter / `ndisrd`).
+pub fn split_driver_installed() -> bool {
+    #[cfg(windows)]
+    {
+        jammvpn_platform_windows::winpkfilter::driver::is_installed()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Устанавливает вшитый в exe драйвер `ndisrd` (если ещё не установлен). Требует
+/// прав администратора. Возвращает сообщение для UI.
+pub fn install_split_driver() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        let log = |m: String| log_line(&m);
+        match jammvpn_platform_windows::winpkfilter::driver::ensure_installed(&log)? {
+            true => Ok("драйвер установлен".into()),
+            false => Ok("драйвер уже установлен".into()),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Err("только Windows".into())
+    }
+}
+
 /// QR-код клиентского `.conf` локального WG в виде SVG-строки (для скана
 /// WireGuard-приложением на телефоне).
 pub fn local_wg_qr() -> Result<String, String> {

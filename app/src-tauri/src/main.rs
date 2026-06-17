@@ -323,6 +323,18 @@ fn relaunch_as_admin() -> Result<(), String> {
     Ok(())
 }
 
+/// Установлен ли драйвер раздельного туннелирования (WinpkFilter / ndisrd).
+#[tauri::command]
+fn split_driver_installed() -> bool {
+    ctl::split_driver_installed()
+}
+
+/// Установить вшитый драйвер раздельного туннелирования (требует админ-прав).
+#[tauri::command]
+fn install_split_driver() -> Result<String, String> {
+    ctl::install_split_driver()
+}
+
 /// Список сохранённых подписок.
 #[tauri::command]
 fn list_subscriptions() -> Vec<ctl::SubscriptionInfo> {
@@ -540,6 +552,8 @@ fn main() {
             local_wg_qr,
             is_admin,
             relaunch_as_admin,
+            split_driver_installed,
+            install_split_driver,
             read_log,
             clear_log,
             app_version,

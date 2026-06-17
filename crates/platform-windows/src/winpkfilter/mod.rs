@@ -10,6 +10,7 @@
 //! Требует установленного драйвера `ndisrd` и запуска процесса от администратора.
 
 pub mod attribution;
+pub mod driver;
 
 use attribution::{Proto, ProcessResolver};
 use jammvpn_core::split::{decide, Action, ConnApp, ConnRequest, SplitConfig};
@@ -129,6 +130,9 @@ impl SplitTunnel {
         if !is_elevated() {
             return Err("split требует запуска JammVPN от администратора".into());
         }
+        // Если драйвер не установлен — ставим вшитый в exe пакет (нужны админ-права).
+        driver::ensure_installed(&|m| log(m))
+            .map_err(|e| format!("драйвер WinpkFilter (ndisrd): {e}"))?;
         // Проверяем доступность драйвера заранее (понятная ошибка для UI).
         Ndisapi::new("NDISRD")
             .map_err(|e| format!("драйвер WinpkFilter (ndisrd) недоступен: {e}. Установите его и запустите от администратора"))?;

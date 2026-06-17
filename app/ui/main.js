@@ -795,6 +795,43 @@ async function loadAdminState() {
       msg.className = "hint err";
     }
   }
+  await loadDriverState(admin);
+}
+
+// Баннер драйвера раздельного туннелирования: показываем, только если запущены
+// от админа (иначе сначала нужен перезапуск) и драйвер ещё не установлен.
+async function loadDriverState(admin) {
+  const banner = $("driver-banner");
+  if (!banner) return;
+  if (!admin) {
+    banner.style.display = "none";
+    return;
+  }
+  let installed = true;
+  try {
+    installed = await invoke("split_driver_installed");
+  } catch (e) {
+    return;
+  }
+  banner.style.display = installed ? "none" : "flex";
+}
+
+async function installDriver() {
+  const btn = $("btn-install-driver");
+  const txt = $("driver-banner-text");
+  if (btn) btn.disabled = true;
+  if (txt) txt.textContent = "⏳ Устанавливаю драйвер…";
+  try {
+    const r = await invoke("install_split_driver");
+    if (txt) txt.textContent = "✅ " + r;
+    setTimeout(() => {
+      const banner = $("driver-banner");
+      if (banner) banner.style.display = "none";
+    }, 1500);
+  } catch (e) {
+    if (txt) txt.textContent = "❌ Не удалось установить драйвер: " + e;
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function relaunchAsAdmin() {
@@ -1140,6 +1177,7 @@ async function init() {
   $("btn-lwg-qr").addEventListener("click", showLocalWgQr);
   $("btn-split-elevate").addEventListener("click", relaunchAsAdmin);
   $("btn-admin-relaunch").addEventListener("click", relaunchAsAdmin);
+  $("btn-install-driver").addEventListener("click", installDriver);
   $("btn-log-refresh").addEventListener("click", loadLog);
   $("btn-log-clear").addEventListener("click", clearLog);
   $("log-lines").addEventListener("change", loadLog);
