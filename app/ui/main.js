@@ -94,15 +94,18 @@ async function refreshNodes() {
   const dsel = $("default-proxy");
   const lsel = $("lwg-node");
   const tsel = $("r-tag"); // тег узла в редакторе правил (теперь это <select>)
+  const spsel = $("sp-node"); // узел для SOCKS-листенера
   // сохраняем выбранные значения
   const prev = sel.value;
   const prevDefault = dsel ? dsel.value : "";
   const prevLwg = lsel ? lsel.value : "";
   const prevTag = tsel ? tsel.value : "";
+  const prevSp = spsel ? spsel.value : "";
   sel.innerHTML = '<option value="">— по правилам конфига —</option>';
   if (dsel) dsel.innerHTML = '<option value="">— первый доступный —</option>';
   if (lsel) lsel.innerHTML = '<option value="">— по правилам конфига —</option>';
   if (tsel) tsel.innerHTML = '<option value="">— дефолтный —</option>';
+  if (spsel) spsel.innerHTML = '<option value="">— по правилам (узел по умолчанию) —</option>';
 
   // Группируем: свои ключи отдельно, узлы подписок — по источнику.
   const own = nodes.filter((n) => !n.group);
@@ -148,12 +151,14 @@ async function refreshNodes() {
       if (dsel) dsel.appendChild(opt.cloneNode(true));
       if (lsel) lsel.appendChild(opt.cloneNode(true));
       if (tsel) tsel.appendChild(opt.cloneNode(true));
+      if (spsel) spsel.appendChild(opt.cloneNode(true));
     }
   }
   sel.value = prev;
   if (dsel) dsel.value = prevDefault;
   if (lsel) lsel.value = prevLwg;
   if (tsel) tsel.value = prevTag;
+  if (spsel) spsel.value = prevSp;
   for (const btn of body.querySelectorAll("button.x[data-name]")) {
     btn.addEventListener("click", () => removeNode(btn.dataset.name));
   }
@@ -190,7 +195,7 @@ async function removeNode(name) {
 async function loadSettings() {
   const s = await invoke("get_settings");
   $("default-to-proxy").checked = !!s.default_to_proxy;
-  $("default-proxy").value = s.default_proxy || "";
+  // Узел по умолчанию = выбранный на «Главной» (отдельного селектора больше нет).
   // Локальный адрес SOCKS фиксирован (127.0.0.1:1080) — поле убрано из UI.
   if (s.proxy_node) {
     $("server").value = s.proxy_node;
@@ -352,7 +357,7 @@ async function saveSettings() {
   try {
     await invoke("set_settings", {
       defaultToProxy: $("default-to-proxy").checked,
-      defaultProxy: $("default-proxy").value || null,
+      defaultProxy: null, // узел по умолчанию = выбранный на «Главной»
     });
     msg.textContent = "сохранено";
     msg.className = "hint ok";
@@ -696,28 +701,90 @@ async function toggleAutostart() {
   }
 }
 
-async function loadSysProxy() {
+// Системный прокси теперь задаётся флагом у SOCKS-листенера (см. ниже), отдельного
+// глобального тумблера нет. Оставлена заглушка — её зовут из stopAll/init.
+async function loadSysProxy() {}
+
+// --- SOCKS5-листенеры (мульти-прокси) ---
+let socksCache = [];
+
+async function loadSocksProxies() {
+  const box = $("socks-list");
+  if (!box) return;
   try {
-    const s = await invoke("system_proxy_status");
-    // Считаем «нашим», если включён и указывает на loopback.
-    $("sysproxy").checked = !!s.enabled && !!(s.server && s.server.includes("127.0.0.1"));
+    socksCache = await invoke("get_socks_proxies");
   } catch (e) {
-    $("sysproxy").checked = false;
+    socksCache = [];
   }
-  window.syncToggles && window.syncToggles();
+  box.innerHTML = "";
+  if (!socksCache.length) {
+    box.innerHTML =
+      '<p class="hint" style="margin:0 2px">Листенеров нет — при запуске SOCKS поднимется один на 127.0.0.1:1080 (системный, по правилам).</p>';
+    return;
+  }
+  socksCache.forEach((p, i) => {
+    const row = document.createElement("div");
+    row.className = "rule";
+    const node = p.node || "по правилам (узел по умолчанию)";
+    const sys = p.system ? '<span class="chip">системный</span>' : "";
+    row.innerHTML = `<span class="n">${i + 1}</span>
+      <div class="crit"><span class="chip">${esc(p.listen)}</span><span class="chip">→ ${esc(node)}</span>${sys}</div>
+      <span class="rule-ctl">
+        <button class="mini" data-i="${i}" data-sa="sys" title="сделать системным">★</button>
+        <button class="x" data-i="${i}" data-sa="del" title="удалить">✕</button>
+      </span>`;
+    box.appendChild(row);
+  });
 }
 
-async function toggleSysProxy() {
-  const on = $("sysproxy").checked;
-  const msg = $("sysproxy-msg");
+async function saveSocksProxies(list, note) {
+  const msg = $("socks-msg");
   try {
-    await invoke(on ? "set_system_proxy" : "clear_system_proxy");
-    msg.textContent = on ? "системный прокси включён" : "системный прокси выключен";
-    msg.className = "hint ok";
+    await invoke("set_socks_proxies", { list });
+    await loadSocksProxies();
+    if (msg) {
+      msg.textContent = note || "сохранено (применится при следующем запуске SOCKS)";
+      msg.className = "hint ok";
+    }
   } catch (e) {
-    await loadSysProxy(); // откат к фактическому состоянию
-    msg.textContent = "ошибка: " + e;
-    msg.className = "hint err";
+    if (msg) {
+      msg.textContent = "ошибка: " + e;
+      msg.className = "hint err";
+    }
+  }
+}
+
+async function addSocksProxy() {
+  const listen = $("sp-listen").value.trim();
+  const node = $("sp-node").value || null;
+  const system = $("sp-system").checked;
+  const msg = $("socks-msg");
+  if (!/^[\w.:\[\]-]+:\d{1,5}$/.test(listen)) {
+    if (msg) { msg.textContent = "укажите адрес вида ip:port (напр. 0.0.0.0:1082)"; msg.className = "hint err"; }
+    return;
+  }
+  const list = socksCache.slice();
+  // Системный — только у одного: сбрасываем у остальных, если новый системный.
+  if (system) list.forEach((p) => (p.system = false));
+  list.push({ listen, node, system });
+  $("sp-listen").value = "";
+  $("sp-system").checked = false;
+  window.syncToggles && window.syncToggles();
+  await saveSocksProxies(list, "листенер добавлен (применится при следующем запуске SOCKS)");
+}
+
+async function onSocksListClick(e) {
+  const btn = e.target.closest("button[data-sa]");
+  if (!btn) return;
+  const i = parseInt(btn.dataset.i, 10);
+  const list = socksCache.slice();
+  if (btn.dataset.sa === "del") {
+    if (!(await customConfirm("Удалить SOCKS-листенер " + (list[i] && list[i].listen) + "?", "Удалить"))) return;
+    list.splice(i, 1);
+    await saveSocksProxies(list);
+  } else if (btn.dataset.sa === "sys") {
+    list.forEach((p, j) => (p.system = j === i)); // системный — только этот
+    await saveSocksProxies(list, "системный прокси: " + (list[i] && list[i].listen));
   }
 }
 
@@ -1241,7 +1308,8 @@ async function init() {
   $("rules").addEventListener("click", onRulesClick);
   $("presets").addEventListener("click", onPresetClick);
   $("autostart").addEventListener("change", toggleAutostart);
-  $("sysproxy").addEventListener("change", toggleSysProxy);
+  if ($("btn-socks-add")) $("btn-socks-add").addEventListener("click", addSocksProxy);
+  if ($("socks-list")) $("socks-list").addEventListener("click", onSocksListClick);
   $("btn-split-save").addEventListener("click", saveSplit);
   $("btn-split-apply").addEventListener("click", applySplit);
   if ($("sp-driver")) $("sp-driver").addEventListener("change", onSplitDriverChange);
@@ -1273,6 +1341,7 @@ async function init() {
   await loadGeo();
   await refreshRules();
   await loadPresets();
+  await loadSocksProxies();
   resetRuleForm();
   await loadAutostart();
   await loadSplit();

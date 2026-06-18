@@ -159,28 +159,14 @@
           <!-- ====================== МАРШРУТЫ ====================== -->
           <section class="panel panel-routes">
             <div class="ph-row">
-              <div><div class="ph" style="margin: 0">SOCKS-маршрутизация</div><div class="sub">Правила «IP/порт/домен → узел» для SOCKS5-прокси. Нет совпадений — идёт через узел по умолчанию.</div></div>
+              <div><div class="ph" style="margin: 0">Правила маршрутизации</div><div class="sub">Сверху вниз, первое совпадение определяет узел. Нет совпадений — узел по умолчанию (выбранный на «Главной»).</div></div>
             </div>
-
-            <div class="acard wide" style="margin-bottom: 16px">
-              <div class="t">Узел по умолчанию (общий)</div>
-              <div class="tog-row">
-                <div class="nm"><div class="a">Трафик без правил → через прокси</div><div class="b">Иначе соединения, не покрытые правилами, идут напрямую</div></div>
-                <button class="toggle" data-tg-for="default-to-proxy"><i></i></button>
-                <input type="checkbox" id="default-to-proxy" class="visually-hidden" />
-              </div>
-              <label class="lbl" style="margin-top: 6px">Узел по умолчанию<select class="sel" id="default-proxy"><option value="">— первый доступный —</option></select></label>
-              <div class="tog-row" style="margin-top: 10px">
-                <div class="nm"><div class="a">Системный прокси Windows</div><div class="b">Прописывает этот SOCKS как системный прокси (можно только один)</div></div>
-                <button class="toggle" data-tg-for="sysproxy"><i></i></button>
-                <input type="checkbox" id="sysproxy" class="visually-hidden" />
-              </div>
-              <div class="hint" id="sysproxy-msg" style="margin-top: 8px"></div>
-              <div class="form-row" style="margin-top: 12px"><button class="btn-sm primary" id="btn-save-settings">Сохранить</button><span class="hint" id="settings-msg" style="margin: 0"></span></div>
-            </div>
-
-            <div class="ph-row">
-              <div><div class="ph" style="margin: 0">Правила</div><div class="sub">Сверху вниз, первое совпадение определяет путь трафика.</div></div>
+            <div class="tog-row" style="border: none; padding: 0 0 10px">
+              <div class="nm"><div class="a">Трафик без правил → через узел по умолчанию</div><div class="b">Иначе непокрытые правилами соединения идут напрямую. Узел по умолчанию = выбранный на «Главной».</div></div>
+              <button class="toggle" data-tg-for="default-to-proxy"><i></i></button>
+              <input type="checkbox" id="default-to-proxy" class="visually-hidden" />
+              <button class="btn-sm primary" id="btn-save-settings" style="margin-left: 12px">Сохранить</button>
+              <span class="hint" id="settings-msg" style="margin: 0 0 0 8px"></span>
             </div>
             <div class="presets"><span class="lbl">Пресеты:</span><div id="presets" style="display: flex; gap: 8px; flex-wrap: wrap"></div></div>
             <div class="rules" id="rules"></div>
@@ -202,6 +188,27 @@
                 <button class="btn-primary" id="btn-rule-save">Добавить</button>
                 <button class="btn-sm" id="btn-rule-cancel" style="display: none">Отмена</button>
                 <span class="hint" id="rules-msg" style="margin: 0">Критерии через запятую; между категориями — И, внутри — ИЛИ. Пустое правило = catch-all.</span>
+              </div>
+            </div>
+
+            <!-- SOCKS5-листенеры (мульти-прокси) -->
+            <div class="ph-row" style="margin-top: 26px">
+              <div><div class="ph" style="margin: 0">SOCKS5-прокси (мульти)</div><div class="sub">Несколько локальных SOCKS5: каждый на своём адресе ведёт на свой узел. <code>0.0.0.0</code> — открыть в локальную сеть. Один можно сделать системным прокси Windows, остальные указывай вручную в приложениях.</div></div>
+            </div>
+            <div class="socks-list" id="socks-list"></div>
+            <div class="rule-form" style="margin-top: 12px">
+              <div class="grid2">
+                <label class="lbl">Адрес (ip:port)<input class="inp" id="sp-listen" placeholder="127.0.0.1:1081 или 0.0.0.0:1082" /></label>
+                <label class="lbl">Узел<select class="sel" id="sp-node"><option value="">— по правилам (узел по умолчанию) —</option></select></label>
+              </div>
+              <div class="tog-row" style="border: none; padding: 6px 0 0">
+                <div class="nm"><div class="a">Системный прокси Windows</div><div class="b">Прописать этот листенер системным (можно только у одного)</div></div>
+                <button class="toggle" data-tg-for="sp-system"><i></i></button>
+                <input type="checkbox" id="sp-system" class="visually-hidden" />
+              </div>
+              <div class="form-row" style="margin-top: 8px">
+                <button class="btn-primary" id="btn-socks-add">Добавить листенер</button>
+                <span class="hint" id="socks-msg" style="margin: 0">Применяется при следующем запуске SOCKS на главной.</span>
               </div>
             </div>
           </section>

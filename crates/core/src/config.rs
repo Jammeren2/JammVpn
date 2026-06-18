@@ -150,6 +150,32 @@ pub struct AppConfig {
     pub geo: GeoConfig,
     /// Локальный WG-сервер (inbound-шлюз); `None` — не сконфигурирован.
     pub local_wg: Option<LocalWgConfig>,
+    /// Дополнительные SOCKS5-листенеры: каждый на своём `ip:port` ведёт на свой
+    /// узел (можно открыть в LAN через `0.0.0.0`). Один может быть системным прокси.
+    pub socks_proxies: Vec<SocksProxy>,
+}
+
+/// Один SOCKS5-листенер: адрес прослушивания → узел.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SocksProxy {
+    /// Локальный адрес прослушивания, напр. `127.0.0.1:1080` или `0.0.0.0:1082`.
+    pub listen: String,
+    /// Узел (тег), через который идёт весь трафик этого листенера. `None` —
+    /// по правилам маршрутизации (узел по умолчанию — выбранный на «Главной»).
+    pub node: Option<String>,
+    /// Прописать этот листенер системным прокси Windows (допустим только у одного).
+    pub system: bool,
+}
+
+impl Default for SocksProxy {
+    fn default() -> Self {
+        Self {
+            listen: "127.0.0.1:1080".into(),
+            node: None,
+            system: false,
+        }
+    }
 }
 
 /// Ошибка загрузки/сохранения конфига.

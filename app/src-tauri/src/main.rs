@@ -11,7 +11,7 @@ use tauri::{Manager, State, WindowEvent};
 
 /// Состояние приложения: запущенный локальный прокси (или его отсутствие).
 #[derive(Default)]
-struct ProxyState(Mutex<Option<ctl::ProxyController>>);
+struct ProxyState(Mutex<Option<ctl::MultiSocks>>);
 
 /// Активный split: работающий локальный редирект-прокси (или его отсутствие).
 /// `Some` ⇔ split применён (конфиг в драйвере + прокси поднят).
@@ -117,17 +117,30 @@ async fn update_subscriptions() -> Result<Vec<ctl::SubUpdate>, String> {
 #[tauri::command]
 async fn proxy_start(
     state: State<'_, ProxyState>,
-    listen: String,
+    listen: Option<String>,
     server: Option<String>,
 ) -> Result<String, String> {
+    let _ = (listen, server); // адрес/узел берём из конфига SOCKS-листенеров
     // Уже запущен? (гард временный — не держим через await).
     if state.0.lock().unwrap().is_some() {
         return Err("прокси уже запущен".into());
     }
-    let proxy = ctl::ProxyController::start(&listen, server).await?;
-    let addr = proxy.addr().to_string();
+    let proxy = ctl::MultiSocks::start().await?;
+    let addr = proxy.primary_addr().to_string();
     *state.0.lock().unwrap() = Some(proxy);
     Ok(addr)
+}
+
+/// Список SOCKS5-листенеров.
+#[tauri::command]
+fn get_socks_proxies() -> Vec<ctl::SocksProxy> {
+    ctl::get_socks_proxies()
+}
+
+/// Сохраняет список SOCKS5-листенеров (применится при следующем старте SOCKS).
+#[tauri::command]
+fn set_socks_proxies(list: Vec<ctl::SocksProxy>) -> Result<(), String> {
+    ctl::set_socks_proxies(list)
 }
 
 #[tauri::command]
@@ -155,7 +168,7 @@ fn set_system_proxy(
         .lock()
         .unwrap()
         .as_ref()
-        .map(|p| p.addr().port())
+        .map(|p| p.primary_addr().port())
         .ok_or("сначала запустите локальный прокси")?;
     ctl::set_system_proxy(&format!("127.0.0.1:{port}"))?;
     *sysproxy.0.lock().unwrap() = true;
@@ -185,7 +198,7 @@ async fn proxy_self_test(state: State<'_, ProxyState>) -> Result<String, String>
         .lock()
         .unwrap()
         .as_ref()
-        .map(|p| p.addr().to_string());
+        .map(|p| p.primary_addr().to_string());
     let addr = addr.ok_or("прокси не запущен")?;
     ctl::proxy_self_test(&addr).await
 }
@@ -198,7 +211,7 @@ fn proxy_status(state: State<'_, ProxyState>) -> Option<String> {
         .lock()
         .unwrap()
         .as_ref()
-        .map(|p| p.addr().to_string())
+        .map(|p| p.primary_addr().to_string())
 }
 
 /// Удалить узел по имени. `true` — удалён, `false` — не найден.
@@ -638,6 +651,8 @@ fn main() {
             export_vless_link,
             export_ss_link,
             open_url,
+            get_socks_proxies,
+            set_socks_proxies,
             export_node_conf_to,
             local_wg_export_conf_to,
             list_subscriptions,

@@ -11,7 +11,7 @@
 //! расшифровывает. БД на диске не содержит плейнтекст-секретов.
 
 use jammvpn_core::config::{
-    AppConfig, DnsConfig, GeoConfig, LocalWgConfig, Settings, Subscription,
+    AppConfig, DnsConfig, GeoConfig, LocalWgConfig, Settings, SocksProxy, Subscription,
 };
 use jammvpn_core::model::ServerProfile;
 use jammvpn_core::routing::Rule;
@@ -95,6 +95,7 @@ pub fn load(path: &Path, store: &dyn SecretStore) -> Result<AppConfig, String> {
         dns: kv_get::<DnsConfig>(&conn, "dns")?,
         geo: kv_get::<GeoConfig>(&conn, "geo")?,
         local_wg: kv_get::<Option<LocalWgConfig>>(&conn, "local_wg")?,
+        socks_proxies: kv_get::<Vec<SocksProxy>>(&conn, "socks_proxies")?,
     };
     unprotect_config(&mut cfg, store).map_err(|e| e.to_string())?;
     Ok(cfg)
@@ -141,6 +142,7 @@ pub fn save(path: &Path, cfg: &AppConfig, store: &dyn SecretStore) -> Result<(),
     kv_set(&tx, "dns", &protected.dns)?;
     kv_set(&tx, "geo", &protected.geo)?;
     kv_set(&tx, "local_wg", &protected.local_wg)?;
+    kv_set(&tx, "socks_proxies", &protected.socks_proxies)?;
 
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())

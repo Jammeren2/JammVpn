@@ -21,7 +21,7 @@ pub mod util;
 
 pub use config::{
     AppConfig, ConfigError, DnsConfig, DnsServerConfig, FakeIpConfig, GeoConfig, LocalWgConfig,
-    Settings, Subscription,
+    Settings, SocksProxy, Subscription,
 };
 pub use error::ParseError;
 pub use geo::{GeoIpDb, GeoSiteDb};

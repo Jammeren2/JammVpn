@@ -15,6 +15,7 @@ use jammvpn_core::{
     RouteAction, Rule, SecretStore, SplitConfig, Subscription,
 };
 use jammvpn_core::LocalWgConfig;
+pub use jammvpn_core::SocksProxy;
 use jammvpn_net::{
     gen_preshared_key, gen_private_key, outbound_from_profile, serve_socks_routed, subscription,
     urltest, wg_public_key, Engine, WgServer, WgServerParams,
@@ -1596,7 +1597,15 @@ pub fn build_engine(cfg: &AppConfig, server: Option<&str>) -> Result<Engine, Str
         let outbound = outbound_from_profile(profile).map_err(|e| e.to_string())?;
         Ok(Engine::single_proxy(outbound))
     } else {
-        let engine = Engine::from_config(cfg);
+        // По правилам. Узел по умолчанию (для Proxy(None)/непокрытого трафика) —
+        // явный default_proxy, иначе выбранный на «Главной» (proxy_node).
+        let engine = if cfg.settings.default_proxy.is_none() && cfg.settings.proxy_node.is_some() {
+            let mut eff = cfg.clone();
+            eff.settings.default_proxy = cfg.settings.proxy_node.clone();
+            Engine::from_config(&eff)
+        } else {
+            Engine::from_config(cfg)
+        };
         let missing = engine.missing_geo_refs();
         if !missing.is_empty() {
             return Err(format!(
@@ -1658,6 +1667,114 @@ impl ProxyController {
     pub fn stop(self) {
         self.handle.abort();
     }
+}
+
+/// Несколько SOCKS5-листенеров сразу: каждый на своём `ip:port` ведёт на свой
+/// узел (или по правилам с узлом по умолчанию = выбранный на «Главной»). Один
+/// помеченный листенер прописывается системным прокси Windows.
+pub struct MultiSocks {
+    proxies: Vec<ProxyController>,
+    primary: SocketAddr,
+    system_set: bool,
+}
+
+impl MultiSocks {
+    pub async fn start() -> Result<Self, String> {
+        let cfg = load();
+        let mut list = cfg.socks_proxies.clone();
+        if list.is_empty() {
+            // По умолчанию — один листенер на 127.0.0.1:1080, системный.
+            list.push(jammvpn_core::SocksProxy {
+                listen: "127.0.0.1:1080".into(),
+                node: None,
+                system: true,
+            });
+        }
+        let mut proxies = Vec::new();
+        let mut system_addr: Option<SocketAddr> = None;
+        for sp in &list {
+            // node=Some → весь трафик через узел; node=None → по правилам, узел по
+            // умолчанию = выбранный на «Главной» (см. build_engine).
+            match ProxyController::start(&sp.listen, sp.node.clone()).await {
+                Ok(pc) => {
+                    if sp.system && system_addr.is_none() {
+                        system_addr = Some(pc.addr());
+                    }
+                    proxies.push(pc);
+                }
+                Err(e) => log_line(&format!("SOCKS {} не запущен: {e}", sp.listen)),
+            }
+        }
+        if proxies.is_empty() {
+            return Err("ни один SOCKS-листенер не запущен (проверьте адреса)".into());
+        }
+        let primary = system_addr.unwrap_or_else(|| proxies[0].addr());
+        let mut system_set = false;
+        if let Some(addr) = system_addr {
+            // 0.0.0.0 в системном прокси не годится — указываем 127.0.0.1.
+            let host = if addr.ip().is_unspecified() {
+                format!("127.0.0.1:{}", addr.port())
+            } else {
+                addr.to_string()
+            };
+            match set_system_proxy(&host) {
+                Ok(()) => system_set = true,
+                Err(e) => log_line(&format!("системный прокси не установлен: {e}")),
+            }
+        }
+        log_line(&format!(
+            "SOCKS: листенеров {}, системный прокси={}",
+            proxies.len(),
+            system_set
+        ));
+        Ok(Self {
+            proxies,
+            primary,
+            system_set,
+        })
+    }
+
+    /// Адрес «главного» листенера (системного или первого) — для статуса/проверки.
+    pub fn primary_addr(&self) -> SocketAddr {
+        self.primary
+    }
+
+    pub fn stop(self) {
+        for p in self.proxies {
+            p.stop();
+        }
+        if self.system_set {
+            let _ = clear_system_proxy();
+        }
+    }
+}
+
+/// Список настроенных SOCKS-листенеров (для UI).
+pub fn get_socks_proxies() -> Vec<jammvpn_core::SocksProxy> {
+    load().socks_proxies
+}
+
+/// Сохраняет список SOCKS-листенеров. Нормализует: пустые адреса убираем,
+/// системным остаётся только первый помеченный.
+pub fn set_socks_proxies(mut list: Vec<jammvpn_core::SocksProxy>) -> Result<(), String> {
+    let mut seen_system = false;
+    for p in &mut list {
+        p.listen = p.listen.trim().to_string();
+        p.node = p.node.clone().filter(|n| !n.is_empty());
+        if p.system {
+            if seen_system {
+                p.system = false;
+            } else {
+                seen_system = true;
+            }
+        }
+    }
+    list.retain(|p| !p.listen.is_empty());
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    cfg.socks_proxies = list;
+    save_config(&path, &cfg, store.as_ref())
 }
 
 /// Локальный транспарент-прокси для split-редиректа: принимает перенаправленные
