@@ -243,13 +243,18 @@ fn capture_loop(
                 match flows.get(&key) {
                     Some(&v) => (v, format!("{proto:?} :{lport}→{dst_ip}:{dst_port} (кэш)")),
                     None => {
-                        let (v, app) =
+                        let (v, app, known) =
                             decide_for(proto, is_v6, lport, dst_ip, dst_port, &config, &mut resolver);
-                        if flows.len() >= 16384 {
-                            flows.clear(); // backstop от роста памяти
+                        // Кэшируем ТОЛЬКО уверенный вердикт (процесс определён),
+                        // иначе ранний SYN залипнет «прямо» и соединение пойдёт мимо
+                        // туннеля (утечка IP). Неопределённые — переспрашиваем.
+                        if known {
+                            if flows.len() >= 16384 {
+                                flows.clear(); // backstop от роста памяти
+                            }
+                            flows.insert(key, v);
                         }
-                        flows.insert(key, v);
-                        (v, format!("{proto:?} :{lport}→{dst_ip}:{dst_port} app={app}"))
+                        (v, format!("{proto:?} :{lport}→{dst_ip}:{dst_port} app={app} known={known}"))
                     }
                 }
             }
@@ -333,7 +338,10 @@ enum Verdict {
 /// Ключ потока для консистентного вердикта: (локальный порт, dst, dst-порт).
 type FlowKey = (u16, IpAddr, u16);
 
-/// Решение для НОВОГО потока: атрибуция к процессу + правила → (вердикт, имя app).
+/// Решение для потока: атрибуция к процессу + правила.
+/// Возвращает `(вердикт, имя_app, определён_ли_процесс)`. Последний флаг важен:
+/// вердикт кэшируется ТОЛЬКО когда процесс уверенно определён — иначе ранний SYN
+/// (порт ещё не в таблице соединений) залип бы как «прямо» на всё соединение.
 fn decide_for(
     proto: Proto,
     is_v6: bool,
@@ -342,13 +350,13 @@ fn decide_for(
     dst_port: u16,
     config: &SplitConfig,
     resolver: &mut ProcessResolver,
-) -> (Verdict, String) {
-    let app = resolver
-        .resolve(proto, is_v6, local_port)
-        .unwrap_or(ConnApp {
-            exe_path: None,
-            process_name: None,
-        });
+) -> (Verdict, String, bool) {
+    let resolved = resolver.resolve(proto, is_v6, local_port);
+    let known = resolved.is_some();
+    let app = resolved.unwrap_or(ConnApp {
+        exe_path: None,
+        process_name: None,
+    });
     let app_name = app
         .process_name
         .clone()
@@ -364,7 +372,7 @@ fn decide_for(
         Action::Direct => Verdict::Direct,
         Action::Block => Verdict::Drop,
     };
-    (verdict, app_name)
+    (verdict, app_name, known)
 }
 
 /// Бит FIN или RST в TCP-флагах (для эвикции завершённых потоков из кэша).
