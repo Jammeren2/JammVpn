@@ -191,8 +191,7 @@ async function loadSettings() {
   const s = await invoke("get_settings");
   $("default-to-proxy").checked = !!s.default_to_proxy;
   $("default-proxy").value = s.default_proxy || "";
-  // Сохранённые адрес прокси и выбранный узел (если заданы — иначе дефолты).
-  if (s.listen) $("listen").value = s.listen;
+  // Локальный адрес SOCKS фиксирован (127.0.0.1:1080) — поле убрано из UI.
   if (s.proxy_node) {
     $("server").value = s.proxy_node;
     // Уведомляем node-picker (ui.js) перерисовать выбор.
@@ -206,7 +205,7 @@ async function loadSettings() {
 async function saveConnection() {
   try {
     await invoke("set_connection", {
-      listen: $("listen").value.trim() || null,
+      listen: null, // фиксированный дефолт на бэкенде (127.0.0.1:1080)
       proxyNode: $("server").value || null,
     });
   } catch (e) {
@@ -465,7 +464,7 @@ async function updateSubs() {
 
 // Запускает только SOCKS5-прокси (внутреннее). Бросает при ошибке.
 async function startProxy() {
-  const listen = $("listen").value.trim() || "127.0.0.1:1080";
+  const listen = "127.0.0.1:1080"; // фиксированный локальный адрес SOCKS
   const server = $("server").value || null;
   const addr = await invoke("proxy_start", { listen, server });
   checkConnectivity(addr);
@@ -1247,8 +1246,7 @@ async function init() {
   $("btn-split-apply").addEventListener("click", applySplit);
   if ($("sp-driver")) $("sp-driver").addEventListener("change", onSplitDriverChange);
   $("btn-split-clear").addEventListener("click", clearSplit);
-  // Автосохранение адреса прокси и выбранного узла при изменении.
-  $("listen").addEventListener("change", saveConnection);
+  // Автосохранение выбранного узла при изменении.
   $("server").addEventListener("change", onNodeChange);
   // Локальный WG-сервер.
   $("btn-lwg-start").addEventListener("click", startLocalWg);

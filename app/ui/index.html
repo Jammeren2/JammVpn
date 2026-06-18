@@ -159,7 +159,28 @@
           <!-- ====================== МАРШРУТЫ ====================== -->
           <section class="panel panel-routes">
             <div class="ph-row">
-              <div><div class="ph" style="margin: 0">Правила маршрутизации</div><div class="sub">Сверху вниз, первое совпадение определяет путь трафика.</div></div>
+              <div><div class="ph" style="margin: 0">SOCKS-маршрутизация</div><div class="sub">Правила «IP/порт/домен → узел» для SOCKS5-прокси. Нет совпадений — идёт через узел по умолчанию.</div></div>
+            </div>
+
+            <div class="acard wide" style="margin-bottom: 16px">
+              <div class="t">Узел по умолчанию (общий)</div>
+              <div class="tog-row">
+                <div class="nm"><div class="a">Трафик без правил → через прокси</div><div class="b">Иначе соединения, не покрытые правилами, идут напрямую</div></div>
+                <button class="toggle" data-tg-for="default-to-proxy"><i></i></button>
+                <input type="checkbox" id="default-to-proxy" class="visually-hidden" />
+              </div>
+              <label class="lbl" style="margin-top: 6px">Узел по умолчанию<select class="sel" id="default-proxy"><option value="">— первый доступный —</option></select></label>
+              <div class="tog-row" style="margin-top: 10px">
+                <div class="nm"><div class="a">Системный прокси Windows</div><div class="b">Прописывает этот SOCKS как системный прокси (можно только один)</div></div>
+                <button class="toggle" data-tg-for="sysproxy"><i></i></button>
+                <input type="checkbox" id="sysproxy" class="visually-hidden" />
+              </div>
+              <div class="hint" id="sysproxy-msg" style="margin-top: 8px"></div>
+              <div class="form-row" style="margin-top: 12px"><button class="btn-sm primary" id="btn-save-settings">Сохранить</button><span class="hint" id="settings-msg" style="margin: 0"></span></div>
+            </div>
+
+            <div class="ph-row">
+              <div><div class="ph" style="margin: 0">Правила</div><div class="sub">Сверху вниз, первое совпадение определяет путь трафика.</div></div>
             </div>
             <div class="presets"><span class="lbl">Пресеты:</span><div id="presets" style="display: flex; gap: 8px; flex-wrap: wrap"></div></div>
             <div class="rules" id="rules"></div>
@@ -218,29 +239,6 @@
           <section class="panel panel-advanced">
             <div class="ph">Дополнительно</div>
             <div class="adv-grid">
-              <div class="acard">
-                <div class="t">Подключение</div>
-                <label class="lbl" style="margin-bottom: 6px">Локальный адрес (SOCKS5 / HTTP)</label>
-                <input class="inp" id="listen" value="127.0.0.1:1080" />
-                <div class="tog-row" style="margin-top: 8px">
-                  <div class="nm"><div class="a">Системный прокси Windows</div><div class="b">Прописывает прокси в настройки WinINET</div></div>
-                  <button class="toggle" data-tg-for="sysproxy"><i></i></button>
-                  <input type="checkbox" id="sysproxy" class="visually-hidden" />
-                </div>
-                <div class="hint" id="sysproxy-msg" style="margin-top: 8px"></div>
-              </div>
-
-              <div class="acard">
-                <div class="t">Маршрутизация по умолчанию</div>
-                <div class="tog-row">
-                  <div class="nm"><div class="a">Трафик без правил → через прокси</div><div class="b">Иначе соединения идут напрямую</div></div>
-                  <button class="toggle" data-tg-for="default-to-proxy"><i></i></button>
-                  <input type="checkbox" id="default-to-proxy" class="visually-hidden" />
-                </div>
-                <label class="lbl" style="margin-top: 6px">Узел по умолчанию<select class="sel" id="default-proxy"><option value="">— первый доступный —</option></select></label>
-                <div class="form-row" style="margin-top: 12px"><button class="btn-sm primary" id="btn-save-settings">Сохранить</button><span class="hint" id="settings-msg" style="margin: 0"></span></div>
-              </div>
-
               <div class="acard wide">
                 <div class="ahead"><div class="t">Локальный WireGuard-сервер</div><span class="status off" id="lwg-status">остановлен</span></div>
                 <p class="hint" style="margin: 0 0 16px">
