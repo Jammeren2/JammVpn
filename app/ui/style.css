@@ -526,3 +526,15 @@ textarea.ta:focus { outline: none; border-color: #22d3ee; box-shadow: 0 0 0 3px 
 .splash .stitle b { color: #22d3ee; }
 .splash .sspin { width: 28px; height: 28px; border-radius: 50%; border: 3px solid rgba(255, 255, 255, 0.12); border-top-color: #22d3ee; animation: sspin 0.8s linear infinite; }
 .splash .sstatus { color: #5b6479; font: 500 12.5px "JetBrains Mono"; min-height: 18px; }
+
+/* Компактный селект (выбор драйвера split и т.п.). */
+.sel-sm {
+  background: var(--card, #1a1f2e);
+  color: var(--text, #e6e9f0);
+  border: 1px solid var(--border, #2a3142);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.sel-sm:focus { outline: none; border-color: var(--accent, #4a90e2); }

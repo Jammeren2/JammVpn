@@ -368,6 +368,18 @@ fn install_split_driver() -> Result<String, String> {
     ctl::install_split_driver()
 }
 
+/// Текущий драйвер split (`winpkfilter` | `windivert`).
+#[tauri::command]
+fn get_split_driver() -> String {
+    ctl::get_split_driver()
+}
+
+/// Выбрать драйвер split (применится при следующем запуске split).
+#[tauri::command]
+fn set_split_driver(driver: String) -> Result<(), String> {
+    ctl::set_split_driver(&driver)
+}
+
 /// Список сохранённых подписок.
 #[tauri::command]
 fn list_subscriptions() -> Vec<ctl::SubscriptionInfo> {
@@ -597,6 +609,8 @@ fn main() {
             relaunch_as_admin,
             split_driver_installed,
             install_split_driver,
+            get_split_driver,
+            set_split_driver,
             read_log,
             clear_log,
             app_version,

@@ -10,5 +10,7 @@ mod config;
 mod engine;
 
 pub use cidr::IpCidr;
-pub use config::{AppMatcher, ConnApp, SplitConfig, SplitMode, ALWAYS_BYPASS_CIDRS};
+pub use config::{
+    AppMatcher, ConnApp, SplitConfig, SplitDriver, SplitMode, ALWAYS_BYPASS_CIDRS,
+};
 pub use engine::{decide, Action, ConnRequest};

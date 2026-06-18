@@ -34,8 +34,9 @@ dist-ssr/
 /wfp-driver/build/
 *.sys
 *.obj
-# Но вшиваемый в exe драйвер WinpkFilter (ndisrd) — храним в репо.
+# Но вшиваемые в exe драйверы (WinpkFilter ndisrd, WinDivert) — храним в репо.
 !/crates/platform-windows/drivers/ndisrd/amd64/ndisrd.sys
+!/crates/platform-windows/drivers/windivert/WinDivert64.sys
 
 # ─── Секреты и пользовательские конфиги ────────────────────────
 .env

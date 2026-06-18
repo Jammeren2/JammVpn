@@ -33,4 +33,4 @@ pub use parse::{
 };
 pub use routing::{evaluate, RouteAction, RouteRequest, Rule};
 pub use secret::{NoopStore, SecretError, SecretStore};
-pub use split::{decide, Action, SplitConfig, SplitMode};
+pub use split::{decide, Action, SplitConfig, SplitDriver, SplitMode};

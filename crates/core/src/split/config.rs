@@ -11,6 +11,16 @@ pub enum SplitMode {
     Exclusive,
 }
 
+/// Драйвер захвата пакетов для split-туннелирования.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SplitDriver {
+    /// Windows Packet Filter (ndisrd) — NDIS LWF, по умолчанию.
+    #[default]
+    WinpkFilter,
+    /// WinDivert — захват на NETWORK-слое (как у WireSock). Экспериментально.
+    WinDivert,
+}
+
 /// Способ сопоставления приложения (`SPL-08`, `SPL-09`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppMatcher {
@@ -73,6 +83,9 @@ pub struct SplitConfig {
     pub force_tunnel_cidrs: Vec<String>,
     /// Адреса активного VPN-сервера для hairpin-исключения (`SPL-27`..`SPL-29`).
     pub server_endpoints: Vec<String>,
+    /// Драйвер захвата (старые конфиги без поля → WinpkFilter).
+    #[serde(default)]
+    pub driver: SplitDriver,
 }
 
 impl Default for SplitConfig {
@@ -85,6 +98,7 @@ impl Default for SplitConfig {
             force_direct_cidrs: Vec::new(),
             force_tunnel_cidrs: Vec::new(),
             server_endpoints: Vec::new(),
+            driver: SplitDriver::WinpkFilter,
         }
     }
 }

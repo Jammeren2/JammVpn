@@ -737,8 +737,30 @@ async function loadSplit() {
   $("sp-captured").textContent =
     "Перехватываемые приложения: " +
     (apps.length ? apps.join(", ") : "— (добавьте правило с процессом и действием «проксировать»)");
+  try {
+    const drv = await invoke("get_split_driver");
+    const sel = $("sp-driver");
+    if (sel) sel.value = drv;
+  } catch (_) {}
   setSplitState(await invoke("split_status"));
   window.syncToggles && window.syncToggles();
+}
+
+async function onSplitDriverChange() {
+  const sel = $("sp-driver");
+  const msg = $("split-msg");
+  try {
+    await invoke("set_split_driver", { driver: sel.value });
+    if (msg) {
+      msg.textContent =
+        sel.value === "windivert"
+          ? "драйвер: WinDivert (экспериментально). Применится при следующем «Применить»."
+          : "драйвер: WinpkFilter. Применится при следующем «Применить».";
+      msg.className = "hint ok";
+    }
+  } catch (e) {
+    if (msg) { msg.textContent = "ошибка смены драйвера: " + e; msg.className = "hint err"; }
+  }
 }
 
 async function saveSplit() {
@@ -1230,6 +1252,7 @@ async function init() {
   $("sysproxy").addEventListener("change", toggleSysProxy);
   $("btn-split-save").addEventListener("click", saveSplit);
   $("btn-split-apply").addEventListener("click", applySplit);
+  if ($("sp-driver")) $("sp-driver").addEventListener("change", onSplitDriverChange);
   $("btn-split-clear").addEventListener("click", clearSplit);
   // Автосохранение адреса прокси и выбранного узла при изменении.
   $("listen").addEventListener("change", saveConnection);

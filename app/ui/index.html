@@ -280,6 +280,13 @@
                   <b>WinpkFilter (ndisrd)</b> и запуск от администратора.
                 </p>
                 <div class="tog-row" style="border: none; padding-top: 0">
+                  <div class="nm"><div class="a">Драйвер захвата</div><div class="b">WinpkFilter (по умолчанию) или WinDivert (как у WireSock, экспериментально)</div></div>
+                  <select id="sp-driver" class="sel-sm">
+                    <option value="winpkfilter">WinpkFilter (ndisrd)</option>
+                    <option value="windivert">WinDivert</option>
+                  </select>
+                </div>
+                <div class="tog-row" style="border: none; padding-top: 0">
                   <div class="nm"><div class="a">Kill-switch</div><div class="b">Не выпускать перехваченный трафик при неготовом тоннеле</div></div>
                   <button class="toggle" data-tg-for="sp-kill"><i></i></button>
                   <input type="checkbox" id="sp-kill" class="visually-hidden" />

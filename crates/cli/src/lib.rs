@@ -1470,6 +1470,7 @@ fn rules_to_split(cfg: &AppConfig) -> SplitConfig {
         force_direct_cidrs: cfg.split.force_direct_cidrs.clone(),
         force_tunnel_cidrs: cfg.split.force_tunnel_cidrs.clone(),
         server_endpoints: endpoints,
+        driver: cfg.split.driver,
     }
 }
 
@@ -1528,6 +1529,28 @@ pub fn set_split_options(kill_switch: bool) -> Result<(), String> {
     let store = secret_store();
     let mut cfg = load_config(&path, store.as_ref());
     cfg.split.kill_switch = kill_switch;
+    save_config(&path, &cfg, store.as_ref())
+}
+
+/// Текущий драйвер split (`"winpkfilter"` | `"windivert"`).
+pub fn get_split_driver() -> String {
+    match load().split.driver {
+        jammvpn_core::SplitDriver::WinDivert => "windivert".into(),
+        jammvpn_core::SplitDriver::WinpkFilter => "winpkfilter".into(),
+    }
+}
+
+/// Устанавливает драйвер split. Применяется при следующем запуске split.
+pub fn set_split_driver(driver: &str) -> Result<(), String> {
+    let d = match driver {
+        "windivert" => jammvpn_core::SplitDriver::WinDivert,
+        "winpkfilter" => jammvpn_core::SplitDriver::WinpkFilter,
+        other => return Err(format!("неизвестный драйвер: {other}")),
+    };
+    let path = config_path();
+    let store = secret_store();
+    let mut cfg = load_config(&path, store.as_ref());
+    cfg.split.driver = d;
     save_config(&path, &cfg, store.as_ref())
 }
 
@@ -1869,6 +1892,11 @@ pub fn relaunch_as_admin() -> Result<(), String> {
 pub fn split_driver_installed() -> bool {
     #[cfg(windows)]
     {
+        // WinDivert ставит свою службу сам при первом запуске split (драйвер вшит),
+        // отдельная пред-установка не нужна — считаем «готов».
+        if matches!(load().split.driver, jammvpn_core::SplitDriver::WinDivert) {
+            return true;
+        }
         jammvpn_platform_windows::winpkfilter::driver::is_installed()
     }
     #[cfg(not(windows))]
@@ -1997,8 +2025,15 @@ impl LocalWgController {
 pub struct WinpkSplitController {
     // Держим netstack живым (Drop остановит стек и relay-задачи).
     _netstack: Arc<jammvpn_net::netstack::Netstack>,
-    tunnel: Option<jammvpn_platform_windows::winpkfilter::SplitTunnel>,
+    tunnel: Option<SplitTunnelBackend>,
     out_task: tokio::task::JoinHandle<()>,
+}
+
+/// Активный split-перехват одного из драйверов (выбор — `cfg.split.driver`).
+#[cfg(windows)]
+enum SplitTunnelBackend {
+    Winpk(jammvpn_platform_windows::winpkfilter::SplitTunnel),
+    Divert(jammvpn_platform_windows::windivert::SplitTunnel),
 }
 
 #[cfg(windows)]
@@ -2010,10 +2045,12 @@ impl WinpkSplitController {
         let cfg = load();
         let split_cfg = rules_to_split(&cfg);
         let upstream = cfg.settings.proxy_node.clone();
+        let driver = cfg.split.driver;
         log_line(&format!(
-            "split start: apps={:?} mode={:?} upstream={:?} elevated={}",
+            "split start: apps={:?} mode={:?} driver={:?} upstream={:?} elevated={}",
             split_cfg.apps,
             split_cfg.mode,
+            driver,
             upstream,
             jammvpn_platform_windows::winpkfilter::is_elevated()
         ));
@@ -2029,21 +2066,42 @@ impl WinpkSplitController {
         let ns = netstack.clone();
         let logger: jammvpn_platform_windows::winpkfilter::Logger =
             std::sync::Arc::new(|m: String| log_line(&m));
-        let tunnel = jammvpn_platform_windows::winpkfilter::SplitTunnel::start(
-            split_cfg,
-            Box::new(move |ip: &[u8]| ns.inject(ip)),
-            logger,
-        )?;
-        let injector = tunnel.injector();
-        // Ответы из netstack → реинъекция приложению.
-        let out_task = tokio::spawn(async move {
-            while let Some(ip) = out.recv().await {
-                injector.inject(ip);
+
+        // Выбор драйвера захвата. Оба бэкенда имеют одинаковый API
+        // (start/injector/stop), поэтому ветвим целиком.
+        let (backend, out_task) = match driver {
+            jammvpn_core::SplitDriver::WinDivert => {
+                let tunnel = jammvpn_platform_windows::windivert::SplitTunnel::start(
+                    split_cfg,
+                    Box::new(move |ip: &[u8]| ns.inject(ip)),
+                    logger,
+                )?;
+                let injector = tunnel.injector();
+                let out_task = tokio::spawn(async move {
+                    while let Some(ip) = out.recv().await {
+                        injector.inject(ip);
+                    }
+                });
+                (SplitTunnelBackend::Divert(tunnel), out_task)
             }
-        });
+            jammvpn_core::SplitDriver::WinpkFilter => {
+                let tunnel = jammvpn_platform_windows::winpkfilter::SplitTunnel::start(
+                    split_cfg,
+                    Box::new(move |ip: &[u8]| ns.inject(ip)),
+                    logger,
+                )?;
+                let injector = tunnel.injector();
+                let out_task = tokio::spawn(async move {
+                    while let Some(ip) = out.recv().await {
+                        injector.inject(ip);
+                    }
+                });
+                (SplitTunnelBackend::Winpk(tunnel), out_task)
+            }
+        };
         Ok(Self {
             _netstack: netstack,
-            tunnel: Some(tunnel),
+            tunnel: Some(backend),
             out_task,
         })
     }
@@ -2051,7 +2109,10 @@ impl WinpkSplitController {
     /// Останавливает перехват и стек.
     pub fn stop(mut self) {
         if let Some(t) = self.tunnel.take() {
-            t.stop();
+            match t {
+                SplitTunnelBackend::Winpk(x) => x.stop(),
+                SplitTunnelBackend::Divert(x) => x.stop(),
+            }
         }
         self.out_task.abort();
     }
