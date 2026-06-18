@@ -308,10 +308,14 @@ fn capture_loop(
                     classify(ib.get_data(), ib.get_device_flags(), &config, &mut resolver)
                 };
                 match verdict {
-                    Verdict::Tunnel(ip, eth) => {
+                    Verdict::Tunnel(mut ip, eth) => {
                         n_out += 1;
                         n_tunnel += 1;
                         active = Some((handle, eth));
+                        // На NDIS-краю контрольные суммы ещё не посчитаны
+                        // (checksum offload) — netstack/smoltcp валидирует rx и
+                        // иначе отбросил бы пакет. WinDivert (L3) делает то же.
+                        recalc_checksums(&mut ip);
                         on_capture(&ip);
                         // оригинал не реинъектим (дропнут tunnel-режимом).
                     }
@@ -375,6 +379,71 @@ fn classify(
     }
 }
 
+#[cfg(test)]
+mod checksum_tests {
+    use super::{recalc_checksums, sum16};
+
+    /// IPv4-заголовок валиден, если сумма всех 16-битных слов свёрнута в 0xFFFF.
+    fn ipv4_hdr_ok(ip: &[u8]) -> bool {
+        let ihl = ((ip[0] & 0x0F) as usize) * 4;
+        let mut s = sum16(&ip[..ihl], 0);
+        while s >> 16 != 0 {
+            s = (s & 0xFFFF) + (s >> 16);
+        }
+        s as u16 == 0xFFFF
+    }
+
+    /// TCP/UDP валиден, если псевдозаголовок+сегмент свёрнуты в 0xFFFF.
+    fn l4_ok(ip: &[u8]) -> bool {
+        let ihl = ((ip[0] & 0x0F) as usize) * 4;
+        let total = u16::from_be_bytes([ip[2], ip[3]]) as usize;
+        let proto = ip[9];
+        let l4 = &ip[ihl..total];
+        let mut pseudo = 0u32;
+        pseudo = sum16(&ip[12..16], pseudo);
+        pseudo = sum16(&ip[16..20], pseudo);
+        pseudo += proto as u32 + l4.len() as u32;
+        let mut s = sum16(l4, pseudo);
+        while s >> 16 != 0 {
+            s = (s & 0xFFFF) + (s >> 16);
+        }
+        s as u16 == 0xFFFF
+    }
+
+    #[test]
+    fn recalc_makes_ipv4_tcp_valid() {
+        // IPv4 (ihl=5) + TCP (20 байт) + 4 байта payload, суммы обнулены/мусор.
+        let mut ip = vec![
+            0x45, 0x00, 0x00, 0x2c, // ver/ihl, tos, total_len=44
+            0x12, 0x34, 0x40, 0x00, // id, flags/frag
+            0x40, 0x06, 0xff, 0xff, // ttl, proto=6(TCP), checksum=мусор
+            192, 168, 1, 50, // src
+            93, 184, 216, 34, // dst
+            // TCP
+            0xc0, 0x00, 0x01, 0xbb, // sport, dport=443
+            0x00, 0x00, 0x00, 0x01, // seq
+            0x00, 0x00, 0x00, 0x00, // ack
+            0x50, 0x18, 0xff, 0xff, // off/flags, window
+            0xab, 0xcd, 0x00, 0x00, // checksum=мусор, urg
+            0xde, 0xad, 0xbe, 0xef, // payload
+        ];
+        recalc_checksums(&mut ip);
+        assert!(ipv4_hdr_ok(&ip), "IPv4-заголовок невалиден после пересчёта");
+        assert!(l4_ok(&ip), "TCP-сумма невалидна после пересчёта");
+    }
+
+    #[test]
+    fn truncated_lso_packet_left_untouched() {
+        // total_len=64000, но буфер мал → обрезанный LSO, не трогаем.
+        let mut ip = vec![0x45, 0x00, 0xfa, 0x00, 0, 0, 0, 0, 0x40, 0x06, 0, 0];
+        ip.extend_from_slice(&[192, 168, 1, 50, 93, 184, 216, 34]);
+        ip.extend_from_slice(&[0u8; 20]);
+        let before = ip.clone();
+        recalc_checksums(&mut ip);
+        assert_eq!(ip, before, "обрезанный LSO-пакет не должен меняться");
+    }
+}
+
 fn passthrough(outgoing: bool) -> Verdict {
     if outgoing {
         Verdict::ToAdapter
@@ -429,4 +498,104 @@ fn parse_ip(ip: &[u8]) -> Option<(Proto, bool, u16, IpAddr, u16)> {
     let src_port = u16::from_be_bytes([l4[0], l4[1]]);
     let dst_port = u16::from_be_bytes([l4[2], l4[3]]);
     Some((proto, is_v6, src_port, dst_ip, dst_port))
+}
+
+/// Сумма 16-битных слов (для контрольной суммы интернета), с начальным `init`.
+fn sum16(data: &[u8], init: u32) -> u32 {
+    let mut sum = init;
+    let mut i = 0;
+    while i + 1 < data.len() {
+        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < data.len() {
+        sum += (data[i] as u32) << 8; // нечётный хвост — старший байт
+    }
+    sum
+}
+
+/// Свёртка переносов + дополнение до единицы → итоговая контрольная сумма.
+fn fold(mut sum: u32) -> u16 {
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Записывает контрольную сумму TCP/UDP по уже накопленной сумме псевдозаголовка.
+/// `l4` — транспортный сегмент целиком; смещение поля: TCP=16, UDP=6.
+fn set_l4_checksum(proto: u8, l4: &mut [u8], pseudo: u32) {
+    let off = match proto {
+        6 => 16,  // TCP
+        17 => 6,  // UDP
+        _ => return,
+    };
+    if l4.len() < off + 2 {
+        return;
+    }
+    l4[off] = 0;
+    l4[off + 1] = 0;
+    let mut cs = fold(sum16(l4, pseudo));
+    if proto == 17 && cs == 0 {
+        cs = 0xFFFF; // UDP: нулевая сумма кодируется как 0xFFFF
+    }
+    l4[off..off + 2].copy_from_slice(&cs.to_be_bytes());
+}
+
+/// Пересчитывает контрольные суммы захваченного IP-пакета (IPv4-заголовок +
+/// TCP/UDP). На NDIS-краю они не посчитаны (checksum offload). Обрезанные
+/// LSO-суперсегменты (`total_length` > буфера) пропускаем — их не восстановить.
+fn recalc_checksums(ip: &mut [u8]) {
+    match ip.first().map(|b| b >> 4) {
+        Some(4) => {
+            if ip.len() < 20 {
+                return;
+            }
+            let ihl = ((ip[0] & 0x0F) as usize) * 4;
+            let total_len = u16::from_be_bytes([ip[2], ip[3]]) as usize;
+            if ihl < 20 || ihl > ip.len() || total_len < ihl || total_len > ip.len() {
+                return; // битый/обрезанный заголовок
+            }
+            let proto = ip[9];
+            let mut src = [0u8; 4];
+            src.copy_from_slice(&ip[12..16]);
+            let mut dst = [0u8; 4];
+            dst.copy_from_slice(&ip[16..20]);
+            // Контрольная сумма IPv4-заголовка.
+            ip[10] = 0;
+            ip[11] = 0;
+            let hc = fold(sum16(&ip[..ihl], 0));
+            ip[10..12].copy_from_slice(&hc.to_be_bytes());
+            // Транспортная сумма: псевдозаголовок + сегмент.
+            let l4 = &mut ip[ihl..total_len];
+            let l4_len = l4.len() as u32;
+            let mut pseudo = 0u32;
+            pseudo = sum16(&src, pseudo);
+            pseudo = sum16(&dst, pseudo);
+            pseudo += proto as u32 + l4_len;
+            set_l4_checksum(proto, l4, pseudo);
+        }
+        Some(6) => {
+            if ip.len() < 40 {
+                return;
+            }
+            let next = ip[6]; // без extension-заголовков (упрощение v1)
+            let payload = u16::from_be_bytes([ip[4], ip[5]]) as usize;
+            if payload == 0 || 40 + payload > ip.len() {
+                return;
+            }
+            let mut src = [0u8; 16];
+            src.copy_from_slice(&ip[8..24]);
+            let mut dst = [0u8; 16];
+            dst.copy_from_slice(&ip[24..40]);
+            let l4 = &mut ip[40..40 + payload];
+            let l4_len = l4.len() as u32;
+            let mut pseudo = 0u32;
+            pseudo = sum16(&src, pseudo);
+            pseudo = sum16(&dst, pseudo);
+            pseudo += next as u32 + l4_len;
+            set_l4_checksum(next, l4, pseudo);
+        }
+        _ => {}
+    }
 }
