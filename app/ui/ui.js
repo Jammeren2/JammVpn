@@ -898,7 +898,12 @@
   }
   function setupVersion() {
     const btn = $("ver-btn");
-    if (btn) btn.addEventListener("click", () => window.open("https://github.com/Jammeren2/JammVpn/releases", "_blank", "noopener"));
+    // Открываем страницу проекта в браузере по умолчанию через бэкенд
+    // (window.open в Tauri-webview не открывает внешний браузер).
+    if (btn)
+      btn.addEventListener("click", () => {
+        if (invoke) invoke("open_url", { url: "https://github.com/Jammeren2/JammVpn" }).catch(() => {});
+      });
     if (invoke) {
       invoke("app_version")
         .then((v) => {

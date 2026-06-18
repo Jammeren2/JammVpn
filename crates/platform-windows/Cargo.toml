@@ -31,7 +31,7 @@ windows-sys = { version = "0.59", features = [
 ndisapi = "0.5"
 # WinDivert — альтернативный драйвер split (как у WireSock). vendored: user-mode
 # собирается из исходников; signed WinDivert64.sys вшит и ставится в рантайме.
-windivert = { version = "0.7.0-beta.4", features = ["static"] }
+windivert = { version = "0.7.0-beta.4", features = ["vendored"] }
 # Атрибуция пакетов к процессу (таблицы TCP/UDP → PID → путь к exe) + Win32-события.
 # Версия пиннится под ту, что использует ndisapi 0.5.6 (общий тип HANDLE).
 windows = { version = "=0.54.0", features = [

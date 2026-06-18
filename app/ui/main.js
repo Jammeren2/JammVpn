@@ -1139,8 +1139,7 @@ async function startupChecks() {
   let v = "";
   try {
     v = await invoke("app_version");
-    const vn = $("ver-num");
-    if (vn) vn.textContent = "v" + v;
+    // Отображение версии в кнопке делает ui.js (setupVersion) — не дублируем.
   } catch (e) {}
   try {
     const nodes = await invoke("list_nodes");
@@ -1216,13 +1215,7 @@ async function init() {
   }
   $("btn-refresh").addEventListener("click", refreshNodes);
   $("btn-test").addEventListener("click", testLatencies);
-  // Кнопка версии слева сверху → страница проекта в браузере по умолчанию.
-  const verBtn = $("ver-btn");
-  if (verBtn) {
-    verBtn.addEventListener("click", () => {
-      invoke("open_url", { url: GITHUB_URL }).catch(() => {});
-    });
-  }
+  // Клик по кнопке версии (открытие GitHub) вешает ui.js (setupVersion).
   // Модалка «Добавить».
   $("btn-add-node").addEventListener("click", openAddModal);
   $("add-close").addEventListener("click", closeAddModal);
