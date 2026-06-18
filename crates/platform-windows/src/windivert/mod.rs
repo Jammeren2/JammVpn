@@ -226,8 +226,6 @@ fn capture_loop(
         };
 
         stats.captured.fetch_add(1, Ordering::Relaxed);
-        // Запоминаем адрес/интерфейс исходящего пакета для инъекции ответов.
-        *last_addr.lock().unwrap() = Some(packet.address.clone());
 
         let (verdict, info) = classify(&packet.data, &config, &mut resolver);
         if detailed < 15 {
@@ -238,7 +236,21 @@ fn capture_loop(
         match verdict {
             Verdict::Tunnel => {
                 stats.tunnel.fetch_add(1, Ordering::Relaxed);
-                on_capture(&packet.data);
+                // Запоминаем интерфейс именно ТУННЕЛЬНОГО потока (реальный NIC) —
+                // ответы инъектируем как входящие на этот интерфейс. (Адрес
+                // localhost-потоков сюда не попадёт.)
+                *last_addr.lock().unwrap() = Some(packet.address.clone());
+                // WinDivert ловит исходящие пакеты ДО offload-вычисления контрольных
+                // сумм — у них невалидные/нулевые суммы. netstack (smoltcp) валидирует
+                // RX-суммы и отбросил бы их → пересчитываем перед подачей.
+                let mut owned = packet.into_owned();
+                if let Err(e) = owned.recalculate_checksums(Default::default()) {
+                    let n = stats.send_err.fetch_add(1, Ordering::Relaxed);
+                    if n < 5 {
+                        log(format!("split(WinDivert): пересчёт сумм туннельного пакета: {e}"));
+                    }
+                }
+                on_capture(&owned.data);
                 // оригинал НЕ реинъектим — уходит в туннель (netstack).
             }
             Verdict::Direct => {
