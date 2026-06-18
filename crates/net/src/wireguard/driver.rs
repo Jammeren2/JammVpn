@@ -86,10 +86,18 @@ pub(super) async fn run(
         tokio::pin!(sleep);
         tokio::select! {
             r = udp.recv(&mut udp_buf) => {
-                if let Ok(n) = r {
-                    if let Some(clean) = obfs.unwrap(&udp_buf[..n]) {
-                        handle_incoming(&stack, &udp, &obfs, &mut tunn, &mut scratch, &clean).await;
+                match r {
+                    Ok(n) => {
+                        if let Some(clean) = obfs.unwrap(&udp_buf[..n]) {
+                            handle_incoming(&stack, &udp, &obfs, &mut tunn, &mut scratch, &clean).await;
+                        }
                     }
+                    // На Windows connected-UDP сокет возвращает WSAECONNRESET
+                    // мгновенно, когда peer недоступен (ICMP port-unreachable).
+                    // Ошибка приходит без задержки — без паузы ветка срабатывала
+                    // бы каждый виток = busy-loop на 100% CPU. Короткий backoff
+                    // гасит спин, оставаясь отзывчивым при оживании peer.
+                    Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
                 }
             }
             _ = ticker.tick() => {

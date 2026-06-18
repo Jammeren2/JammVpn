@@ -49,7 +49,16 @@ pub struct WgTunnel {
     wake_tx: mpsc::UnboundedSender<()>,
     notify: Arc<Notify>,
     next_port: AtomicU32,
-    _driver: tokio::task::JoinHandle<()>,
+    driver: tokio::task::JoinHandle<()>,
+}
+
+/// Без этого `Drop` сброс `WgTunnel` лишь *отсоединял* бы driver-task (дроп
+/// `JoinHandle` в tokio не отменяет задачу) — и драйвер крутился бы вечно,
+/// сжигая CPU на пустом `udp.recv` (особенно после latency-теста узлов).
+impl Drop for WgTunnel {
+    fn drop(&mut self) {
+        self.driver.abort();
+    }
 }
 
 impl WgTunnel {
@@ -150,7 +159,7 @@ impl WgTunnel {
             wake_tx,
             notify,
             next_port: AtomicU32::new(0),
-            _driver: driver,
+            driver,
         }))
     }
 
