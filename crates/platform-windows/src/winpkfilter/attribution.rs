@@ -19,7 +19,7 @@ use windows::Win32::System::Threading::{
 };
 
 /// Транспорт потока.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Proto {
     Tcp,
     Udp,

@@ -16,7 +16,7 @@ pub mod driver;
 use crate::winpkfilter::attribution::{Proto, ProcessResolver};
 use jammvpn_core::split::{decide, Action, ConnApp, ConnRequest, SplitConfig};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use windivert::layer::NetworkLayer;
@@ -37,20 +37,39 @@ struct DivertHandle(WinDivert<NetworkLayer>);
 unsafe impl Send for DivertHandle {}
 unsafe impl Sync for DivertHandle {}
 
+type AddrSlot = Arc<Mutex<Option<windivert::address::WinDivertAddress<NetworkLayer>>>>;
+
+/// Счётчики для диагностики split(WinDivert).
+#[derive(Default)]
+struct Stats {
+    captured: AtomicU64,
+    tunnel: AtomicU64,
+    direct: AtomicU64,
+    dropped: AtomicU64,
+    inject_ok: AtomicU64,
+    inject_err: AtomicU64,
+    send_err: AtomicU64,
+    no_addr: AtomicU64,
+}
+
 /// Запущенный split-перехват на WinDivert.
 pub struct SplitTunnel {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     handle: Arc<DivertHandle>,
     /// Адрес последнего исходящего пакета (интерфейс) — шаблон для инъекции ответов.
-    last_addr: Arc<Mutex<Option<windivert::address::WinDivertAddress<NetworkLayer>>>>,
+    last_addr: AddrSlot,
+    stats: Arc<Stats>,
+    log: Logger,
 }
 
 /// Хендл для инъекции ответных IP-пакетов из netstack обратно приложению.
 #[derive(Clone)]
 pub struct ResponseInjector {
     handle: Arc<DivertHandle>,
-    last_addr: Arc<Mutex<Option<windivert::address::WinDivertAddress<NetworkLayer>>>>,
+    last_addr: AddrSlot,
+    stats: Arc<Stats>,
+    log: Logger,
 }
 
 impl ResponseInjector {
@@ -60,14 +79,39 @@ impl ResponseInjector {
         // как входящий + impostor и пересчитываем контрольные суммы.
         let addr = { self.last_addr.lock().unwrap().clone() };
         let Some(mut addr) = addr else {
-            return; // ещё не видели исходящих — некуда инъектить
+            // Ещё не видели исходящих — некуда инъектить (нет интерфейса).
+            let n = self.stats.no_addr.fetch_add(1, Ordering::Relaxed);
+            if n < 3 {
+                (self.log)("split(WinDivert): инъекция ответа отложена — ещё нет исходящего пакета (нет шаблона интерфейса)".into());
+            }
+            return;
         };
         addr.set_outbound(false);
         addr.set_impostor(true);
+        let plen = ip_packet.len();
         let mut pkt = unsafe { WinDivertPacket::<NetworkLayer>::new(ip_packet) };
         pkt.address = addr;
-        let _ = pkt.recalculate_checksums(Default::default());
-        let _ = self.handle.0.send(&pkt);
+        if let Err(e) = pkt.recalculate_checksums(Default::default()) {
+            let n = self.stats.inject_err.fetch_add(1, Ordering::Relaxed);
+            if n < 5 {
+                (self.log)(format!("split(WinDivert): пересчёт контрольных сумм ответа ({plen} б): {e}"));
+            }
+            return;
+        }
+        match self.handle.0.send(&pkt) {
+            Ok(_) => {
+                let n = self.stats.inject_ok.fetch_add(1, Ordering::Relaxed);
+                if n == 0 {
+                    (self.log)(format!("split(WinDivert): ПЕРВЫЙ ответ инъектирован приложению ({plen} б) ✓"));
+                }
+            }
+            Err(e) => {
+                let n = self.stats.inject_err.fetch_add(1, Ordering::Relaxed);
+                if n < 5 {
+                    (self.log)(format!("split(WinDivert): ОШИБКА инъекции ответа ({plen} б): {e}"));
+                }
+            }
+        }
     }
 }
 
@@ -90,17 +134,23 @@ impl SplitTunnel {
         let filter = "outbound and (tcp or udp)";
         let wd = WinDivert::<NetworkLayer>::network(filter, 0, WinDivertFlags::new())
             .map_err(|e| format!("WinDivertOpen: {e}. Установлен ли драйвер и есть ли права админа?"))?;
+        log(format!(
+            "split(WinDivert): хендл открыт (фильтр «{filter}»), драйвер ОК"
+        ));
         let handle = Arc::new(DivertHandle(wd));
         let last_addr = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
+        let stats = Arc::new(Stats::default());
 
         let thread = {
             let stop = stop.clone();
             let handle = handle.clone();
             let last_addr = last_addr.clone();
+            let stats = stats.clone();
+            let log = log.clone();
             std::thread::Builder::new()
                 .name("windivert-capture".into())
-                .spawn(move || capture_loop(stop, config, on_capture, handle, last_addr, log))
+                .spawn(move || capture_loop(stop, config, on_capture, handle, last_addr, stats, log))
                 .map_err(|e| e.to_string())?
         };
 
@@ -109,6 +159,8 @@ impl SplitTunnel {
             thread: Some(thread),
             handle,
             last_addr,
+            stats,
+            log,
         })
     }
 
@@ -117,6 +169,8 @@ impl SplitTunnel {
         ResponseInjector {
             handle: self.handle.clone(),
             last_addr: self.last_addr.clone(),
+            stats: self.stats.clone(),
+            log: self.log.clone(),
         }
     }
 
@@ -131,69 +185,121 @@ impl SplitTunnel {
 }
 
 /// Главный цикл захвата (отдельный поток).
+#[allow(clippy::too_many_arguments)]
 fn capture_loop(
     stop: Arc<AtomicBool>,
     config: SplitConfig,
     mut on_capture: OnCapture,
     handle: Arc<DivertHandle>,
-    last_addr: Arc<Mutex<Option<windivert::address::WinDivertAddress<NetworkLayer>>>>,
+    last_addr: AddrSlot,
+    stats: Arc<Stats>,
     log: Logger,
 ) {
-    log(format!("split(WinDivert): старт, приложения: {:?}", config.apps));
+    log(format!(
+        "split(WinDivert): поток захвата запущен; режим={:?}, приложения={:?}, kill_switch={}",
+        config.mode, config.apps, config.kill_switch
+    ));
     let mut resolver = ProcessResolver::new();
     let mut buf = vec![0u8; 65535];
-    let (mut n_tunnel, mut n_direct) = (0u64, 0u64);
+    let mut detailed = 0u32; // сколько пакетов залогировать детально
+    let mut recv_err = 0u32;
     let mut last_report = std::time::Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
         // Блокирующий recv с таймаутом, чтобы периодически проверять stop.
         let packet = match handle.0.recv_wait(&mut buf, 200) {
             Ok(Some(p)) => p,
-            Ok(None) => continue, // таймаут
-            Err(_) => {
+            Ok(None) => {
+                periodic_report(&stats, &mut last_report, &log);
+                continue;
+            }
+            Err(e) => {
                 if stop.load(Ordering::Relaxed) {
                     break;
+                }
+                recv_err += 1;
+                if recv_err <= 5 {
+                    log(format!("split(WinDivert): ошибка recv: {e}"));
                 }
                 continue;
             }
         };
 
-        if last_report.elapsed().as_secs() >= 5 {
-            log(format!("split(WinDivert): туннель={n_tunnel} прямо={n_direct}"));
-            last_report = std::time::Instant::now();
+        stats.captured.fetch_add(1, Ordering::Relaxed);
+        // Запоминаем адрес/интерфейс исходящего пакета для инъекции ответов.
+        *last_addr.lock().unwrap() = Some(packet.address.clone());
+
+        let (verdict, info) = classify(&packet.data, &config, &mut resolver);
+        if detailed < 15 {
+            detailed += 1;
+            log(format!("split(WinDivert): пакет#{detailed} {info} → {verdict:?}"));
         }
 
-        let verdict = classify(&packet.data, &config, &mut resolver);
-        // Запоминаем интерфейс исходящего пакета для инъекции ответов.
-        {
-            *last_addr.lock().unwrap() = Some(packet.address.clone());
-        }
         match verdict {
             Verdict::Tunnel => {
-                n_tunnel += 1;
+                stats.tunnel.fetch_add(1, Ordering::Relaxed);
                 on_capture(&packet.data);
-                // оригинал НЕ реинъектим — пакет уходит в туннель.
+                // оригинал НЕ реинъектим — уходит в туннель (netstack).
             }
             Verdict::Direct => {
-                n_direct += 1;
-                let _ = handle.0.send(&packet); // напрямую
+                stats.direct.fetch_add(1, Ordering::Relaxed);
+                if let Err(e) = handle.0.send(&packet) {
+                    let n = stats.send_err.fetch_add(1, Ordering::Relaxed);
+                    if n < 5 {
+                        log(format!("split(WinDivert): ошибка реинъекции (прямой трафик): {e}"));
+                    }
+                }
             }
-            Verdict::Drop => {}
+            Verdict::Drop => {
+                stats.dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
+        periodic_report(&stats, &mut last_report, &log);
     }
-    log("split(WinDivert): остановлен".into());
+    log(format!(
+        "split(WinDivert): остановлен. {}",
+        stats_line(&stats)
+    ));
 }
 
+/// Периодический отчёт о счётчиках (раз в ~3 с).
+fn periodic_report(stats: &Stats, last: &mut std::time::Instant, log: &Logger) {
+    if last.elapsed().as_secs() >= 3 {
+        log(format!("split(WinDivert): {}", stats_line(stats)));
+        *last = std::time::Instant::now();
+    }
+}
+
+fn stats_line(s: &Stats) -> String {
+    use Ordering::Relaxed;
+    format!(
+        "захвачено={} туннель={} прямо={} дроп={} инъекций={} (ошибок_инъекции={}) ошибок_send={} нет_адреса={}",
+        s.captured.load(Relaxed),
+        s.tunnel.load(Relaxed),
+        s.direct.load(Relaxed),
+        s.dropped.load(Relaxed),
+        s.inject_ok.load(Relaxed),
+        s.inject_err.load(Relaxed),
+        s.send_err.load(Relaxed),
+        s.no_addr.load(Relaxed),
+    )
+}
+
+#[derive(Debug)]
 enum Verdict {
     Tunnel,
     Direct,
     Drop,
 }
 
-/// Классифицирует исходящий IP-пакет: туннель / напрямую / дроп (kill-switch).
-fn classify(ip: &[u8], config: &SplitConfig, resolver: &mut ProcessResolver) -> Verdict {
+/// Классифицирует исходящий IP-пакет → (вердикт, строка для лога).
+fn classify(
+    ip: &[u8],
+    config: &SplitConfig,
+    resolver: &mut ProcessResolver,
+) -> (Verdict, String) {
     let Some((proto, is_v6, local_port, dst_ip, dst_port)) = parse_ip(ip) else {
-        return Verdict::Direct;
+        return (Verdict::Direct, "не-TCP/UDP/короткий → прямо".into());
     };
     let app = resolver
         .resolve(proto, is_v6, local_port)
@@ -201,16 +307,25 @@ fn classify(ip: &[u8], config: &SplitConfig, resolver: &mut ProcessResolver) -> 
             exe_path: None,
             process_name: None,
         });
+    let app_name = app
+        .process_name
+        .clone()
+        .or_else(|| app.exe_path.clone())
+        .unwrap_or_else(|| "<неизвестно>".into());
     let req = ConnRequest {
         app: &app,
         dst_ip,
         dst_port,
     };
-    match decide(&req, config, true) {
+    let verdict = match decide(&req, config, true) {
         Action::Tunnel => Verdict::Tunnel,
         Action::Direct => Verdict::Direct,
         Action::Block => Verdict::Drop,
-    }
+    };
+    let info = format!(
+        "{proto:?} :{local_port}→{dst_ip}:{dst_port} app={app_name}",
+    );
+    (verdict, info)
 }
 
 /// Разбирает IPv4/IPv6 + TCP/UDP: `(proto, is_v6, local_port, dst_ip, dst_port)`.
