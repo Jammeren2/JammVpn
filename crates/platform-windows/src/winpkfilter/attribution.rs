@@ -117,21 +117,6 @@ impl ProcessResolver {
         true
     }
 
-    /// Приложение по уже известному PID (например, из socket-слоя WinDivert).
-    /// Путь к exe кэшируется. Надёжнее, чем поиск по порту (без гонки таблиц).
-    pub fn app_for_pid(&mut self, pid: u32) -> ConnApp {
-        let exe = self.exe_for(pid);
-        let process_name = exe.as_ref().and_then(|p| {
-            std::path::Path::new(p)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-        });
-        ConnApp {
-            exe_path: exe,
-            process_name,
-        }
-    }
-
     /// Кэшируемый путь к exe по PID.
     fn exe_for(&mut self, pid: u32) -> Option<String> {
         if let Some(cached) = self.pid_exe.get(&pid) {

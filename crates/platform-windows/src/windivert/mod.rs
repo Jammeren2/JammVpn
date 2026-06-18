@@ -37,99 +37,7 @@ struct DivertHandle(WinDivert<NetworkLayer>);
 unsafe impl Send for DivertHandle {}
 unsafe impl Sync for DivertHandle {}
 
-/// Надёжная атрибуция через SOCKET-слой WinDivert: события `SocketConnect` дают
-/// PID процесса в момент `connect()` (ДО того как NETWORK-слой увидит SYN), без
-/// гонки таблиц соединений. Карта `(local_port, remote_ip, remote_port) → PID`.
-struct SocketAttributor {
-    map: Arc<Mutex<std::collections::HashMap<(u16, IpAddr, u16), u32>>>,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
-}
-
-/// Send-обёртка над socket-хендлом (используется только в своём потоке).
-struct SocketHandle(WinDivert<windivert::layer::SocketLayer>);
-unsafe impl Send for SocketHandle {}
-
-impl SocketAttributor {
-    fn start(log: Logger) -> SocketAttributor {
-        let map = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        // Открыть socket-слой best-effort: при сбое атрибуция просто откатится на
-        // таблицы (не критично для старта split).
-        let thread = match WinDivert::<windivert::layer::SocketLayer>::socket(
-            "outbound and (tcp or udp)",
-            -10,
-            WinDivertFlags::new(),
-        ) {
-            Ok(sock) => {
-                let sock = SocketHandle(sock);
-                let map = map.clone();
-                let stop = stop.clone();
-                std::thread::Builder::new()
-                    .name("windivert-socket".into())
-                    .spawn(move || socket_loop(sock, map, stop, log))
-                    .ok()
-            }
-            Err(e) => {
-                log(format!(
-                    "split(WinDivert): socket-слой недоступен ({e}) — атрибуция по таблицам"
-                ));
-                None
-            }
-        };
-        SocketAttributor { map, stop, thread }
-    }
-
-    fn stop(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-
-/// Поток чтения событий socket-слоя: ведёт карту (порт,удалённый)→PID.
-fn socket_loop(
-    sock: SocketHandle,
-    map: Arc<Mutex<std::collections::HashMap<(u16, IpAddr, u16), u32>>>,
-    stop: Arc<AtomicBool>,
-    log: Logger,
-) {
-    use windivert::prelude::WinDivertEvent;
-    log("split(WinDivert): socket-атрибуция запущена (события connect→PID)".into());
-    let mut count = 0u64;
-    while !stop.load(Ordering::Relaxed) {
-        match sock.0.recv_wait(200) {
-            Ok(Some(pkt)) => {
-                let a = &pkt.address;
-                let key = (a.local_port(), a.remote_address(), a.remote_port());
-                match a.event() {
-                    WinDivertEvent::SocketConnect => {
-                        map.lock().unwrap().insert(key, a.process_id());
-                        count += 1;
-                        if count == 1 {
-                            log("split(WinDivert): socket-атрибуция: первое событие connect получено ✓".into());
-                        }
-                    }
-                    WinDivertEvent::SocketClose => {
-                        map.lock().unwrap().remove(&key);
-                    }
-                    _ => {}
-                }
-            }
-            Ok(None) => continue,
-            Err(_) => {
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-        }
-    }
-}
-
 type AddrSlot = Arc<Mutex<Option<windivert::address::WinDivertAddress<NetworkLayer>>>>;
-/// Карта socket-атрибуции: `(local_port, remote_ip, remote_port) → PID`.
-type SocketMap = Arc<Mutex<std::collections::HashMap<(u16, IpAddr, u16), u32>>>;
 
 /// Счётчики для диагностики split(WinDivert).
 #[derive(Default)]
@@ -153,7 +61,6 @@ pub struct SplitTunnel {
     last_addr: AddrSlot,
     stats: Arc<Stats>,
     log: Logger,
-    socket_attr: Option<SocketAttributor>,
 }
 
 /// Хендл для инъекции ответных IP-пакетов из netstack обратно приложению.
@@ -234,10 +141,6 @@ impl SplitTunnel {
         let last_addr = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Stats::default());
-        // Надёжная атрибуция через socket-слой (PID на connect). Карту читает поток
-        // захвата; при недоступности socket-слоя — фолбэк на таблицы соединений.
-        let socket_attr = SocketAttributor::start(log.clone());
-        let socket_map = socket_attr.map.clone();
 
         let thread = {
             let stop = stop.clone();
@@ -247,9 +150,7 @@ impl SplitTunnel {
             let log = log.clone();
             std::thread::Builder::new()
                 .name("windivert-capture".into())
-                .spawn(move || {
-                    capture_loop(stop, config, on_capture, handle, last_addr, stats, socket_map, log)
-                })
+                .spawn(move || capture_loop(stop, config, on_capture, handle, last_addr, stats, log))
                 .map_err(|e| e.to_string())?
         };
 
@@ -260,7 +161,6 @@ impl SplitTunnel {
             last_addr,
             stats,
             log,
-            socket_attr: Some(socket_attr),
         })
     }
 
@@ -281,9 +181,6 @@ impl SplitTunnel {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        if let Some(sa) = self.socket_attr.take() {
-            sa.stop();
-        }
     }
 }
 
@@ -296,7 +193,6 @@ fn capture_loop(
     handle: Arc<DivertHandle>,
     last_addr: AddrSlot,
     stats: Arc<Stats>,
-    socket_map: SocketMap,
     log: Logger,
 ) {
     log(format!(
@@ -308,10 +204,6 @@ fn capture_loop(
     let mut detailed = 0u32; // сколько пакетов залогировать детально
     let mut recv_err = 0u32;
     let mut last_report = std::time::Instant::now();
-    // Кэш вердиктов по потокам: решение по ПЕРВОМУ пакету соединения применяется
-    // ко всем последующим — иначе гонка атрибуции (SYN «прямо», данные «в туннель»)
-    // расщепляет TLS-соединение между путями → «соединение не защищено».
-    let mut flows: std::collections::HashMap<FlowKey, Verdict> = std::collections::HashMap::new();
 
     while !stop.load(Ordering::Relaxed) {
         // Блокирующий recv с таймаутом, чтобы периодически проверять stop.
@@ -335,36 +227,7 @@ fn capture_loop(
 
         stats.captured.fetch_add(1, Ordering::Relaxed);
 
-        // Вердикт: из кэша потока (консистентность) либо решаем для нового потока.
-        let (verdict, info) = match parse_ip(&packet.data) {
-            None => (Verdict::Direct, "не-TCP/UDP/короткий → прямо".to_string()),
-            Some((proto, is_v6, lport, dst_ip, dst_port)) => {
-                let key: FlowKey = (lport, dst_ip, dst_port);
-                // Завершение TCP-потока → убираем из кэша (на случай переиспользования порта).
-                if tcp_fin_or_rst(&packet.data) {
-                    flows.remove(&key);
-                }
-                match flows.get(&key) {
-                    Some(&v) => (v, format!("{proto:?} :{lport}→{dst_ip}:{dst_port} (кэш)")),
-                    None => {
-                        let (v, app, known) = decide_for(
-                            proto, is_v6, lport, dst_ip, dst_port, &config, &mut resolver,
-                            &socket_map,
-                        );
-                        // Кэшируем ТОЛЬКО уверенный вердикт (процесс определён),
-                        // иначе ранний SYN залипнет «прямо» и соединение пойдёт мимо
-                        // туннеля (утечка IP). Неопределённые — переспрашиваем.
-                        if known {
-                            if flows.len() >= 16384 {
-                                flows.clear(); // backstop от роста памяти
-                            }
-                            flows.insert(key, v);
-                        }
-                        (v, format!("{proto:?} :{lport}→{dst_ip}:{dst_port} app={app} known={known}"))
-                    }
-                }
-            }
-        };
+        let (verdict, info) = classify(&packet.data, &config, &mut resolver);
         if detailed < 15 {
             detailed += 1;
             log(format!("split(WinDivert): пакет#{detailed} {info} → {verdict:?}"));
@@ -434,45 +297,28 @@ fn stats_line(s: &Stats) -> String {
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum Verdict {
     Tunnel,
     Direct,
     Drop,
 }
 
-/// Ключ потока для консистентного вердикта: (локальный порт, dst, dst-порт).
-type FlowKey = (u16, IpAddr, u16);
-
-/// Решение для потока: атрибуция к процессу + правила.
-/// Возвращает `(вердикт, имя_app, определён_ли_процесс)`. Последний флаг важен:
-/// вердикт кэшируется ТОЛЬКО когда процесс уверенно определён — иначе ранний SYN
-/// (порт ещё не в таблице соединений) залип бы как «прямо» на всё соединение.
-#[allow(clippy::too_many_arguments)]
-fn decide_for(
-    proto: Proto,
-    is_v6: bool,
-    local_port: u16,
-    dst_ip: IpAddr,
-    dst_port: u16,
+/// Классифицирует исходящий IP-пакет → (вердикт, строка для лога).
+fn classify(
+    ip: &[u8],
     config: &SplitConfig,
     resolver: &mut ProcessResolver,
-    socket_map: &SocketMap,
-) -> (Verdict, String, bool) {
-    // 1) Надёжно: PID из socket-слоя (событие connect, без гонки).
-    // 2) Фолбэк: поиск по таблицам соединений (как раньше).
-    let socket_pid = socket_map
-        .lock()
-        .unwrap()
-        .get(&(local_port, dst_ip, dst_port))
-        .copied();
-    let (app, known) = if let Some(pid) = socket_pid {
-        (resolver.app_for_pid(pid), true)
-    } else if let Some(a) = resolver.resolve(proto, is_v6, local_port) {
-        (a, true)
-    } else {
-        (ConnApp::default(), false)
+) -> (Verdict, String) {
+    let Some((proto, is_v6, local_port, dst_ip, dst_port)) = parse_ip(ip) else {
+        return (Verdict::Direct, "не-TCP/UDP/короткий → прямо".into());
     };
+    let app = resolver
+        .resolve(proto, is_v6, local_port)
+        .unwrap_or(ConnApp {
+            exe_path: None,
+            process_name: None,
+        });
     let app_name = app
         .process_name
         .clone()
@@ -488,21 +334,10 @@ fn decide_for(
         Action::Direct => Verdict::Direct,
         Action::Block => Verdict::Drop,
     };
-    (verdict, app_name, known)
-}
-
-/// Бит FIN или RST в TCP-флагах (для эвикции завершённых потоков из кэша).
-fn tcp_fin_or_rst(ip: &[u8]) -> bool {
-    let Some((Proto::Tcp, _, _, _, _)) = parse_ip(ip) else {
-        return false;
-    };
-    // Смещение TCP-флагов = IP-заголовок + 13.
-    let ihl = match ip[0] >> 4 {
-        4 => ((ip[0] & 0x0F) as usize) * 4,
-        6 => 40,
-        _ => return false,
-    };
-    ip.get(ihl + 13).is_some_and(|f| f & 0x05 != 0) // FIN(0x01)|RST(0x04)
+    let info = format!(
+        "{proto:?} :{local_port}→{dst_ip}:{dst_port} app={app_name}",
+    );
+    (verdict, info)
 }
 
 /// Разбирает IPv4/IPv6 + TCP/UDP: `(proto, is_v6, local_port, dst_ip, dst_port)`.
