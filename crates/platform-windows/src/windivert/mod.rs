@@ -204,6 +204,10 @@ fn capture_loop(
     let mut detailed = 0u32; // сколько пакетов залогировать детально
     let mut recv_err = 0u32;
     let mut last_report = std::time::Instant::now();
+    // Кэш вердиктов по потокам: решение по ПЕРВОМУ пакету соединения применяется
+    // ко всем последующим — иначе гонка атрибуции (SYN «прямо», данные «в туннель»)
+    // расщепляет TLS-соединение между путями → «соединение не защищено».
+    let mut flows: std::collections::HashMap<FlowKey, Verdict> = std::collections::HashMap::new();
 
     while !stop.load(Ordering::Relaxed) {
         // Блокирующий recv с таймаутом, чтобы периодически проверять stop.
@@ -227,7 +231,29 @@ fn capture_loop(
 
         stats.captured.fetch_add(1, Ordering::Relaxed);
 
-        let (verdict, info) = classify(&packet.data, &config, &mut resolver);
+        // Вердикт: из кэша потока (консистентность) либо решаем для нового потока.
+        let (verdict, info) = match parse_ip(&packet.data) {
+            None => (Verdict::Direct, "не-TCP/UDP/короткий → прямо".to_string()),
+            Some((proto, is_v6, lport, dst_ip, dst_port)) => {
+                let key: FlowKey = (lport, dst_ip, dst_port);
+                // Завершение TCP-потока → убираем из кэша (на случай переиспользования порта).
+                if tcp_fin_or_rst(&packet.data) {
+                    flows.remove(&key);
+                }
+                match flows.get(&key) {
+                    Some(&v) => (v, format!("{proto:?} :{lport}→{dst_ip}:{dst_port} (кэш)")),
+                    None => {
+                        let (v, app) =
+                            decide_for(proto, is_v6, lport, dst_ip, dst_port, &config, &mut resolver);
+                        if flows.len() >= 16384 {
+                            flows.clear(); // backstop от роста памяти
+                        }
+                        flows.insert(key, v);
+                        (v, format!("{proto:?} :{lport}→{dst_ip}:{dst_port} app={app}"))
+                    }
+                }
+            }
+        };
         if detailed < 15 {
             detailed += 1;
             log(format!("split(WinDivert): пакет#{detailed} {info} → {verdict:?}"));
@@ -297,22 +323,26 @@ fn stats_line(s: &Stats) -> String {
     )
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     Tunnel,
     Direct,
     Drop,
 }
 
-/// Классифицирует исходящий IP-пакет → (вердикт, строка для лога).
-fn classify(
-    ip: &[u8],
+/// Ключ потока для консистентного вердикта: (локальный порт, dst, dst-порт).
+type FlowKey = (u16, IpAddr, u16);
+
+/// Решение для НОВОГО потока: атрибуция к процессу + правила → (вердикт, имя app).
+fn decide_for(
+    proto: Proto,
+    is_v6: bool,
+    local_port: u16,
+    dst_ip: IpAddr,
+    dst_port: u16,
     config: &SplitConfig,
     resolver: &mut ProcessResolver,
 ) -> (Verdict, String) {
-    let Some((proto, is_v6, local_port, dst_ip, dst_port)) = parse_ip(ip) else {
-        return (Verdict::Direct, "не-TCP/UDP/короткий → прямо".into());
-    };
     let app = resolver
         .resolve(proto, is_v6, local_port)
         .unwrap_or(ConnApp {
@@ -334,10 +364,21 @@ fn classify(
         Action::Direct => Verdict::Direct,
         Action::Block => Verdict::Drop,
     };
-    let info = format!(
-        "{proto:?} :{local_port}→{dst_ip}:{dst_port} app={app_name}",
-    );
-    (verdict, info)
+    (verdict, app_name)
+}
+
+/// Бит FIN или RST в TCP-флагах (для эвикции завершённых потоков из кэша).
+fn tcp_fin_or_rst(ip: &[u8]) -> bool {
+    let Some((Proto::Tcp, _, _, _, _)) = parse_ip(ip) else {
+        return false;
+    };
+    // Смещение TCP-флагов = IP-заголовок + 13.
+    let ihl = match ip[0] >> 4 {
+        4 => ((ip[0] & 0x0F) as usize) * 4,
+        6 => 40,
+        _ => return false,
+    };
+    ip.get(ihl + 13).is_some_and(|f| f & 0x05 != 0) // FIN(0x01)|RST(0x04)
 }
 
 /// Разбирает IPv4/IPv6 + TCP/UDP: `(proto, is_v6, local_port, dst_ip, dst_port)`.
