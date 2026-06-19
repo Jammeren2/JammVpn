@@ -14,8 +14,10 @@ mod proto;
 mod stream;
 mod tls;
 mod tunnel;
+mod udp;
 
 pub use config::{Hysteria2Config, Hysteria2Params};
+pub use udp::Hysteria2Udp;
 
 use crate::target::Target;
 use crate::BoxedStream;

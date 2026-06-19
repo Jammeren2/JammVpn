@@ -24,6 +24,8 @@ pub struct Hysteria2Tunnel {
     // Удерживает h3-драйвер/SendRequest, пока жив туннель.
     _h3: H3Guard,
     conn: quinn::Connection,
+    /// Сервер разрешил проксирование UDP (заголовок `Hysteria-UDP: true`).
+    udp_allowed: bool,
 }
 
 impl Hysteria2Tunnel {
@@ -51,13 +53,25 @@ impl Hysteria2Tunnel {
 
         // HTTP/3-аутентификация поверх клона соединения; conn остаётся для
         // сырых прокси-стримов (quinn::Connection дешёвый в клонировании).
-        let (_auth, h3) = with_timeout("HTTP3-auth", http3::authenticate(conn.clone(), params)).await?;
+        let (auth, h3) =
+            with_timeout("HTTP3-auth", http3::authenticate(conn.clone(), params)).await?;
 
         Ok(Arc::new(Hysteria2Tunnel {
             _endpoint: endpoint,
             _h3: h3,
             conn,
+            udp_allowed: auth.udp,
         }))
+    }
+
+    /// Клон общего QUIC-соединения (для UDP-менеджера).
+    pub(crate) fn connection(&self) -> quinn::Connection {
+        self.conn.clone()
+    }
+
+    /// Разрешил ли сервер UDP-проксирование.
+    pub(crate) fn udp_allowed(&self) -> bool {
+        self.udp_allowed
     }
 
     /// Открывает bidi-стрим, шлёт TCP-запрос, читает ответ сервера, затем —

@@ -4,6 +4,7 @@
 //! один handshake/HTTP3-auth, каждая цель получает свой bidi-стрим.
 
 use super::tunnel::Hysteria2Tunnel;
+use super::udp::Hysteria2Udp;
 use crate::target::Target;
 use crate::BoxedStream;
 use std::io;
@@ -52,6 +53,7 @@ pub struct Hysteria2Config {
 struct Hysteria2Inner {
     params: Hysteria2Params,
     tunnel: OnceCell<Arc<Hysteria2Tunnel>>,
+    udp: OnceCell<Arc<Hysteria2Udp>>,
 }
 
 impl Hysteria2Config {
@@ -61,6 +63,7 @@ impl Hysteria2Config {
             inner: Arc::new(Hysteria2Inner {
                 params,
                 tunnel: OnceCell::new(),
+                udp: OnceCell::new(),
             }),
         }
     }
@@ -78,6 +81,26 @@ impl Hysteria2Config {
     /// Открывает TCP-поток до `target` (новый bidi-стрим + TCP-запрос `0x401`).
     pub(crate) async fn connect_tcp(&self, target: &Target) -> io::Result<BoxedStream> {
         self.tunnel().await?.connect(target).await
+    }
+
+    /// Общий UDP-менеджер узла (лениво: поднимает туннель и запускает
+    /// демультиплексор датаграмм при первом UDP-потоке). Ошибка, если сервер
+    /// не разрешил UDP.
+    pub(crate) async fn udp(&self) -> io::Result<Arc<Hysteria2Udp>> {
+        let m = self
+            .inner
+            .udp
+            .get_or_try_init(|| async {
+                let tunnel = self.tunnel().await?;
+                if !tunnel.udp_allowed() {
+                    return Err(io::Error::other(
+                        "hysteria2: сервер запретил UDP (Hysteria-UDP != true)",
+                    ));
+                }
+                io::Result::Ok(Hysteria2Udp::start(tunnel.connection()))
+            })
+            .await?;
+        Ok(Arc::clone(m))
     }
 
     /// Параметры узла (для диагностики/тестов).

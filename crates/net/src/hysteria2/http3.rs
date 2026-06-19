@@ -10,8 +10,7 @@ use std::io;
 
 /// Результат аутентификации.
 pub(crate) struct AuthOutcome {
-    /// Сервер разрешил проксирование UDP.
-    #[allow(dead_code)] // UDP — отдельным шагом; пока только TCP.
+    /// Сервер разрешил проксирование UDP (заголовок `Hysteria-UDP: true`).
     pub udp: bool,
 }
 

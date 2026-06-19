@@ -199,6 +199,19 @@ impl Outbound {
                     rx: tokio::sync::Mutex::new(rx),
                 })
             }
+            Outbound::Hysteria2(cfg) => {
+                let manager = cfg.udp().await?;
+                let (session, rx) = manager
+                    .register()
+                    .await
+                    .ok_or_else(|| proto_err("hysteria2: не удалось выделить session (UDP)"))?;
+                Ok(UdpSession::Hysteria2 {
+                    manager,
+                    session,
+                    target: target.clone(),
+                    rx: tokio::sync::Mutex::new(rx),
+                })
+            }
             Outbound::Wireguard(cfg) => Ok(UdpSession::Wireguard(
                 crate::wireguard::wireguard_connect_udp(cfg, target).await?,
             )),
@@ -253,6 +266,13 @@ pub enum UdpSession {
         target: Target,
         rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>,
     },
+    /// Через Hysteria2: session поверх общего QUIC-соединения; ответы — из канала.
+    Hysteria2 {
+        manager: std::sync::Arc<crate::hysteria2::Hysteria2Udp>,
+        session: u32,
+        target: Target,
+        rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    },
     /// Через Trojan: length-framed UDP-пакеты поверх потока (TCP/Reality/TLS).
     Trojan {
         read: tokio::sync::Mutex<tokio::io::ReadHalf<BoxedStream>>,
@@ -286,6 +306,14 @@ impl UdpSession {
                 ..
             } => {
                 manager.send(*assoc_id, target, payload).await?;
+            }
+            UdpSession::Hysteria2 {
+                manager,
+                session,
+                target,
+                ..
+            } => {
+                manager.send(*session, target, payload).await?;
             }
             UdpSession::Trojan { write, target, .. } => {
                 let pkt = crate::trojan::encode_udp_packet(target, payload);
@@ -338,6 +366,12 @@ impl UdpSession {
                 .recv()
                 .await
                 .ok_or_else(|| proto_err("tuic udp: канал закрыт")),
+            UdpSession::Hysteria2 { rx, .. } => rx
+                .lock()
+                .await
+                .recv()
+                .await
+                .ok_or_else(|| proto_err("hysteria2 udp: канал закрыт")),
             UdpSession::Trojan { read, .. } => {
                 let mut r = read.lock().await;
                 let (_addr, payload) = crate::trojan::read_udp_packet(&mut *r).await?;
@@ -352,13 +386,17 @@ impl UdpSession {
         }
     }
 
-    /// Завершает сессию (для TUIC — снимает регистрацию и шлёт Dissociate).
+    /// Завершает сессию (для TUIC — Dissociate; для Hysteria2 — снимает
+    /// регистрацию, сервер закроет по idle-таймауту).
     pub async fn close(&self) {
-        if let UdpSession::Tuic {
-            manager, assoc_id, ..
-        } = self
-        {
-            manager.dissociate(*assoc_id).await;
+        match self {
+            UdpSession::Tuic {
+                manager, assoc_id, ..
+            } => manager.dissociate(*assoc_id).await,
+            UdpSession::Hysteria2 {
+                manager, session, ..
+            } => manager.close(*session).await,
+            _ => {}
         }
     }
 }
