@@ -1,7 +1,8 @@
 //! Тестирование исходящих (SRV): задержка через измерение connect/HTTP-запроса.
 //!
 //! `tcp_ping` — время установления соединения; `url_test` — соединение + HTTP
-//! GET к тест-URL (обычно отдающему `204 No Content`) с проверкой статуса 2xx;
+//! GET к тест-URL (обычно отдающему `204 No Content`); достижимость = любой
+//! валидный HTTP-ответ;
 //! `test_outbounds` — конкурентный тест группы именованных исходящих. Позволяет
 //! UI/движку ранжировать узлы и выбирать быстрейший.
 
@@ -32,8 +33,9 @@ pub async fn tcp_ping(
     }
 }
 
-/// Тест задержки: соединение через `outbound` + HTTP GET к `url` + проверка 2xx.
-/// Возвращает RTT (от начала соединения до получения статусной строки ответа).
+/// Тест задержки: соединение через `outbound` + HTTP GET к `url`. Достижимость =
+/// получен любой валидный HTTP-ответ (не обязательно 2xx — тест-эндпойнт может
+/// отдать 403/5xx через рабочий туннель). Возвращает RTT до статусной строки.
 ///
 /// Поддерживается `http://` (тест-эндпойнты `generate_204` доступны по http).
 pub async fn url_test(outbound: &Outbound, url: &str, timeout: Duration) -> io::Result<Duration> {
@@ -61,14 +63,19 @@ pub async fn url_test(outbound: &Outbound, url: &str, timeout: Duration) -> io::
             .lines()
             .next()
             .unwrap_or("");
-        // "HTTP/1.x <code> ..."
-        let code_2xx = status_line
-            .split_whitespace()
-            .nth(1)
-            .is_some_and(|c| c.starts_with('2'));
-        if !code_2xx {
+        // Любой валидный HTTP-ответ ("HTTP/1.x <3 цифры> ...") = узел достижим:
+        // меряем RTT до первого байта. Не требуем строго 2xx — рабочий туннель
+        // может получить 403/3xx/5xx от тест-эндпойнта (напр. Cloudflare режет
+        // egress-IP сервера), но сам узел при этом жив и быстр. Недостижимость
+        // ловится раньше (ошибка connect_tcp / пустой ответ / таймаут).
+        let reachable = status_line.starts_with("HTTP/")
+            && status_line
+                .split_whitespace()
+                .nth(1)
+                .is_some_and(|c| c.len() == 3 && c.bytes().all(|b| b.is_ascii_digit()));
+        if !reachable {
             return Err(io::Error::other(format!(
-                "url-test: статус не 2xx: {status_line}"
+                "url-test: не похоже на HTTP-ответ: {status_line}"
             )));
         }
         io::Result::Ok(())
@@ -181,8 +188,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn url_test_errors_on_500() {
-        let port = mock_http("HTTP/1.1 500 Internal Server Error").await;
+    async fn url_test_ok_on_403_and_5xx() {
+        // Любой валидный HTTP-ответ = узел достижим (туннель долетел до сервера).
+        for status in ["HTTP/1.1 403 Forbidden", "HTTP/1.1 500 Internal Server Error"] {
+            let port = mock_http(status).await;
+            let url = format!("http://127.0.0.1:{port}/x");
+            assert!(
+                url_test(&Outbound::Direct, &url, DEFAULT_TIMEOUT)
+                    .await
+                    .is_ok(),
+                "ожидалась достижимость для {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn url_test_errors_on_non_http() {
+        // Не-HTTP мусор в ответе = не считаем узел достижимым.
+        let port = mock_http("GARBAGE not-http response").await;
         let url = format!("http://127.0.0.1:{port}/x");
         assert!(url_test(&Outbound::Direct, &url, DEFAULT_TIMEOUT)
             .await
