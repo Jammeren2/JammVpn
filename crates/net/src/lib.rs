@@ -19,6 +19,7 @@ pub mod from_profile;
 pub mod inbound;
 pub mod hysteria2;
 pub mod outbound;
+pub mod vless_encryption;
 #[allow(dead_code, clippy::all)]
 pub mod reality;
 pub mod reality_transport;
