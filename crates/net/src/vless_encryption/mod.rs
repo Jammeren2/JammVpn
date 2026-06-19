@@ -3,9 +3,29 @@
 //! `proxy/vless/encryption`. Здесь — разбор клиентского дескриптора
 //! `mlkem768x25519plus.<mode>.<rtt>.<key>[.padding...]`.
 //!
-//! ПОРТ В РАБОТЕ: пока реализован только парсинг дескриптора (фундамент);
-//! handshake (clientHello/relays/PFS/AEAD) — следующий этап, отлаживается против
-//! локального эталонного Xray (см. planning/xray/).
+//! ПОРТ В РАБОТЕ: парсинг дескриптора + AEAD-слой; handshake/stream —
+//! отлаживаются против локального эталонного Xray (см. planning/xray/).
+
+mod aead;
+mod handshake;
+mod stream;
+
+pub use stream::VlessEncStream;
+
+use tokio::io::{AsyncRead, AsyncWrite};
+
+/// Выполняет клиентский handshake VLESS Encryption поверх `transport` и
+/// возвращает прозрачный шифрующий поток (на нём дальше идёт обычный VLESS).
+pub async fn wrap_client<S>(
+    mut transport: S,
+    enc: &VlessEncryption,
+) -> std::io::Result<VlessEncStream<S>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let st = handshake::client_handshake(&mut transport, enc).await?;
+    Ok(VlessEncStream::new(transport, st))
+}
 
 /// Способ упаковки клиентского hello.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

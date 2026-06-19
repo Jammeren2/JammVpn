@@ -11,7 +11,7 @@ use crate::target::Target;
 use crate::tuic::TuicConfig;
 use crate::vision::VisionStream;
 use crate::wireguard::WgConfig;
-use crate::{trojan, vless, BoxedStream};
+use crate::{trojan, vless, vless_encryption, BoxedStream};
 use jammvpn_core::base64;
 use std::io;
 use std::net::SocketAddr;
@@ -64,9 +64,9 @@ pub struct VlessConfig {
     pub flow: Option<String>,
     /// Транспорт.
     pub transport: Transport,
-    /// Слой VLESS Encryption (`encryption=`), если задан и НЕ `none`. Пока не
-    /// поддержан (напр. `mlkem768x25519plus...`) — храним, чтобы дать понятную
-    /// ошибку при подключении вместо «соединение закрыто».
+    /// Слой VLESS Encryption (`encryption=`), если задан и НЕ `none`
+    /// (напр. `mlkem768x25519plus.native.0rtt.<key>`). Дескриптор разбирается
+    /// и при подключении выполняется ML-KEM-768 + X25519 handshake ниже VLESS.
     pub encryption: Option<String>,
 }
 
@@ -569,19 +569,24 @@ async fn read_http_status(s: &mut TcpStream) -> io::Result<u16> {
 }
 
 async fn vless_connect(cfg: &VlessConfig, target: &Target) -> io::Result<BoxedStream> {
-    // VLESS Encryption (mlkem768x25519plus и т.п.) пока не реализован — без него
-    // сервер рвёт соединение. Понятная ошибка вместо «соединение закрыто».
-    if let Some(enc) = &cfg.encryption {
-        let kind = enc.split('.').next().unwrap_or(enc);
-        return Err(io::Error::other(format!(
-            "VLESS Encryption «{kind}» пока не поддерживается JammVPN (нужен слой ML-KEM-768; в happ работает)"
-        )));
-    }
+    // VLESS Encryption (mlkem768x25519plus): разбираем дескриптор. Поддержан
+    // режим native + X25519-NFS; handshake идёт поверх транспорта, ниже VLESS.
+    let enc = match &cfg.encryption {
+        Some(desc) => vless_encryption::parse_encryption(desc)
+            .map_err(|msg| io::Error::other(format!("VLESS Encryption: {msg}")))?,
+        None => None,
+    };
+
     // XTLS-Vision: только поверх REALITY. По образцу cfal/shoes — VLESS-заголовок
     // (с flow-addon) отправляется ОБЫЧНОЙ TLS-записью, после чего TLS-поток
     // разбирается на (TCP, сессия), а Vision-padding применяется к прикладным
     // данным. VisionStream сам отбрасывает VLESS-ответ.
     if cfg.flow.as_deref() == Some(vless::FLOW_VISION) {
+        if enc.is_some() {
+            return Err(io::Error::other(
+                "VLESS Encryption вместе с flow=xtls-rprx-vision пока не поддержан (нужен порт Vision поверх слоя Encryption)",
+            ));
+        }
         let Transport::Reality(rt) = &cfg.transport else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -604,6 +609,11 @@ async fn vless_connect(cfg: &VlessConfig, target: &Target) -> io::Result<BoxedSt
             Box::new(reality_connect(tcp, rt).await?)
         }
     };
+
+    // Слой VLESS Encryption поверх транспорта (handshake ML-KEM-768 + X25519).
+    if let Some(enc) = &enc {
+        stream = Box::new(vless_encryption::wrap_client(stream, enc).await?);
+    }
 
     let header = vless::encode_request(&cfg.uuid, cfg.flow.as_deref(), target);
     stream.write_all(&header).await?;
