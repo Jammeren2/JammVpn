@@ -784,6 +784,30 @@ pub struct UpdateInfo {
 
 /// Проверяет последний релиз на GitHub (best-effort). `Ok(None)` — не удалось
 /// проверить (приватный репозиторий / нет релизов / сеть) — стартап не блокируем.
+/// `a > b` для версий вида `x.y.z` (сравнение по числовым компонентам;
+/// недостающие = 0; нечисловые хвосты вроде `-pre` игнорируются покомпонентно).
+fn version_gt(a: &str, b: &str) -> bool {
+    fn parts(s: &str) -> Vec<u64> {
+        s.split(['.', '-'])
+            .map(|p| {
+                p.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse::<u64>()
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+    let (pa, pb) = (parts(a), parts(b));
+    for i in 0..pa.len().max(pb.len()) {
+        let (x, y) = (pa.get(i).copied().unwrap_or(0), pb.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
 pub async fn check_update(current: &str) -> Result<Option<UpdateInfo>, String> {
     let url = format!("https://api.github.com/repos/{RELEASE_REPO}/releases/latest");
     let body =
@@ -819,7 +843,10 @@ pub async fn check_update(current: &str) -> Result<Option<UpdateInfo>, String> {
             }
         })
         .unwrap_or_default();
-    let newer = latest.trim_start_matches('v') != current;
+    // «Новее» = версия релиза СТРОГО больше текущей (semver-сравнение по
+    // числовым компонентам), а не просто «отличается» — иначе dev-сборка с
+    // версией выше последнего релиза ложно предлагала бы «обновиться» назад.
+    let newer = version_gt(latest.trim_start_matches('v'), current);
     Ok(Some(UpdateInfo {
         current: current.to_string(),
         latest: latest.to_string(),
@@ -1655,6 +1682,14 @@ pub fn build_engine(cfg: &AppConfig, server: Option<&str>) -> Result<Engine, Str
         .or_else(|| cfg.settings.proxy_node.clone());
     let mut eff = cfg.clone();
     eff.settings.default_proxy = default;
+    // КРИТИЧНО: при выбранном узле непокрытый правилами трафик ДОЛЖЕН идти через
+    // узел (default_action = Proxy), иначе он утёк бы Direct (реальный IP). Раньше
+    // выбор узла строил single_proxy (всё через узел); теперь правила в приоритете,
+    // но дефолт обязан быть «через узел». Режим «по правилам» (server=None)
+    // сохраняет настройку default_to_proxy пользователя.
+    if server.is_some() {
+        eff.settings.default_to_proxy = true;
+    }
     let engine = Engine::from_config(&eff);
     let missing = engine.missing_geo_refs();
     if !missing.is_empty() {
@@ -2407,6 +2442,38 @@ mod tests {
             engine.outbounds().contains_key("node-b"),
             "правило должно мочь указать любой узел, не только выбранный"
         );
+    }
+
+    #[test]
+    fn version_compare() {
+        assert!(version_gt("0.1.7", "0.1.6"));
+        assert!(!version_gt("0.1.6", "0.1.7")); // релиз старее текущего → не «новее»
+        assert!(!version_gt("0.1.7", "0.1.7")); // равны
+        assert!(version_gt("0.2.0", "0.1.9"));
+        assert!(version_gt("1.0.0", "0.9.9"));
+        assert!(!version_gt("0.1.7-pre", "0.1.7")); // pre = тот же набор чисел
+    }
+
+    #[test]
+    fn build_engine_selected_node_routes_unmatched_via_node() {
+        // Регресс (утечка IP): при выбранном узле непокрытый правилами трафик
+        // ДОЛЖЕН идти через узел, а не Direct — даже если default_to_proxy=false.
+        use jammvpn_core::parse_link;
+        use jammvpn_net::{Decision, Outbound, Target};
+        let mut cfg = AppConfig::default();
+        cfg.settings.default_to_proxy = false;
+        let mut a = parse_link("trojan://pa@1.1.1.1:443?sni=a#node-a").unwrap();
+        a.name = "node-a".into();
+        cfg.servers = vec![a];
+        let engine = build_engine(&cfg, Some("node-a")).unwrap();
+        let d = engine.resolve_target(&Target::Domain("example.com".into(), 443));
+        match d {
+            Decision::Connect(Outbound::Direct) => {
+                panic!("утечка: непокрытый трафик идёт Direct при выбранном узле")
+            }
+            Decision::Connect(_) => {} // через узел — ок
+            Decision::Block => panic!("неожиданный Block"),
+        }
     }
 
     #[test]
