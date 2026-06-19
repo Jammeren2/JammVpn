@@ -327,6 +327,7 @@
         <span class="sub-caret">${open ? "▾" : "▸"}</span>
         <span class="sub-name">📡 ${esc(g)}</span>
         <span class="sub-count">${gl.length}</span>
+        <span class="sub-icon" data-copysub="${esc(g)}" title="Копировать ссылку подписки">⧉</span>
         <span class="sub-icon" data-refresh="${esc(g)}" title="Обновить подписку">⟳</span>
         <span class="sub-icon" data-delsub="${esc(g)}" title="Удалить подписку">✕</span></div>`;
       if (open) {
@@ -411,6 +412,20 @@
       if ((a = t.closest(".node-act[data-del]"))) {
         e.stopPropagation();
         if (window.removeNode) await window.removeNode(a.dataset.del);
+        return;
+      }
+      if ((a = t.closest(".sub-icon[data-copysub]"))) {
+        e.stopPropagation();
+        const url = (window.SUB_URLS || {})[a.dataset.copysub];
+        if (url) {
+          try {
+            await copyText(url);
+            a.textContent = "✓";
+          } catch (_) {
+            a.textContent = "✗";
+          }
+          setTimeout(() => (a.textContent = "⧉"), 1000);
+        }
         return;
       }
       if ((a = t.closest(".sub-icon[data-refresh]"))) {

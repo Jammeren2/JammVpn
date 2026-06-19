@@ -624,10 +624,42 @@ pub async fn test_latencies(url: Option<&str>) -> Vec<LatencyResult> {
 }
 
 /// Обновляет все подписки, возвращает итоги по каждой.
+/// Гарантирует уникальный тег у каждой подписки (для разделения групп и
+/// корректных имён): база = явный `tag` или хост URL; коллизии получают суффикс
+/// « (2)», « (3)»… Стабильна при повторных вызовах. Возвращает `true`, если
+/// что-то изменилось. Сохранение — на вызывающем.
+fn ensure_distinct_sub_tags(cfg: &mut AppConfig) -> bool {
+    use std::collections::HashSet;
+    let mut used: HashSet<String> = HashSet::new();
+    let mut changed = false;
+    for sub in &mut cfg.subscriptions {
+        let base = sub
+            .tag
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| jammvpn_net::subscription::sub_host(&sub.url));
+        let mut tag = base.clone();
+        let mut n = 2;
+        while used.contains(&tag) {
+            tag = format!("{base} ({n})");
+            n += 1;
+        }
+        used.insert(tag.clone());
+        if sub.tag.as_deref() != Some(tag.as_str()) {
+            sub.tag = Some(tag);
+            changed = true;
+        }
+    }
+    changed
+}
+
 pub async fn update_subscriptions() -> Result<Vec<SubUpdate>, String> {
     let path = config_path();
     let store = secret_store();
     let mut cfg = load_config(&path, store.as_ref());
+    // Уникализируем теги ДО обновления — две подписки с одного хоста получают
+    // разные теги и корректно разделяются на группы.
+    ensure_distinct_sub_tags(&mut cfg);
     let subs = cfg.subscriptions.clone();
     let mut out = Vec::with_capacity(subs.len());
     for sub in &subs {
@@ -661,6 +693,7 @@ pub async fn update_one_subscription(url: &str) -> Result<usize, String> {
     let path = config_path();
     let store = secret_store();
     let mut cfg = load_config(&path, store.as_ref());
+    ensure_distinct_sub_tags(&mut cfg);
     let sub = cfg
         .subscriptions
         .iter()
@@ -1110,6 +1143,8 @@ pub fn add_subscription(
     let mut cfg = load_config(&path, store.as_ref());
     let added = apply_add_subscription(&mut cfg, sub);
     if added {
+        // Сразу присваиваем уникальный тег (отделяет от подписок с тем же хостом).
+        ensure_distinct_sub_tags(&mut cfg);
         save_config(&path, &cfg, store.as_ref())?;
     }
     Ok(added)
@@ -2442,6 +2477,29 @@ mod tests {
             engine.outbounds().contains_key("node-b"),
             "правило должно мочь указать любой узел, не только выбранный"
         );
+    }
+
+    #[test]
+    fn distinct_sub_tags_separate_same_host() {
+        let mut cfg = AppConfig::default();
+        cfg.subscriptions = vec![
+            Subscription {
+                url: "https://1.2.3.4:8443/subA".into(),
+                tag: None,
+                update_interval_hours: 12,
+            },
+            Subscription {
+                url: "https://1.2.3.4:8443/subB".into(),
+                tag: None,
+                update_interval_hours: 12,
+            },
+        ];
+        ensure_distinct_sub_tags(&mut cfg);
+        let t0 = cfg.subscriptions[0].tag.clone().unwrap();
+        let t1 = cfg.subscriptions[1].tag.clone().unwrap();
+        assert_ne!(t0, t1, "подписки с одного хоста должны разделяться");
+        assert_eq!(t0, "1.2.3.4:8443");
+        assert_eq!(t1, "1.2.3.4:8443 (2)");
     }
 
     #[test]

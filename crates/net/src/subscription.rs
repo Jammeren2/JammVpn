@@ -51,8 +51,13 @@ pub fn sub_tag(sub: &Subscription) -> String {
             return t.clone();
         }
     }
-    let rest = sub.url.split("://").nth(1).unwrap_or(&sub.url);
-    rest.split('/').next().unwrap_or(&sub.url).to_string()
+    sub_host(&sub.url)
+}
+
+/// Хост из URL подписки (имя группы по умолчанию, если нет явного тега).
+pub fn sub_host(url: &str) -> String {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    rest.split('/').next().unwrap_or(url).to_string()
 }
 
 /// Вливает обновлённые серверы подписки в конфиг: удаляет прежние серверы этой
