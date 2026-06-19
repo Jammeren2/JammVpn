@@ -83,6 +83,12 @@ fn export_ss_link(name: String) -> Result<String, String> {
     ctl::export_ss_link(&name)
 }
 
+/// `hysteria2://`-ссылка узла (для копирования).
+#[tauri::command]
+fn export_hysteria2_link(name: String) -> Result<String, String> {
+    ctl::export_hysteria2_link(&name)
+}
+
 /// Открывает URL в браузере по умолчанию (для кнопки версии → страница проекта).
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
@@ -665,6 +671,7 @@ fn main() {
             test_node_latency,
             export_vless_link,
             export_ss_link,
+            export_hysteria2_link,
             open_url,
             get_socks_proxies,
             set_socks_proxies,

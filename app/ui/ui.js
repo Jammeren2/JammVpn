@@ -282,9 +282,11 @@
     const isWg = /wireguard|amnezia|awg/i.test(r.proto);
     const isVless = /vless/i.test(r.proto);
     const isSs = /shadowsocks|ss-?2022/i.test(r.proto);
+    const isHy2 = /hysteria/i.test(r.proto);
     let acts = `<span class="node-act" data-ping="${esc(r.name)}" title="Тест задержки">⚡</span>`;
     if (isVless) acts += `<span class="node-act" data-vless="${esc(r.name)}" title="Копировать vless://">⧉</span>`;
     if (isSs) acts += `<span class="node-act" data-ss="${esc(r.name)}" title="Копировать ss://">⧉</span>`;
+    if (isHy2) acts += `<span class="node-act" data-hy2="${esc(r.name)}" title="Копировать hysteria2://">⧉</span>`;
     if (!r.group) {
       if (isWg) acts += `<span class="node-act" data-export="${esc(r.name)}" title="Экспорт .conf">⤓</span>`;
       acts += `<span class="node-act del" data-del="${esc(r.name)}" title="Удалить">✕</span>`;
@@ -376,13 +378,22 @@
         }
         return;
       }
-      if ((a = t.closest(".node-act[data-vless], .node-act[data-ss]"))) {
+      if ((a = t.closest(".node-act[data-vless], .node-act[data-ss], .node-act[data-hy2]"))) {
         e.stopPropagation();
         if (!invoke) return;
-        const isSs = a.hasAttribute("data-ss");
-        const name = isSs ? a.dataset.ss : a.dataset.vless;
+        let cmd, name;
+        if (a.hasAttribute("data-ss")) {
+          cmd = "export_ss_link";
+          name = a.dataset.ss;
+        } else if (a.hasAttribute("data-hy2")) {
+          cmd = "export_hysteria2_link";
+          name = a.dataset.hy2;
+        } else {
+          cmd = "export_vless_link";
+          name = a.dataset.vless;
+        }
         try {
-          const link = await invoke(isSs ? "export_ss_link" : "export_vless_link", { name });
+          const link = await invoke(cmd, { name });
           await copyText(link);
           a.textContent = "✓";
           setTimeout(() => (a.textContent = "⧉"), 1000);

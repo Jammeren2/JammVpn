@@ -17,7 +17,7 @@ use jammvpn_core::{
 use jammvpn_core::LocalWgConfig;
 pub use jammvpn_core::SocksProxy;
 use jammvpn_net::{
-    gen_preshared_key, gen_private_key, outbound_from_profile, serve_socks_routed, subscription,
+    gen_preshared_key, gen_private_key, serve_socks_routed, subscription,
     urltest, wg_public_key, Engine, WgServer, WgServerParams,
 };
 use serde::{Deserialize, Serialize};
@@ -550,6 +550,53 @@ pub fn export_vless_link(name: &str) -> Result<String, String> {
         .find(|s| s.name == name)
         .ok_or_else(|| format!("узел не найден: {name}"))?;
     node_to_vless_link(node).ok_or_else(|| "ссылка vless:// доступна только для VLESS-узлов".into())
+}
+
+/// `hysteria2://`-ссылка узла (для копирования). `None`, если не Hysteria2.
+fn node_to_hysteria2_link(p: &ServerProfile) -> Option<String> {
+    if p.protocol != jammvpn_core::ProtocolKind::Hysteria2 {
+        return None;
+    }
+    let auth = p.param("auth").unwrap_or("");
+    // Все параметры, кроме auth, идут в query (auth → userinfo). `params` —
+    // BTreeMap, порядок детерминированный.
+    let q: Vec<String> = p
+        .params
+        .iter()
+        .filter(|(k, v)| k.as_str() != "auth" && !v.is_empty())
+        .map(|(k, v)| format!("{k}={}", pct(v)))
+        .collect();
+    let query = if q.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", q.join("&"))
+    };
+    let frag = if p.name.is_empty() {
+        String::new()
+    } else {
+        format!("#{}", pct(&p.name))
+    };
+    let userinfo = if auth.is_empty() {
+        String::new()
+    } else {
+        format!("{}@", pct(auth))
+    };
+    Some(format!(
+        "hysteria2://{userinfo}{}:{}{query}{frag}",
+        p.address, p.port
+    ))
+}
+
+/// `hysteria2://`-ссылка узла по имени. Ошибка — если не Hysteria2.
+pub fn export_hysteria2_link(name: &str) -> Result<String, String> {
+    let cfg = load();
+    let node = cfg
+        .servers
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("узел не найден: {name}"))?;
+    node_to_hysteria2_link(node)
+        .ok_or_else(|| "ссылка hysteria2:// доступна только для Hysteria2-узлов".into())
 }
 
 pub async fn test_latencies(url: Option<&str>) -> Vec<LatencyResult> {
@@ -1588,34 +1635,34 @@ pub fn clear_split() -> Result<(), String> {
 /// Строит движок для запуска прокси: `server` — весь трафик через узел, иначе —
 /// маршрутизация по правилам конфига (с fail-closed-проверкой geo-баз).
 pub fn build_engine(cfg: &AppConfig, server: Option<&str>) -> Result<Engine, String> {
+    // Правила маршрутизации применяются ВСЕГДА и имеют приоритет: даже при
+    // выбранном на «Главной» узле правило вида «процесс/домен → конкретный узел»
+    // (Proxy(Some(tag))) направит трафик туда, а не в выбранный туннель. Сам
+    // выбранный узел — лишь default для Proxy(None) и непокрытого правилами
+    // трафика. (Раньше выбор узла строил single_proxy и игнорировал правила.)
     if let Some(name) = server {
-        let profile = cfg
-            .servers
-            .iter()
-            .find(|s| s.name == name)
-            .ok_or_else(|| format!("узел не найден: {name}"))?;
-        let outbound = outbound_from_profile(profile).map_err(|e| e.to_string())?;
-        Ok(Engine::single_proxy(outbound))
-    } else {
-        // По правилам. Узел по умолчанию (для Proxy(None)/непокрытого трафика) —
-        // явный default_proxy, иначе выбранный на «Главной» (proxy_node).
-        let engine = if cfg.settings.default_proxy.is_none() && cfg.settings.proxy_node.is_some() {
-            let mut eff = cfg.clone();
-            eff.settings.default_proxy = cfg.settings.proxy_node.clone();
-            Engine::from_config(&eff)
-        } else {
-            Engine::from_config(cfg)
-        };
-        let missing = engine.missing_geo_refs();
-        if !missing.is_empty() {
-            return Err(format!(
-                "geo-базы не загружены для части правил:\n  {}\n\
-                 проверьте geo.geosite_path / geo.geoip_path в конфиге",
-                missing.join("\n  ")
-            ));
+        if !cfg.servers.iter().any(|s| s.name == name) {
+            return Err(format!("узел не найден: {name}"));
         }
-        Ok(engine)
     }
+    // Узел по умолчанию: выбранный на «Главной» (server) → явный default_proxy →
+    // proxy_node.
+    let default = server
+        .map(str::to_string)
+        .or_else(|| cfg.settings.default_proxy.clone())
+        .or_else(|| cfg.settings.proxy_node.clone());
+    let mut eff = cfg.clone();
+    eff.settings.default_proxy = default;
+    let engine = Engine::from_config(&eff);
+    let missing = engine.missing_geo_refs();
+    if !missing.is_empty() {
+        return Err(format!(
+            "geo-базы не загружены для части правил:\n  {}\n\
+             проверьте geo.geosite_path / geo.geoip_path в конфиге",
+            missing.join("\n  ")
+        ));
+    }
+    Ok(engine)
 }
 
 /// Управляемый локальный SOCKS5-прокси (для UI: запуск/остановка).
@@ -2303,6 +2350,44 @@ impl WinpkSplitController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_engine_keeps_all_nodes_with_selected_main() {
+        // Регресс: при выбранном узле движок должен содержать ВСЕ узлы как
+        // outbound'ы (чтобы правило Proxy(Some("node-b")) сработало), а узел —
+        // лишь default. Раньше строился single_proxy и правила игнорировались.
+        use jammvpn_core::parse_link;
+        let mut cfg = AppConfig::default();
+        let mut a = parse_link("trojan://pa@1.1.1.1:443?sni=a#node-a").unwrap();
+        a.name = "node-a".into();
+        let mut b = parse_link("trojan://pb@2.2.2.2:443?sni=b#node-b").unwrap();
+        b.name = "node-b".into();
+        cfg.servers = vec![a, b];
+        let engine = build_engine(&cfg, Some("node-a")).unwrap();
+        assert!(engine.outbounds().contains_key("node-a"));
+        assert!(
+            engine.outbounds().contains_key("node-b"),
+            "правило должно мочь указать любой узел, не только выбранный"
+        );
+    }
+
+    #[test]
+    fn hysteria2_link_roundtrips() {
+        use jammvpn_core::parse_link;
+        let p = parse_link("hysteria2://Secret123@1.2.3.4:8443?insecure=1&sni=ex.com#MyНода").unwrap();
+        let link = node_to_hysteria2_link(&p).expect("должна быть hy2-ссылка");
+        let p2 = parse_link(&link).unwrap();
+        assert_eq!(p2.protocol, jammvpn_core::ProtocolKind::Hysteria2);
+        assert_eq!(p2.address, "1.2.3.4");
+        assert_eq!(p2.port, 8443);
+        assert_eq!(p2.param("auth"), Some("Secret123"));
+        assert_eq!(p2.param("sni"), Some("ex.com"));
+        assert_eq!(p2.param("insecure"), Some("1"));
+        assert_eq!(p2.name, "MyНода");
+        // Не-Hysteria2 узел → None.
+        let v = parse_link("vless://uuid@h:443#x").unwrap();
+        assert!(node_to_hysteria2_link(&v).is_none());
+    }
     use jammvpn_core::NoopStore;
     use jammvpn_core::SplitMode;
 
