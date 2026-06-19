@@ -39,6 +39,24 @@ unsafe impl Sync for DivertHandle {}
 
 type AddrSlot = Arc<Mutex<Option<windivert::address::WinDivertAddress<NetworkLayer>>>>;
 
+/// Общий переоткрываемый хендл: поток захвата может переоткрыть его после сбоя
+/// драйвера, и инжектор сразу увидит новый (оба берут текущий под Mutex).
+type SharedHandle = Arc<Mutex<Arc<DivertHandle>>>;
+
+/// WinDivert-фильтр: только исходящие TCP/UDP (входящие доставляет система,
+/// ответы туннеля инъектируем сами).
+const FILTER: &str = "outbound and (tcp or udp)";
+
+/// Открывает WinDivert-хендл (network-слой, заданный фильтр).
+fn open_handle(log: &Logger) -> Result<DivertHandle, String> {
+    let wd = WinDivert::<NetworkLayer>::network(FILTER, 0, WinDivertFlags::new())
+        .map_err(|e| format!("WinDivertOpen: {e}. Установлен ли драйвер и есть ли права админа?"))?;
+    log(format!(
+        "split(WinDivert): хендл открыт (фильтр «{FILTER}»), драйвер ОК"
+    ));
+    Ok(DivertHandle(wd))
+}
+
 /// Счётчики для диагностики split(WinDivert).
 #[derive(Default)]
 struct Stats {
@@ -50,23 +68,27 @@ struct Stats {
     inject_err: AtomicU64,
     send_err: AtomicU64,
     no_addr: AtomicU64,
+    /// Сколько раз хендл переоткрывался после сбоя драйвера (восстановления).
+    reopens: AtomicU64,
 }
 
 /// Запущенный split-перехват на WinDivert.
 pub struct SplitTunnel {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
-    handle: Arc<DivertHandle>,
+    handle: SharedHandle,
     /// Адрес последнего исходящего пакета (интерфейс) — шаблон для инъекции ответов.
     last_addr: AddrSlot,
     stats: Arc<Stats>,
+    /// `false`, пока поток захвата восстанавливает хендл после сбоя драйвера.
+    healthy: Arc<AtomicBool>,
     log: Logger,
 }
 
 /// Хендл для инъекции ответных IP-пакетов из netstack обратно приложению.
 #[derive(Clone)]
 pub struct ResponseInjector {
-    handle: Arc<DivertHandle>,
+    handle: SharedHandle,
     last_addr: AddrSlot,
     stats: Arc<Stats>,
     log: Logger,
@@ -98,7 +120,8 @@ impl ResponseInjector {
             }
             return;
         }
-        match self.handle.0.send(&pkt) {
+        let h = { self.handle.lock().unwrap().clone() };
+        match h.0.send(&pkt) {
             Ok(_) => {
                 let n = self.stats.inject_ok.fetch_add(1, Ordering::Relaxed);
                 if n == 0 {
@@ -131,26 +154,24 @@ impl SplitTunnel {
 
         // Захватываем только исходящие TCP/UDP; входящие приложениям доставляет
         // система, а ответы туннеля мы инъектируем сами.
-        let filter = "outbound and (tcp or udp)";
-        let wd = WinDivert::<NetworkLayer>::network(filter, 0, WinDivertFlags::new())
-            .map_err(|e| format!("WinDivertOpen: {e}. Установлен ли драйвер и есть ли права админа?"))?;
-        log(format!(
-            "split(WinDivert): хендл открыт (фильтр «{filter}»), драйвер ОК"
-        ));
-        let handle = Arc::new(DivertHandle(wd));
+        let handle: SharedHandle = Arc::new(Mutex::new(Arc::new(open_handle(&log)?)));
         let last_addr = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Stats::default());
+        let healthy = Arc::new(AtomicBool::new(true));
 
         let thread = {
             let stop = stop.clone();
             let handle = handle.clone();
             let last_addr = last_addr.clone();
             let stats = stats.clone();
+            let healthy = healthy.clone();
             let log = log.clone();
             std::thread::Builder::new()
                 .name("windivert-capture".into())
-                .spawn(move || capture_loop(stop, config, on_capture, handle, last_addr, stats, log))
+                .spawn(move || {
+                    capture_loop(stop, config, on_capture, handle, last_addr, stats, healthy, log)
+                })
                 .map_err(|e| e.to_string())?
         };
 
@@ -160,8 +181,15 @@ impl SplitTunnel {
             handle,
             last_addr,
             stats,
+            healthy,
             log,
         })
+    }
+
+    /// `true`, если поток захвата работает штатно; `false` — пока он
+    /// восстанавливает хендл после сбоя драйвера (для уведомления в UI).
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
     }
 
     /// Инжектор ответов (для подключения к netstack-выходу).
@@ -190,11 +218,17 @@ fn capture_loop(
     stop: Arc<AtomicBool>,
     config: SplitConfig,
     mut on_capture: OnCapture,
-    handle: Arc<DivertHandle>,
+    handle: SharedHandle,
     last_addr: AddrSlot,
     stats: Arc<Stats>,
+    healthy: Arc<AtomicBool>,
     log: Logger,
 ) {
+    use std::time::Duration;
+    /// Серия подряд ошибок recv, после которой считаем драйвер упавшим и
+    /// переоткрываем хендл.
+    const REOPEN_AFTER: u32 = 10;
+
     log(format!(
         "split(WinDivert): поток захвата запущен; режим={:?}, приложения={:?}, kill_switch={}",
         config.mode, config.apps, config.kill_switch
@@ -202,14 +236,20 @@ fn capture_loop(
     let mut resolver = ProcessResolver::new();
     let mut buf = vec![0u8; 65535];
     let mut detailed = 0u32; // сколько пакетов залогировать детально
-    let mut recv_err = 0u32;
+    let mut consec_err = 0u32; // подряд ошибок recv (сброс при успехе)
     let mut last_report = std::time::Instant::now();
+    // Локальная копия хендла для горячего цикла; меняется только при переоткрытии.
+    let mut h = { handle.lock().unwrap().clone() };
 
     while !stop.load(Ordering::Relaxed) {
         // Блокирующий recv с таймаутом, чтобы периодически проверять stop.
-        let packet = match handle.0.recv_wait(&mut buf, 200) {
-            Ok(Some(p)) => p,
+        let packet = match h.0.recv_wait(&mut buf, 200) {
+            Ok(Some(p)) => {
+                consec_err = 0;
+                p
+            }
             Ok(None) => {
+                consec_err = 0;
                 periodic_report(&stats, &mut last_report, &log);
                 continue;
             }
@@ -217,10 +257,38 @@ fn capture_loop(
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
-                recv_err += 1;
-                if recv_err <= 5 {
+                consec_err += 1;
+                if consec_err <= 5 {
                     log(format!("split(WinDivert): ошибка recv: {e}"));
                 }
+                // Серия ошибок = вероятный сбой драйвера → переоткрываем хендл,
+                // пока не получится (с паузой). Иначе цикл крутился бы вхолостую.
+                if consec_err >= REOPEN_AFTER {
+                    healthy.store(false, Ordering::Relaxed);
+                    log("split(WinDivert): драйвер не отвечает — переоткрываю хендл…".into());
+                    while !stop.load(Ordering::Relaxed) {
+                        match open_handle(&log) {
+                            Ok(nh) => {
+                                let nh = Arc::new(nh);
+                                *handle.lock().unwrap() = nh.clone();
+                                h = nh;
+                                stats.reopens.fetch_add(1, Ordering::Relaxed);
+                                healthy.store(true, Ordering::Relaxed);
+                                consec_err = 0;
+                                log("split(WinDivert): хендл переоткрыт, захват возобновлён ✓".into());
+                                break;
+                            }
+                            Err(e) => {
+                                log(format!(
+                                    "split(WinDivert): переоткрытие не удалось: {e}; повтор через 2 с"
+                                ));
+                                std::thread::sleep(Duration::from_secs(2));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                std::thread::sleep(Duration::from_millis(50)); // не спиним на ошибке
                 continue;
             }
         };
@@ -255,7 +323,7 @@ fn capture_loop(
             }
             Verdict::Direct => {
                 stats.direct.fetch_add(1, Ordering::Relaxed);
-                if let Err(e) = handle.0.send(&packet) {
+                if let Err(e) = h.0.send(&packet) {
                     let n = stats.send_err.fetch_add(1, Ordering::Relaxed);
                     if n < 5 {
                         log(format!("split(WinDivert): ошибка реинъекции (прямой трафик): {e}"));
@@ -285,7 +353,7 @@ fn periodic_report(stats: &Stats, last: &mut std::time::Instant, log: &Logger) {
 fn stats_line(s: &Stats) -> String {
     use Ordering::Relaxed;
     format!(
-        "захвачено={} туннель={} прямо={} дроп={} инъекций={} (ошибок_инъекции={}) ошибок_send={} нет_адреса={}",
+        "захвачено={} туннель={} прямо={} дроп={} инъекций={} (ошибок_инъекции={}) ошибок_send={} нет_адреса={} переоткрытий={}",
         s.captured.load(Relaxed),
         s.tunnel.load(Relaxed),
         s.direct.load(Relaxed),
@@ -294,6 +362,7 @@ fn stats_line(s: &Stats) -> String {
         s.inject_err.load(Relaxed),
         s.send_err.load(Relaxed),
         s.no_addr.load(Relaxed),
+        s.reopens.load(Relaxed),
     )
 }
 
