@@ -9,8 +9,10 @@ mod tls_fuzzy_deframer;
 mod tls_handshake_util;
 mod vision_filter;
 mod vision_pad;
+mod vision_plain_stream;
 mod vision_stream;
 mod vision_tls_util;
 mod vision_unpad;
 
+pub use vision_plain_stream::VisionPlainStream;
 pub use vision_stream::VisionStream;

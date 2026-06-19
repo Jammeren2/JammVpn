@@ -9,7 +9,7 @@ use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream, Ss2022Stre
 use crate::hysteria2::Hysteria2Config;
 use crate::target::Target;
 use crate::tuic::TuicConfig;
-use crate::vision::VisionStream;
+use crate::vision::{VisionPlainStream, VisionStream};
 use crate::wireguard::WgConfig;
 use crate::{trojan, vless, vless_encryption, BoxedStream};
 use jammvpn_core::base64;
@@ -582,10 +582,21 @@ async fn vless_connect(cfg: &VlessConfig, target: &Target) -> io::Result<BoxedSt
     // разбирается на (TCP, сессия), а Vision-padding применяется к прикладным
     // данным. VisionStream сам отбрасывает VLESS-ответ.
     if cfg.flow.as_deref() == Some(vless::FLOW_VISION) {
-        if enc.is_some() {
-            return Err(io::Error::other(
-                "VLESS Encryption вместе с flow=xtls-rprx-vision пока не поддержан (нужен порт Vision поверх слоя Encryption)",
-            ));
+        // Vision поверх слоя VLESS Encryption: транспорт → [REALITY] → Encryption
+        // (CommonConn) → VLESS-заголовок → Vision-паддинг по плоскому потоку.
+        if let Some(enc) = &enc {
+            let base: BoxedStream = match &cfg.transport {
+                Transport::Tcp => Box::new(TcpStream::connect(&cfg.server).await?),
+                Transport::Reality(rt) => {
+                    let tcp = TcpStream::connect(&cfg.server).await?;
+                    Box::new(reality_connect(tcp, rt).await?)
+                }
+            };
+            let mut enc_stream = vless_encryption::wrap_client(base, enc).await?;
+            let header = vless::encode_request(&cfg.uuid, cfg.flow.as_deref(), target);
+            enc_stream.write_all(&header).await?;
+            enc_stream.flush().await?;
+            return Ok(Box::new(VisionPlainStream::new_client(enc_stream, cfg.uuid)));
         }
         let Transport::Reality(rt) = &cfg.transport else {
             return Err(io::Error::new(
