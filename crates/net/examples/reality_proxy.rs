@@ -29,6 +29,7 @@ async fn main() {
             short_id: a[5].clone(),
             server_name: a[6].clone(),
         }),
+        encryption: None,
     });
 
     let engine = Engine::single_proxy(outbound);

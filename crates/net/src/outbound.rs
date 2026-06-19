@@ -64,6 +64,10 @@ pub struct VlessConfig {
     pub flow: Option<String>,
     /// Транспорт.
     pub transport: Transport,
+    /// Слой VLESS Encryption (`encryption=`), если задан и НЕ `none`. Пока не
+    /// поддержан (напр. `mlkem768x25519plus...`) — храним, чтобы дать понятную
+    /// ошибку при подключении вместо «соединение закрыто».
+    pub encryption: Option<String>,
 }
 
 /// Настройки Shadowsocks-исходящего.
@@ -565,6 +569,14 @@ async fn read_http_status(s: &mut TcpStream) -> io::Result<u16> {
 }
 
 async fn vless_connect(cfg: &VlessConfig, target: &Target) -> io::Result<BoxedStream> {
+    // VLESS Encryption (mlkem768x25519plus и т.п.) пока не реализован — без него
+    // сервер рвёт соединение. Понятная ошибка вместо «соединение закрыто».
+    if let Some(enc) = &cfg.encryption {
+        let kind = enc.split('.').next().unwrap_or(enc);
+        return Err(io::Error::other(format!(
+            "VLESS Encryption «{kind}» пока не поддерживается JammVPN (нужен слой ML-KEM-768; в happ работает)"
+        )));
+    }
     // XTLS-Vision: только поверх REALITY. По образцу cfal/shoes — VLESS-заголовок
     // (с flow-addon) отправляется ОБЫЧНОЙ TLS-записью, после чего TLS-поток
     // разбирается на (TCP, сессия), а Vision-padding применяется к прикладным

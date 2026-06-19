@@ -24,6 +24,7 @@ async fn main() {
             short_id: a[4].clone(),
             server_name: a[5].clone(),
         }),
+        encryption: None,
     });
     let (thost, tport) = a[6].rsplit_once(':').expect("target host:port");
     let target = Target::Domain(thost.to_string(), tport.parse().expect("port"));

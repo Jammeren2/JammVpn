@@ -233,6 +233,7 @@ async fn vless_over_tcp_roundtrip() {
         uuid,
         flow: None,
         transport: Transport::Tcp,
+        encryption: None,
     });
     let mut s = ob
         .connect_tcp(&Target::Domain("example.com".to_string(), 443))

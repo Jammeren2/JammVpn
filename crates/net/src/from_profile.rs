@@ -110,11 +110,18 @@ pub fn outbound_from_profile(p: &ServerProfile) -> Result<Outbound, ProfileError
             } else {
                 Transport::Tcp
             };
+            // VLESS Encryption: всё, кроме `none`/пусто — пока не поддержано
+            // (отдадим понятную ошибку при подключении, а не «соединение закрыто»).
+            let encryption = p
+                .param("encryption")
+                .filter(|e| !e.is_empty() && *e != "none")
+                .map(str::to_string);
             Ok(Outbound::Vless(VlessConfig {
                 server,
                 uuid,
                 flow: p.param("flow").map(str::to_string),
                 transport,
+                encryption,
             }))
         }
         ProtocolKind::Trojan => {
