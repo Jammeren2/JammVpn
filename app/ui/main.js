@@ -1199,6 +1199,66 @@ function hideSplash() {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// --- «Что нового» (первый запуск версии) ---
+// Заметки к текущей версии. Обновляются вместе с версией перед релизом.
+const RELEASE_NOTES = [
+  "Новый протокол Hysteria2 — проксирование TCP и UDP (QUIC + HTTP/3).",
+  "Исправлена высокая загрузка процессора в простое.",
+  "Раздельный туннель (WinpkFilter): пересчёт контрольных сумм пакетов.",
+];
+
+let whatsnewChecked = false;
+async function maybeShowWhatsNew() {
+  if (whatsnewChecked) return;
+  // Окно скрыто в трее (автозапуск --minimized): откладываем — иначе пометили
+  // бы версию просмотренной, и пользователь не увидел бы модалку. Покажем при
+  // разворачивании окна (слушатель visibilitychange ниже).
+  if (document.hidden) return;
+  whatsnewChecked = true;
+  let isNew = false;
+  try {
+    isNew = await invoke("first_run_of_version");
+  } catch (e) {
+    return;
+  }
+  if (!isNew) return;
+  let ver = "";
+  try {
+    ver = await invoke("app_version");
+  } catch (e) {}
+  showWhatsNew(ver, RELEASE_NOTES);
+}
+
+function showWhatsNew(version, notes) {
+  const modal = $("whatsnew-modal");
+  if (!modal) return;
+  $("whatsnew-title").textContent = version ? `Что нового · v${version}` : "Что нового";
+  const list = $("whatsnew-list");
+  list.innerHTML = "";
+  for (const n of notes) {
+    const li = document.createElement("li");
+    li.textContent = n;
+    list.appendChild(li);
+  }
+  $("whatsnew-msg").textContent = "";
+  modal.style.display = "flex";
+}
+
+function hideWhatsNew() {
+  const modal = $("whatsnew-modal");
+  if (modal) modal.style.display = "none";
+}
+
+async function createShortcut() {
+  const msg = $("whatsnew-msg");
+  try {
+    await invoke("create_desktop_shortcut");
+    if (msg) msg.textContent = "✓ Ярлык создан на рабочем столе.";
+  } catch (e) {
+    if (msg) msg.textContent = "✗ Не удалось создать ярлык: " + e;
+  }
+}
+
 const GITHUB_URL = "https://github.com/Jammeren2/JammVpn";
 
 async function startupChecks() {
@@ -1299,6 +1359,16 @@ async function init() {
   $("confirm-modal").addEventListener("click", (e) => {
     if (e.target === $("confirm-modal")) closeConfirm(false);
   });
+  $("whatsnew-close").addEventListener("click", hideWhatsNew);
+  $("whatsnew-skip").addEventListener("click", hideWhatsNew);
+  $("whatsnew-shortcut").addEventListener("click", createShortcut);
+  $("whatsnew-modal").addEventListener("click", (e) => {
+    if (e.target === $("whatsnew-modal")) hideWhatsNew();
+  });
+  // Если стартовали в трее — покажем «что нового» при первом разворачивании.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) maybeShowWhatsNew();
+  });
   $("btn-save-settings").addEventListener("click", saveSettings);
   $("btn-save-geo").addEventListener("click", saveGeo);
   $("btn-geo-download").addEventListener("click", downloadGeo);
@@ -1353,6 +1423,8 @@ async function init() {
   // Сплеш: проверки при старте (с ограничением по времени), затем скрыть.
   await Promise.race([startupChecks(), sleep(2800)]);
   hideSplash();
+  // После сплеша — если это первый запуск новой версии, показать «что нового».
+  await maybeShowWhatsNew();
 }
 
 window.addEventListener("DOMContentLoaded", init);

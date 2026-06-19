@@ -2054,6 +2054,59 @@ pub fn local_wg_qr() -> Result<String, String> {
     Ok(svg)
 }
 
+/// Первый ли это запуск версии `current` (для показа «что нового» после
+/// обновления). Обновляет сохранённую версию в хранилище.
+pub fn first_run_of_version(current: &str) -> bool {
+    store::mark_version_seen(&config_path(), current)
+}
+
+/// Создаёт ярлык JammVPN на рабочем столе пользователя (Windows).
+#[cfg(windows)]
+pub fn create_desktop_shortcut() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_s = exe.to_string_lossy().replace('\'', "''");
+    let dir_s = exe
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\'', "''"))
+        .unwrap_or_default();
+    // Создаём .lnk через WScript.Shell (надёжнее COM-боилерплейта из Rust).
+    let ps = format!(
+        "$d=[Environment]::GetFolderPath('Desktop'); \
+         $w=New-Object -ComObject WScript.Shell; \
+         $s=$w.CreateShortcut([IO.Path]::Combine($d,'JammVPN.lnk')); \
+         $s.TargetPath='{exe_s}'; $s.WorkingDirectory='{dir_s}'; \
+         $s.IconLocation='{exe_s},0'; $s.Description='JammVPN'; $s.Save()"
+    );
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            &ps,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "ярлык не создан: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// Ярлык на рабочий стол — только Windows.
+#[cfg(not(windows))]
+pub fn create_desktop_shortcut() -> Result<(), String> {
+    Err("ярлык поддерживается только на Windows".into())
+}
+
 /// Best-effort: разрешает входящий UDP-порт в брандмауэре Windows (netsh).
 /// Требует прав администратора; без них — тихо ничего не делает (UDP по LAN
 /// тогда может блокироваться, подключайтесь к локальному WG от админа).

@@ -538,3 +538,7 @@ textarea.ta:focus { outline: none; border-color: #22d3ee; box-shadow: 0 0 0 3px 
   cursor: pointer;
 }
 .sel-sm:focus { outline: none; border-color: var(--accent, #4a90e2); }
+
+/* «Что нового» — список изменений в модалке первого запуска версии. */
+.whatsnew-list { margin: 14px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 9px; }
+.whatsnew-list li { color: #c7d0e0; font-size: 13.5px; line-height: 1.45; }

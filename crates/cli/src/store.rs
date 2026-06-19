@@ -80,6 +80,23 @@ fn kv_set<T: serde::Serialize>(conn: &Connection, key: &str, v: &T) -> Result<()
     Ok(())
 }
 
+/// Отмечает, что текущая версия `current` запущена. Возвращает `true`, если
+/// это ПЕРВЫЙ запуск данной версии (сохранённая отличается или отсутствует) —
+/// тогда UI показывает «что нового». Обновляет сохранённую версию.
+pub fn mark_version_seen(config_path: &Path, current: &str) -> bool {
+    let conn = match open(&db_path_for(config_path)) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let last = kv_get::<String>(&conn, "last_seen_version").unwrap_or_default();
+    if last != current {
+        let _ = kv_set(&conn, "last_seen_version", &current.to_string());
+        true
+    } else {
+        false
+    }
+}
+
 /// Загружает конфиг из БД и расшифровывает секреты.
 pub fn load(path: &Path, store: &dyn SecretStore) -> Result<AppConfig, String> {
     let conn = open(path)?;

@@ -321,6 +321,19 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Первый ли это запуск текущей версии (показать «что нового» + предложить
+/// ярлык). Отмечает версию как просмотренную.
+#[tauri::command]
+fn first_run_of_version() -> bool {
+    ctl::first_run_of_version(env!("CARGO_PKG_VERSION"))
+}
+
+/// Создаёт ярлык JammVPN на рабочем столе.
+#[tauri::command]
+fn create_desktop_shortcut() -> Result<(), String> {
+    ctl::create_desktop_shortcut()
+}
+
 /// Проверка обновления (последний релиз на GitHub; best-effort).
 #[tauri::command]
 async fn check_update() -> Result<Option<ctl::UpdateInfo>, String> {
@@ -642,6 +655,8 @@ fn main() {
             read_log,
             clear_log,
             app_version,
+            first_run_of_version,
+            create_desktop_shortcut,
             check_update,
             perform_update,
             update_one_subscription,
