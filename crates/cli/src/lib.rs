@@ -455,6 +455,43 @@ pub async fn test_node_latency(name: &str) -> LatencyResult {
     }
 }
 
+/// Один шаг диагностики соединения (для UI «Тест соединения»).
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagStep {
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
+    pub ms: u64,
+}
+
+/// Пошаговая диагностика узла по имени: где именно рвётся путь
+/// (подключение к узлу → TLS через туннель → HTTP-ответ).
+pub async fn diagnose_node(name: &str) -> Vec<DiagStep> {
+    let cfg = load();
+    let engine = Engine::from_config(&cfg);
+    let ob = match engine.outbounds().get(name) {
+        Some(o) => o.clone(),
+        None => {
+            return vec![DiagStep {
+                name: "Узел".into(),
+                ok: false,
+                detail: format!("узел «{name}» не найден в конфигурации"),
+                ms: 0,
+            }]
+        }
+    };
+    jammvpn_net::diagnose_outbound(&ob)
+        .await
+        .into_iter()
+        .map(|s| DiagStep {
+            name: s.name,
+            ok: s.ok,
+            detail: s.detail,
+            ms: s.ms,
+        })
+        .collect()
+}
+
 /// Строит `vless://`-ссылку из узла (для копирования; в т.ч. узлы подписки).
 fn node_to_vless_link(p: &ServerProfile) -> Option<String> {
     if p.protocol != jammvpn_core::ProtocolKind::Vless {

@@ -12,6 +12,7 @@
 #[allow(dead_code, clippy::all)]
 mod buf_reader;
 pub mod conn;
+pub mod diagnose;
 pub mod dns;
 pub mod engine;
 pub mod fakeip;
@@ -44,6 +45,7 @@ pub mod wgserver;
 pub mod wireguard;
 
 pub use conn::{drop_connection as connection_drop, snapshot as connection_snapshot, ConnInfo};
+pub use diagnose::{diagnose_outbound, DiagStep};
 pub use arc_swap::ArcSwap;
 pub use engine::{
     serve_socks_routed, serve_socks_swappable, serve_transparent_redirect, set_route_notifier,

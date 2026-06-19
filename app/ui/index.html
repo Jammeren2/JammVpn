@@ -147,6 +147,7 @@
                 <div class="t">Серверы и узлы</div>
                 <div class="acts">
                   <button class="mini-btn" id="btn-test-all">Тест задержек</button>
+                  <button class="mini-btn" id="btn-test-conn" title="Пошагово проверить выбранный узел: подключение → TLS → HTTP">Тест соединения</button>
                   <button class="mini-btn accent" id="btn-add-node">+ Добавить</button>
                   <button class="icon-btn" data-closeservers>✕</button>
                 </div>
@@ -397,6 +398,19 @@
             <button class="btn-primary" id="whatsnew-shortcut">📌 Ярлык на рабочий стол</button>
           </div>
           <div class="hint" id="whatsnew-msg" style="font-size: 12px; margin-top: 8px"></div>
+        </div>
+      </div>
+
+      <!-- Пошаговая диагностика соединения. -->
+      <div class="modal-overlay" id="diag-modal" style="display: none">
+        <div class="modal">
+          <div class="modal-head"><h2 id="diag-title">Тест соединения</h2><button class="icon-btn" id="diag-close">✕</button></div>
+          <div id="diag-body" class="diag-list"></div>
+          <div class="hint" id="diag-msg" style="font-size: 12px; margin-top: 10px"></div>
+          <div class="form-row" style="margin-top: 14px; justify-content: flex-end">
+            <button class="btn-sm" id="diag-again" style="display: none">Повторить</button>
+            <button class="btn-primary" id="diag-ok">Закрыть</button>
+          </div>
         </div>
       </div>
 

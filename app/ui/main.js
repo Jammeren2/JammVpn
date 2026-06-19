@@ -1239,6 +1239,63 @@ function hideWhatsNew() {
   if (modal) modal.style.display = "none";
 }
 
+// --- Тест соединения: пошаговая диагностика выбранного узла ---
+function showDiag() {
+  const m = $("diag-modal");
+  if (m) m.style.display = "flex";
+}
+function hideDiag() {
+  const m = $("diag-modal");
+  if (m) m.style.display = "none";
+}
+function renderDiagSteps(steps) {
+  const body = $("diag-body");
+  if (!body) return;
+  body.innerHTML = "";
+  for (const s of steps) {
+    const row = document.createElement("div");
+    row.className = "diag-row " + (s.ok ? "ok" : "bad");
+    row.innerHTML =
+      `<span class="diag-ico">${s.ok ? "✅" : "❌"}</span>` +
+      `<span class="diag-name">${esc(s.name)}</span>` +
+      `<span class="diag-ms">${s.ms} мс</span>` +
+      `<div class="diag-detail">${esc(s.detail)}</div>`;
+    body.appendChild(row);
+  }
+}
+let diagBusy = false;
+async function runConnectionTest() {
+  if (diagBusy) return;
+  const node = (($("server") || {}).value || "").trim();
+  showDiag();
+  if (!node) {
+    $("diag-title").textContent = "Тест соединения";
+    $("diag-body").innerHTML = "";
+    $("diag-msg").textContent =
+      "Сейчас выбрано «по правилам» (без конкретного узла). Выберите узел на «Главной» и повторите.";
+    $("diag-again").style.display = "none";
+    return;
+  }
+  diagBusy = true;
+  $("diag-title").textContent = "Тест соединения · " + node;
+  $("diag-body").innerHTML = "";
+  $("diag-msg").textContent = "Проверяю: подключение к узлу → TLS через туннель → HTTP-ответ…";
+  $("diag-again").style.display = "none";
+  try {
+    const steps = await invoke("test_connection", { name: node });
+    renderDiagSteps(steps);
+    const allOk = steps.length > 0 && steps.every((s) => s.ok);
+    $("diag-msg").textContent = allOk
+      ? "Соединение через узел рабочее. Если сайты всё равно не открываются — причина в маршрутизации/драйвере, а не в узле."
+      : "Путь рвётся на шаге с ❌ — деталь рядом подсказывает причину.";
+  } catch (e) {
+    $("diag-msg").textContent = "Ошибка теста: " + e;
+  } finally {
+    diagBusy = false;
+    $("diag-again").style.display = "";
+  }
+}
+
 async function createShortcut() {
   const msg = $("whatsnew-msg");
   try {
@@ -1375,6 +1432,15 @@ async function init() {
   $("whatsnew-modal").addEventListener("click", (e) => {
     if (e.target === $("whatsnew-modal")) hideWhatsNew();
   });
+  // Тест соединения (пошаговая диагностика выбранного узла).
+  $("btn-test-conn") && $("btn-test-conn").addEventListener("click", runConnectionTest);
+  $("diag-close") && $("diag-close").addEventListener("click", hideDiag);
+  $("diag-ok") && $("diag-ok").addEventListener("click", hideDiag);
+  $("diag-again") && $("diag-again").addEventListener("click", runConnectionTest);
+  $("diag-modal") &&
+    $("diag-modal").addEventListener("click", (e) => {
+      if (e.target === $("diag-modal")) hideDiag();
+    });
   // Если стартовали в трее — покажем «что нового» при первом разворачивании.
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) maybeShowWhatsNew();

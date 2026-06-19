@@ -80,6 +80,12 @@ async fn test_node_latency(name: String) -> ctl::LatencyResult {
     ctl::test_node_latency(&name).await
 }
 
+/// Пошаговая диагностика соединения через узел (где рвётся: узел/TLS/HTTP).
+#[tauri::command]
+async fn test_connection(name: String) -> Vec<ctl::DiagStep> {
+    ctl::diagnose_node(&name).await
+}
+
 /// `vless://`-ссылка узла (для копирования).
 #[tauri::command]
 fn export_vless_link(name: String) -> Result<String, String> {
@@ -757,6 +763,7 @@ fn main() {
             clear_subscription_nodes,
             download_geo,
             test_node_latency,
+            test_connection,
             export_vless_link,
             export_ss_link,
             export_hysteria2_link,
