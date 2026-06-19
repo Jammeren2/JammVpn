@@ -17,6 +17,7 @@ pub mod engine;
 pub mod fakeip;
 pub mod from_profile;
 pub mod inbound;
+pub mod hysteria2;
 pub mod outbound;
 #[allow(dead_code, clippy::all)]
 pub mod reality;
@@ -45,6 +46,7 @@ pub use conn::{drop_connection as connection_drop, snapshot as connection_snapsh
 pub use engine::{serve_socks_routed, serve_transparent_redirect, Decision, Engine, Routed};
 pub use fakeip::FakeIp;
 pub use from_profile::{outbound_from_profile, ProfileError};
+pub use hysteria2::{Hysteria2Config, Hysteria2Params};
 pub use outbound::{
     HttpConfig, Outbound, ShadowsocksConfig, Socks5Config, Transport, TrojanConfig, UdpSession,
     VlessConfig,

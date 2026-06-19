@@ -9,6 +9,7 @@ use crate::outbound::{
 };
 use crate::reality_transport::RealityTransport;
 use crate::shadowsocks::Method;
+use crate::hysteria2::{Hysteria2Config, Hysteria2Params};
 use crate::tuic::{TuicConfig, TuicParams};
 use crate::vless;
 use crate::wireguard::{
@@ -223,7 +224,28 @@ pub fn outbound_from_profile(p: &ServerProfile) -> Result<Outbound, ProfileError
                 alpn,
             })))
         }
-        other => Err(ProfileError::Unsupported(other)),
+        ProtocolKind::Hysteria2 => {
+            // Salamander-обфускация пока не реализована — явная ошибка.
+            if p.param("obfs").is_some_and(|o| !o.is_empty()) {
+                return Err(ProfileError::Unsupported(ProtocolKind::Hysteria2));
+            }
+            let auth = p
+                .param("auth")
+                .or_else(|| p.param("password"))
+                .ok_or(ProfileError::MissingField("auth"))?
+                .to_string();
+            let sni = p.param("sni").map(str::to_string);
+            let insecure = matches!(
+                p.param("insecure").or_else(|| p.param("allow_insecure")),
+                Some("1") | Some("true")
+            );
+            Ok(Outbound::Hysteria2(Hysteria2Config::new(Hysteria2Params {
+                server,
+                auth,
+                sni,
+                insecure,
+            })))
+        }
     }
 }
 
@@ -276,17 +298,23 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_protocol_errors() {
-        use jammvpn_core::model::ServerProfile;
-        use std::collections::BTreeMap;
-        let p = ServerProfile {
-            name: "h".to_string(),
-            protocol: ProtocolKind::Hysteria2,
-            address: "h".to_string(),
-            port: 443,
-            params: BTreeMap::new(),
-            tags: Vec::new(),
-        };
+    fn maps_hysteria2() {
+        let p = parse_link("hysteria2://secret@h.example:8443?sni=h.example&insecure=1#hy").unwrap();
+        match outbound_from_profile(&p).unwrap() {
+            Outbound::Hysteria2(c) => {
+                assert_eq!(c.params().server, "h.example:8443");
+                assert_eq!(c.params().auth, "secret");
+                assert_eq!(c.params().sni.as_deref(), Some("h.example"));
+                assert!(c.params().insecure);
+            }
+            other => panic!("ожидался Hysteria2, получено {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hysteria2_obfs_unsupported() {
+        // Salamander-обфускация пока не реализована.
+        let p = parse_link("hysteria2://secret@h.example:8443?obfs=salamander#hy").unwrap();
         assert!(matches!(
             outbound_from_profile(&p),
             Err(ProfileError::Unsupported(ProtocolKind::Hysteria2))

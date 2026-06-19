@@ -6,6 +6,7 @@
 
 use crate::reality_transport::{reality_connect, RealityTransport};
 use crate::shadowsocks::{evp_bytes_to_key, Method, ShadowsocksStream, Ss2022Stream};
+use crate::hysteria2::Hysteria2Config;
 use crate::target::Target;
 use crate::tuic::TuicConfig;
 use crate::vision::VisionStream;
@@ -121,6 +122,8 @@ pub enum Outbound {
     Wireguard(WgConfig),
     /// Через TUIC v5 (QUIC).
     Tuic(TuicConfig),
+    /// Через Hysteria2 (QUIC + HTTP/3-auth).
+    Hysteria2(Hysteria2Config),
 }
 
 impl Outbound {
@@ -135,6 +138,7 @@ impl Outbound {
             Outbound::Trojan(cfg) => trojan_connect(cfg, target).await,
             Outbound::Wireguard(cfg) => crate::wireguard::wireguard_connect(cfg, target).await,
             Outbound::Tuic(cfg) => crate::tuic::tuic_connect(cfg, target).await,
+            Outbound::Hysteria2(cfg) => crate::hysteria2::hysteria2_connect(cfg, target).await,
         }
     }
 
