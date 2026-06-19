@@ -43,7 +43,10 @@ pub mod wgserver;
 pub mod wireguard;
 
 pub use conn::{drop_connection as connection_drop, snapshot as connection_snapshot, ConnInfo};
-pub use engine::{serve_socks_routed, serve_transparent_redirect, Decision, Engine, Routed};
+pub use arc_swap::ArcSwap;
+pub use engine::{
+    serve_socks_routed, serve_socks_swappable, serve_transparent_redirect, Decision, Engine, Routed,
+};
 pub use fakeip::FakeIp;
 pub use from_profile::{outbound_from_profile, ProfileError};
 pub use hysteria2::{Hysteria2Config, Hysteria2Params};

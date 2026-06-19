@@ -17,8 +17,8 @@ use jammvpn_core::{
 use jammvpn_core::LocalWgConfig;
 pub use jammvpn_core::SocksProxy;
 use jammvpn_net::{
-    gen_preshared_key, gen_private_key, serve_socks_routed, subscription,
-    urltest, wg_public_key, Engine, WgServer, WgServerParams,
+    gen_preshared_key, gen_private_key, serve_socks_swappable, subscription,
+    urltest, wg_public_key, ArcSwap, Engine, WgServer, WgServerParams,
 };
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -1670,6 +1670,8 @@ pub struct ProxyController {
     addr: SocketAddr,
     server: Option<String>,
     handle: tokio::task::JoinHandle<()>,
+    /// Подменяемый на лету движок (для применения правил без перезапуска).
+    engine: Arc<ArcSwap<Engine>>,
 }
 
 impl ProxyController {
@@ -1689,15 +1691,26 @@ impl ProxyController {
             "прокси запущен на {addr}; узел: {}",
             server.as_deref().unwrap_or("по правилам")
         ));
-        let engine = Arc::new(engine);
+        let engine = Arc::new(ArcSwap::from_pointee(engine));
+        let serve_engine = engine.clone();
         let handle = tokio::spawn(async move {
-            let _ = serve_socks_routed(listener, engine).await;
+            let _ = serve_socks_swappable(listener, serve_engine).await;
         });
         Ok(Self {
             addr,
             server,
             handle,
+            engine,
         })
+    }
+
+    /// Пересобирает движок из `cfg` и подменяет на лету: новые соединения сразу
+    /// идут по новым правилам, перезапуск прокси не нужен. Активные соединения
+    /// доживают на старом движке.
+    pub fn reload(&self, cfg: &AppConfig) -> Result<(), String> {
+        let engine = build_engine(cfg, self.server.as_deref())?;
+        self.engine.store(Arc::new(engine));
+        Ok(())
     }
 
     /// Адрес, на котором слушает прокси.
@@ -1784,6 +1797,17 @@ impl MultiSocks {
     /// Адрес «главного» листенера (системного или первого) — для статуса/проверки.
     pub fn primary_addr(&self) -> SocketAddr {
         self.primary
+    }
+
+    /// Применяет текущие правила маршрутизации ко всем листенерам на лету
+    /// (без перезапуска прокси). Вызывается после изменения правил/пресетов.
+    pub fn reload(&self) -> Result<(), String> {
+        let cfg = load();
+        for p in &self.proxies {
+            p.reload(&cfg)?;
+        }
+        log_line(&format!("SOCKS: правила перезагружены ({} листенеров)", self.proxies.len()));
+        Ok(())
     }
 
     pub fn stop(self) {

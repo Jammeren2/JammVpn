@@ -16,6 +16,7 @@ use jammvpn_core::routing::{RouteAction, Rule};
 use jammvpn_core::split::ConnApp;
 use std::collections::HashMap;
 use std::io;
+use arc_swap::ArcSwap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
@@ -493,12 +494,22 @@ async fn connect_with_retry(ob: &Outbound, target: &Target) -> io::Result<crate:
 /// одновременных соединений ограничено ([`MAX_CONNECTIONS`]), рукопожатие — под
 /// таймаутом ([`HANDSHAKE_TIMEOUT`]).
 pub async fn serve_socks_routed(listener: TcpListener, engine: Arc<Engine>) -> io::Result<()> {
+    serve_routed(listener, Arc::new(ArcSwap::new(engine)), MAX_CONNECTIONS).await
+}
+
+/// Как [`serve_socks_routed`], но движок можно подменять на лету (через
+/// `ArcSwap`): каждое НОВОЕ соединение берёт текущий движок. Позволяет применять
+/// изменения правил маршрутизации без перезапуска прокси.
+pub async fn serve_socks_swappable(
+    listener: TcpListener,
+    engine: Arc<ArcSwap<Engine>>,
+) -> io::Result<()> {
     serve_routed(listener, engine, MAX_CONNECTIONS).await
 }
 
 async fn serve_routed(
     listener: TcpListener,
-    engine: Arc<Engine>,
+    engine: Arc<ArcSwap<Engine>>,
     max_conns: usize,
 ) -> io::Result<()> {
     let sem = Arc::new(tokio::sync::Semaphore::new(max_conns));
@@ -509,7 +520,8 @@ async fn serve_routed(
             Ok(p) => p,
             Err(_) => continue,
         };
-        let eng = Arc::clone(&engine);
+        // Берём ТЕКУЩИЙ движок (мог быть подменён при изменении правил на лету).
+        let eng = engine.load_full();
         tokio::spawn(async move {
             let _permit = permit; // держим до конца обработки соединения
             // Сниффим первый байт без потребления: 0x05 → SOCKS5, иначе → HTTP-прокси.
@@ -900,7 +912,7 @@ mod tests {
         ));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_routed(listener, engine, 2)); // лимит = 2
+        tokio::spawn(serve_routed(listener, Arc::new(ArcSwap::new(engine)), 2)); // лимит = 2
 
         // Два «висящих» соединения (не шлём рукопожатие → держат permit в handshake).
         let c1 = TcpStream::connect(addr).await.unwrap();

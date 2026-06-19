@@ -234,8 +234,14 @@ fn get_settings() -> ctl::SettingsInfo {
 
 /// Сохранить настройки маршрутизации.
 #[tauri::command]
-fn set_settings(default_to_proxy: bool, default_proxy: Option<String>) -> Result<(), String> {
-    ctl::set_settings(default_to_proxy, default_proxy)
+fn set_settings(
+    default_to_proxy: bool,
+    default_proxy: Option<String>,
+    state: State<'_, ProxyState>,
+) -> Result<(), String> {
+    ctl::set_settings(default_to_proxy, default_proxy)?;
+    reload_running_proxy(&state);
+    Ok(())
 }
 
 /// Сохранить настройки подключения (адрес прокси и выбранный узел).
@@ -452,28 +458,48 @@ fn list_rules() -> Vec<ctl::RuleInfo> {
     ctl::list_rules()
 }
 
+/// Применяет правила к работающему прокси на лету (если запущен) — чтобы
+/// изменения маршрутизации действовали без перезапуска VPN.
+fn reload_running_proxy(state: &State<'_, ProxyState>) {
+    if let Ok(guard) = state.0.lock() {
+        if let Some(ms) = guard.as_ref() {
+            if let Err(e) = ms.reload() {
+                ctl::log_line(&format!("перезагрузка правил на лету не удалась: {e}"));
+            }
+        }
+    }
+}
+
 /// Добавить правило в конец списка.
 #[tauri::command]
-fn add_rule(rule: ctl::RuleInfo) -> Result<(), String> {
-    ctl::add_rule(rule)
+fn add_rule(rule: ctl::RuleInfo, state: State<'_, ProxyState>) -> Result<(), String> {
+    ctl::add_rule(rule)?;
+    reload_running_proxy(&state);
+    Ok(())
 }
 
 /// Заменить правило по индексу.
 #[tauri::command]
-fn update_rule(index: usize, rule: ctl::RuleInfo) -> Result<(), String> {
-    ctl::update_rule(index, rule)
+fn update_rule(index: usize, rule: ctl::RuleInfo, state: State<'_, ProxyState>) -> Result<(), String> {
+    ctl::update_rule(index, rule)?;
+    reload_running_proxy(&state);
+    Ok(())
 }
 
 /// Удалить правило по индексу. `false` — индекс вне диапазона.
 #[tauri::command]
-fn remove_rule(index: usize) -> Result<bool, String> {
-    ctl::remove_rule(index)
+fn remove_rule(index: usize, state: State<'_, ProxyState>) -> Result<bool, String> {
+    let r = ctl::remove_rule(index)?;
+    reload_running_proxy(&state);
+    Ok(r)
 }
 
 /// Переместить правило вверх (`up=true`) или вниз. `false` — двигать некуда.
 #[tauri::command]
-fn move_rule(index: usize, up: bool) -> Result<bool, String> {
-    ctl::move_rule(index, up)
+fn move_rule(index: usize, up: bool, state: State<'_, ProxyState>) -> Result<bool, String> {
+    let r = ctl::move_rule(index, up)?;
+    reload_running_proxy(&state);
+    Ok(r)
 }
 
 /// Список готовых пресетов правил.
@@ -484,8 +510,10 @@ fn list_presets() -> Vec<ctl::PresetInfo> {
 
 /// Применить пресет (заменяет текущие правила). Возвращает число правил.
 #[tauri::command]
-fn apply_preset(id: String) -> Result<usize, String> {
-    ctl::apply_preset(&id)
+fn apply_preset(id: String, state: State<'_, ProxyState>) -> Result<usize, String> {
+    let n = ctl::apply_preset(&id)?;
+    reload_running_proxy(&state);
+    Ok(n)
 }
 
 /// Включён ли автозапуск приложения при входе в систему.
