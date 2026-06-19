@@ -135,6 +135,16 @@ pub async fn client_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     let dl = peer_aead.open(&enc_len, &[])?;
     let peer_padding_len = decode_length(&dl);
 
+    // Разовый лог — подтверждает, что слой VLESS Encryption реально работает
+    // (помогает отличить «старый билд без поддержки» от рабочего соединения).
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        log::info!(
+            "VLESS Encryption: handshake OK (aes={use_aes}, peer_padding={peer_padding_len} б)"
+        );
+    }
+
     Ok(EncState {
         write_aead,
         peer_aead,

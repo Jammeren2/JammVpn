@@ -110,8 +110,8 @@ pub fn outbound_from_profile(p: &ServerProfile) -> Result<Outbound, ProfileError
             } else {
                 Transport::Tcp
             };
-            // VLESS Encryption: всё, кроме `none`/пусто — пока не поддержано
-            // (отдадим понятную ошибку при подключении, а не «соединение закрыто»).
+            // VLESS Encryption (`mlkem768x25519plus...`): всё, кроме `none`/пусто,
+            // передаём в outbound — там выполняется ML-KEM-768 + X25519 handshake.
             let encryption = p
                 .param("encryption")
                 .filter(|e| !e.is_empty() && *e != "none")
