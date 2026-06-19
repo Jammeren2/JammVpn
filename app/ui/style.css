@@ -548,3 +548,14 @@ textarea.ta:focus { outline: none; border-color: #22d3ee; box-shadow: 0 0 0 3px 
 .proto-legend { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0; }
 .proto-tag { padding: 5px 11px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.04); color: #9aa3b8; font: 600 12px "Space Grotesk"; cursor: help; transition: 0.15s; }
 .proto-tag:hover { color: #c7f5fe; border-color: rgba(34, 211, 238, 0.5); background: rgba(34, 211, 238, 0.12); }
+
+/* Тосты-уведомления (правый нижний угол; макс. 2; закрытие кликом). */
+.toast-stack { position: fixed; right: 18px; bottom: 18px; z-index: 100; display: flex; flex-direction: column; gap: 10px; max-width: 360px; }
+.toast { position: relative; background: #141b28; border: 1px solid rgba(255, 255, 255, 0.14); border-left: 3px solid #22d3ee; border-radius: 12px; padding: 12px 34px 12px 14px; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); cursor: pointer; animation: fadeUp 0.25s both; }
+.toast.error { border-left-color: #f87171; }
+.toast.warn { border-left-color: #facc15; }
+.toast.info { border-left-color: #22d3ee; }
+.toast-title { font: 700 13px "Space Grotesk"; color: #e6ecf5; margin-bottom: 3px; }
+.toast-body { font: 500 12.5px "JetBrains Mono"; color: #aab4c5; line-height: 1.4; }
+.toast-x { position: absolute; top: 8px; right: 10px; color: #6b7488; font-size: 12px; }
+.toast:hover .toast-x { color: #cdd6e4; }

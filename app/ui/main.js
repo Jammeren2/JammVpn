@@ -1248,6 +1248,29 @@ async function createShortcut() {
   }
 }
 
+// --- Тосты-уведомления (макс. 2 одновременно; закрываются кликом) ---
+function showToast(payload) {
+  const stack = $("toasts");
+  if (!stack || !payload) return;
+  const kind = payload.kind || "info";
+  // Не более 2 одновременно: убираем самый старый.
+  while (stack.children.length >= 2) stack.removeChild(stack.firstChild);
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.innerHTML =
+    '<div class="toast-title"></div><div class="toast-body"></div><span class="toast-x">✕</span>';
+  el.querySelector(".toast-title").textContent = payload.title || "";
+  el.querySelector(".toast-body").textContent = payload.body || "";
+  el.addEventListener("click", () => el.remove()); // пользователь сам закрывает
+  stack.appendChild(el);
+}
+
+function setupNotifications() {
+  const ev = window.__TAURI__ && window.__TAURI__.event;
+  if (!ev) return;
+  ev.listen("notify", (e) => showToast(e && e.payload));
+}
+
 const GITHUB_URL = "https://github.com/Jammeren2/JammVpn";
 
 async function startupChecks() {
@@ -1322,6 +1345,7 @@ async function doUpdate() {
 }
 
 async function init() {
+  setupNotifications();
   $("btn-start").addEventListener("click", startAll);
   $("btn-stop").addEventListener("click", stopAll);
   for (const k of ["socks", "split", "wg"]) {

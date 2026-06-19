@@ -7,7 +7,16 @@ use jammvpn_cli as ctl;
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, State, WindowEvent};
+use tauri::{Emitter, Manager, State, WindowEvent};
+
+/// Полезная нагрузка уведомления в UI (событие `notify` → тост в окне).
+#[derive(Clone, serde::Serialize)]
+struct NotifyPayload {
+    /// `info` | `warn` | `error` — стиль тоста.
+    kind: &'static str,
+    title: String,
+    body: String,
+}
 
 /// Состояние приложения: запущенный локальный прокси (или его отсутствие).
 #[derive(Default)]
@@ -647,6 +656,41 @@ fn main() {
                     let _ = win.hide();
                 }
             }
+            // Сторож здоровья split-драйвера: при сбое/восстановлении WinDivert
+            // шлём уведомление в UI (тост). Опрос раз в 2 с, событие — только на
+            // переходе состояния.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let mut last_healthy = true;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let healthy = handle
+                        .state::<SplitState>()
+                        .0
+                        .lock()
+                        .ok()
+                        .map(|g| g.as_ref().map(|c| c.is_healthy()).unwrap_or(true))
+                        .unwrap_or(true);
+                    if healthy != last_healthy {
+                        last_healthy = healthy;
+                        let payload = if healthy {
+                            NotifyPayload {
+                                kind: "info",
+                                title: "Раздельный туннель".into(),
+                                body: "Драйвер WinDivert восстановлен, перехват возобновлён.".into(),
+                            }
+                        } else {
+                            NotifyPayload {
+                                kind: "error",
+                                title: "Раздельный туннель".into(),
+                                body: "Сбой драйвера WinDivert — идёт автоматическое восстановление…"
+                                    .into(),
+                            }
+                        };
+                        let _ = handle.emit("notify", payload);
+                    }
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {

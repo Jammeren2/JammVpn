@@ -2347,6 +2347,15 @@ impl WinpkSplitController {
         })
     }
 
+    /// `false`, если split-драйвер сейчас в сбое/восстановлении (для уведомления
+    /// в UI). WinpkFilter самовосстановления не имеет — всегда `true`.
+    pub fn is_healthy(&self) -> bool {
+        match &self.tunnel {
+            Some(SplitTunnelBackend::Divert(t)) => t.is_healthy(),
+            _ => true,
+        }
+    }
+
     /// Останавливает перехват и стек.
     pub fn stop(mut self) {
         if let Some(t) = self.tunnel.take() {
@@ -2367,6 +2376,9 @@ pub struct WinpkSplitController;
 impl WinpkSplitController {
     pub async fn start() -> Result<Self, String> {
         Err("split-туннелирование доступно только на Windows".into())
+    }
+    pub fn is_healthy(&self) -> bool {
+        true
     }
     pub fn stop(self) {}
 }
