@@ -28,20 +28,57 @@ pub async fn fetch_text(url: &str, timeout: Duration) -> io::Result<String> {
 pub async fn update_subscription(
     sub: &Subscription,
     timeout: Duration,
-) -> io::Result<Vec<ServerProfile>> {
-    let body = fetch_text(&sub.url, timeout).await?;
-    let tag = sub_tag(sub);
-    let mut profiles: Vec<ServerProfile> = parse_subscription(&body)
+) -> io::Result<(Vec<ServerProfile>, Option<String>)> {
+    let (body, title) = fetch_string_with_title(&sub.url, timeout).await?;
+    let profiles: Vec<ServerProfile> = parse_subscription(&body)
         .into_iter()
         .filter_map(Result::ok)
         .collect();
-    // Тегируем узлы источником-подпиской (для группировки в UI и обновления).
-    for p in &mut profiles {
-        if !p.tags.iter().any(|t| t == &tag) {
-            p.tags.push(tag.clone());
+    // Серверы возвращаются БЕЗ тега: финальный тег (с учётом Profile-Title и
+    // дедупликации) проставляет вызывающий через [`tag_servers`].
+    Ok((profiles, title))
+}
+
+/// Помечает серверы тегом подписки (для группировки в UI и обновления).
+pub fn tag_servers(servers: &mut [ServerProfile], tag: &str) {
+    for p in servers {
+        if !p.tags.iter().any(|t| t == tag) {
+            p.tags.push(tag.to_string());
         }
     }
-    Ok(profiles)
+}
+
+/// Загружает текст подписки (с редиректами) + имя из `Profile-Title`.
+pub async fn fetch_string_with_title(
+    url: &str,
+    timeout: Duration,
+) -> io::Result<(String, Option<String>)> {
+    let mut current = url.to_string();
+    for _ in 0..6 {
+        let resp = tokio::time::timeout(timeout, fetch_raw(&current))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "подписка: таймаут"))??;
+        match resp.status {
+            200 => return Ok((String::from_utf8_lossy(&resp.body).into_owned(), resp.title)),
+            301 | 302 | 303 | 307 | 308 => {
+                let loc = resp
+                    .location
+                    .ok_or_else(|| io::Error::other("подписка: редирект без Location"))?;
+                current = if loc.starts_with("http") {
+                    loc
+                } else {
+                    let (sch, host, _p, _) = parse_url(&current)?;
+                    let pfx = match sch {
+                        Scheme::Https => "https://",
+                        Scheme::Http => "http://",
+                    };
+                    format!("{pfx}{host}{loc}")
+                };
+            }
+            s => return Err(io::Error::other(format!("подписка: статус {s}"))),
+        }
+    }
+    Err(io::Error::other("подписка: слишком много редиректов"))
 }
 
 /// Тег подписки для группировки/обновления: явный `sub.tag` или хост из URL.
@@ -130,11 +167,26 @@ pub async fn fetch_bytes(url: &str, timeout: Duration) -> io::Result<Vec<u8>> {
     Err(io::Error::other("слишком много редиректов"))
 }
 
-/// Сырой ответ: статус, Location (для редиректа), тело (бинарь).
+/// Сырой ответ: статус, Location (для редиректа), тело (бинарь), имя подписки
+/// из заголовка `Profile-Title` (декодированное).
 struct RawResp {
     status: u16,
     location: Option<String>,
     body: Vec<u8>,
+    title: Option<String>,
+}
+
+/// Декодирует значение заголовка `Profile-Title`: `base64:<b64>` → UTF-8-имя,
+/// иначе — как есть. Пустое/битое → `None`.
+fn decode_profile_title(raw: &str) -> Option<String> {
+    let v = raw.trim();
+    let name = if let Some(b64) = v.strip_prefix("base64:") {
+        jammvpn_core::base64::decode_to_string(b64.trim()).ok()?
+    } else {
+        v.to_string()
+    };
+    let name = name.trim().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 async fn fetch_raw(url: &str) -> io::Result<RawResp> {
@@ -178,12 +230,14 @@ where
         .unwrap_or(0);
     let mut location = None;
     let mut chunked = false;
+    let mut title = None;
     for l in lines {
         let ll = l.to_ascii_lowercase();
-        if let Some(v) = ll.strip_prefix("location:") {
-            // берём из оригинальной строки (без lowercase) значение.
+        if ll.starts_with("location:") {
             location = Some(l[l.find(':').unwrap() + 1..].trim().to_string());
-            let _ = v;
+        }
+        if ll.starts_with("profile-title:") {
+            title = decode_profile_title(&l[l.find(':').unwrap() + 1..]);
         }
         if ll.starts_with("transfer-encoding:") && ll.contains("chunked") {
             chunked = true;
@@ -194,6 +248,7 @@ where
         status,
         location,
         body,
+        title,
     })
 }
 
@@ -307,6 +362,17 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
 
+    #[test]
+    fn profile_title_decode() {
+        // base64 (UTF-8 кириллица) и обычный текст.
+        assert_eq!(
+            decode_profile_title("base64:0KLQntCeINCV0LHQsNC90YzQutC+").as_deref(),
+            Some("ТОО Ебанько")
+        );
+        assert_eq!(decode_profile_title("My Sub").as_deref(), Some("My Sub"));
+        assert_eq!(decode_profile_title("   ").as_deref(), None);
+    }
+
     /// Mock-HTTP-сервер: отдаёт `body` со статусом 200 и закрывает соединение.
     async fn mock_body(body: &'static str) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -373,8 +439,9 @@ mod tests {
             tag: Some("grp".to_string()),
             update_interval_hours: 12,
         };
-        let profiles = update_subscription(&sub, DEFAULT_TIMEOUT).await.unwrap();
+        let (mut profiles, _title) = update_subscription(&sub, DEFAULT_TIMEOUT).await.unwrap();
         assert_eq!(profiles.len(), 2);
+        tag_servers(&mut profiles, &sub_tag(&sub));
         assert!(profiles.iter().all(|p| p.tags.iter().any(|t| t == "grp")));
 
         // merge: старые серверы тега заменяются.

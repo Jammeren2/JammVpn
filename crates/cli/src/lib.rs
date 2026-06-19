@@ -313,19 +313,33 @@ pub async fn import(arg: &str) -> Result<String, String> {
     let mut cfg = load_config(&path, store.as_ref());
 
     let msg = if arg.starts_with("http://") || arg.starts_with("https://") {
-        let sub = Subscription {
+        let mut sub = Subscription {
             url: arg.to_string(),
-            tag: Some("subscription".to_string()),
+            tag: None,
             update_interval_hours: 12,
         };
-        let servers = subscription::update_subscription(&sub, subscription::DEFAULT_TIMEOUT)
-            .await
-            .map_err(|e| e.to_string())?;
-        let n = servers.len();
-        subscription::merge_subscription(&mut cfg, &sub, servers);
+        let (mut servers, title) =
+            subscription::update_subscription(&sub, subscription::DEFAULT_TIMEOUT)
+                .await
+                .map_err(|e| e.to_string())?;
+        sub.tag = title; // имя из Profile-Title (иначе хост)
         if !cfg.subscriptions.iter().any(|s| s.url == sub.url) {
-            cfg.subscriptions.push(sub);
+            cfg.subscriptions.push(sub.clone());
         }
+        ensure_distinct_sub_tags(&mut cfg);
+        let stored = cfg
+            .subscriptions
+            .iter()
+            .find(|s| s.url == arg)
+            .cloned()
+            .unwrap_or(sub);
+        let tag = subscription::sub_tag(&stored);
+        let host = subscription::sub_host(&stored.url);
+        subscription::tag_servers(&mut servers, &tag);
+        let n = servers.len();
+        cfg.servers
+            .retain(|s| !s.tags.iter().any(|t| t == &tag || t == &host));
+        cfg.servers.extend(servers);
         format!("импортировано узлов из подписки: {n}")
     } else {
         let profile = parse_link(arg).map_err(|e| e.to_string())?;
@@ -657,32 +671,42 @@ pub async fn update_subscriptions() -> Result<Vec<SubUpdate>, String> {
     let path = config_path();
     let store = secret_store();
     let mut cfg = load_config(&path, store.as_ref());
-    // Уникализируем теги ДО обновления — две подписки с одного хоста получают
-    // разные теги и корректно разделяются на группы.
-    ensure_distinct_sub_tags(&mut cfg);
-    let subs = cfg.subscriptions.clone();
-    let mut out = Vec::with_capacity(subs.len());
-    for sub in &subs {
-        match subscription::update_subscription(sub, subscription::DEFAULT_TIMEOUT).await {
-            Ok(servers) => {
+    let n_subs = cfg.subscriptions.len();
+    let mut out = Vec::with_capacity(n_subs);
+    // Пасс 1: качаем все, имя из Profile-Title пишем в запись подписки.
+    let mut fetched: Vec<Option<Vec<jammvpn_core::ServerProfile>>> = Vec::with_capacity(n_subs);
+    for i in 0..n_subs {
+        let sub = cfg.subscriptions[i].clone();
+        match subscription::update_subscription(&sub, subscription::DEFAULT_TIMEOUT).await {
+            Ok((servers, title)) => {
+                if let Some(t) = title {
+                    cfg.subscriptions[i].tag = Some(t);
+                }
                 let n = servers.len();
-                subscription::merge_subscription(&mut cfg, sub, servers);
                 log_line(&format!("подписка {}: {n} узлов", sub.url));
-                out.push(SubUpdate {
-                    url: sub.url.clone(),
-                    count: Some(n),
-                    error: None,
-                });
+                fetched.push(Some(servers));
+                out.push(SubUpdate { url: sub.url.clone(), count: Some(n), error: None });
             }
             Err(e) => {
                 log_line(&format!("подписка {}: ОШИБКА {e}", sub.url));
-                out.push(SubUpdate {
-                    url: sub.url.clone(),
-                    count: None,
-                    error: Some(e.to_string()),
-                })
+                fetched.push(None);
+                out.push(SubUpdate { url: sub.url.clone(), count: None, error: Some(e.to_string()) });
             }
         }
+    }
+    // Уникализируем теги ПОСЛЕ имён (дедуп одинаковых названий/хостов).
+    ensure_distinct_sub_tags(&mut cfg);
+    // Пасс 2: успешные — перетегировать узлы финальным тегом и влить (старые
+    // узлы этой подписки сносим по тегу И хосту — ловим легаси-узлы).
+    for (i, servers) in fetched.into_iter().enumerate() {
+        let Some(mut servers) = servers else { continue };
+        let sub = cfg.subscriptions[i].clone();
+        let tag = subscription::sub_tag(&sub);
+        let host = subscription::sub_host(&sub.url);
+        subscription::tag_servers(&mut servers, &tag);
+        cfg.servers
+            .retain(|s| !s.tags.iter().any(|t| t == &tag || t == &host));
+        cfg.servers.extend(servers);
     }
     save_config(&path, &cfg, store.as_ref())?;
     Ok(out)
@@ -693,18 +717,27 @@ pub async fn update_one_subscription(url: &str) -> Result<usize, String> {
     let path = config_path();
     let store = secret_store();
     let mut cfg = load_config(&path, store.as_ref());
-    ensure_distinct_sub_tags(&mut cfg);
-    let sub = cfg
+    let idx = cfg
         .subscriptions
         .iter()
-        .find(|s| s.url == url)
-        .cloned()
+        .position(|s| s.url == url)
         .ok_or_else(|| format!("подписка не найдена: {url}"))?;
-    let servers = subscription::update_subscription(&sub, subscription::DEFAULT_TIMEOUT)
+    let sub = cfg.subscriptions[idx].clone();
+    let (mut servers, title) = subscription::update_subscription(&sub, subscription::DEFAULT_TIMEOUT)
         .await
         .map_err(|e| e.to_string())?;
+    if let Some(t) = title {
+        cfg.subscriptions[idx].tag = Some(t);
+    }
+    ensure_distinct_sub_tags(&mut cfg);
+    let sub = cfg.subscriptions[idx].clone();
+    let tag = subscription::sub_tag(&sub);
+    let host = subscription::sub_host(&sub.url);
+    subscription::tag_servers(&mut servers, &tag);
+    cfg.servers
+        .retain(|s| !s.tags.iter().any(|t| t == &tag || t == &host));
     let n = servers.len();
-    subscription::merge_subscription(&mut cfg, &sub, servers);
+    cfg.servers.extend(servers);
     save_config(&path, &cfg, store.as_ref())?;
     log_line(&format!("подписка {url}: {n} узлов (обновление группы)"));
     Ok(n)
