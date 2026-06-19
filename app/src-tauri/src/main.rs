@@ -691,6 +691,22 @@ fn main() {
                     }
                 }
             });
+            // Уведомление при недоступности узла, выбранного правилом: трафик
+            // откатывается на узел по умолчанию, пользователю — тост.
+            let nh = app.handle().clone();
+            ctl::set_route_notifier(move |n: ctl::RouteNotice| {
+                let _ = nh.emit(
+                    "notify",
+                    NotifyPayload {
+                        kind: "warn",
+                        title: "Маршрутизация".into(),
+                        body: format!(
+                            "Узел «{}» недоступен для {} — направлено через «{}».",
+                            n.failed_node, n.host, n.via
+                        ),
+                    },
+                );
+            });
             Ok(())
         })
         .on_window_event(|window, event| {

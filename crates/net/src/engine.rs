@@ -44,6 +44,39 @@ pub struct Routed {
     pub decision: Decision,
     /// Цель для подключения исходящим.
     pub target: Target,
+    /// Тег конкретного узла, выбранного правилом (≠ узла по умолчанию) — для
+    /// уведомления при его недоступности.
+    pub chosen_node: Option<String>,
+    /// Запасной исходящий (узел по умолчанию): если выбранный правилом узел
+    /// недоступен, соединение пробуется через него.
+    pub fallback: Option<Outbound>,
+    /// Имя узла по умолчанию (для текста уведомления об откате).
+    pub fallback_name: Option<String>,
+}
+
+/// Уведомление о маршрутизации (выбранный правилом узел недоступен → откат).
+pub struct RouteNotice {
+    /// Цель соединения (`host:port`).
+    pub host: String,
+    /// Узел, который выбрало правило, но он недоступен.
+    pub failed_node: String,
+    /// Через что соединение всё же установлено (узел по умолчанию).
+    pub via: String,
+}
+
+static ROUTE_NOTIFIER: std::sync::OnceLock<Box<dyn Fn(RouteNotice) + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// Регистрирует получателя уведомлений маршрутизации (один раз, при старте).
+/// Приложение шлёт из него тост в UI.
+pub fn set_route_notifier<F: Fn(RouteNotice) + Send + Sync + 'static>(f: F) {
+    let _ = ROUTE_NOTIFIER.set(Box::new(f));
+}
+
+fn notify_route(n: RouteNotice) {
+    if let Some(f) = ROUTE_NOTIFIER.get() {
+        f(n);
+    }
 }
 
 /// Движок: правила маршрутизации + именованные исходящие.
@@ -369,9 +402,13 @@ impl Engine {
             action = RouteAction::Block;
         }
 
+        let (decision, chosen_node, fallback, fallback_name) = self.act_full(&action);
         Routed {
-            decision: self.act(&action),
+            decision,
             target: effective,
+            chosen_node,
+            fallback,
+            fallback_name,
         }
     }
 
@@ -413,15 +450,38 @@ impl Engine {
 
     /// Превращает действие правила в решение (резолвит тег прокси).
     fn act(&self, action: &RouteAction) -> Decision {
+        self.act_full(action).0
+    }
+
+    /// Как [`Self::act`], но дополнительно: выбранный конкретный узел (если
+    /// правило указало `Proxy(Some(tag))` ≠ узла по умолчанию), запасной
+    /// исходящий и имя узла по умолчанию — для отката при недоступности узла.
+    #[allow(clippy::type_complexity)]
+    fn act_full(
+        &self,
+        action: &RouteAction,
+    ) -> (Decision, Option<String>, Option<Outbound>, Option<String>) {
         match action {
-            RouteAction::Direct => Decision::Connect(Outbound::Direct),
-            RouteAction::Block => Decision::Block,
+            RouteAction::Direct => (Decision::Connect(Outbound::Direct), None, None, None),
+            RouteAction::Block => (Decision::Block, None, None, None),
             RouteAction::Proxy(tag) => {
-                let key = tag.clone().or_else(|| self.default_proxy.clone());
-                match key.and_then(|k| self.outbounds.get(&k).cloned()) {
+                let default_tag = self.default_proxy.clone();
+                let key = tag.clone().or_else(|| default_tag.clone());
+                let decision = match key.and_then(|k| self.outbounds.get(&k).cloned()) {
                     Some(ob) => Decision::Connect(ob),
                     None => Decision::Block,
-                }
+                };
+                // Правило указало КОНКРЕТНЫЙ узел (≠ default) → готовим откат на
+                // узел по умолчанию, если тот доступен и отличается.
+                let (chosen, fallback, fb_name) = match (tag, &default_tag) {
+                    (Some(t), Some(d)) if t != d => (
+                        Some(t.clone()),
+                        self.outbounds.get(d).cloned(),
+                        Some(d.clone()),
+                    ),
+                    _ => (None, None, None),
+                };
+                (decision, chosen, fallback, fb_name)
             }
         }
     }
@@ -489,6 +549,34 @@ async fn connect_with_retry(ob: &Outbound, target: &Target) -> io::Result<crate:
     Err(last.unwrap_or_else(|| io::Error::other("дозвон не удался")))
 }
 
+/// Подключается через выбранный исходящий `ob`; при сбое — откат на узел по
+/// умолчанию (если правило указывало конкретный недоступный узел) с
+/// уведомлением в UI. Возвращает `(поток, via-метка)` или `None`, если
+/// недоступны и узел, и откат.
+async fn connect_routed(
+    routed: &Routed,
+    ob: &Outbound,
+) -> Option<(crate::BoxedStream, &'static str)> {
+    if let Ok(up) = connect_with_retry(ob, &routed.target).await {
+        return Some((up, via_label(ob)));
+    }
+    // Узел недоступен. Если правило указывало конкретный узел и есть запасной
+    // (узел по умолчанию) — пробуем его и уведомляем пользователя.
+    if let (Some(fb), Some(node), Some(fb_name)) =
+        (&routed.fallback, &routed.chosen_node, &routed.fallback_name)
+    {
+        if let Ok(up) = connect_with_retry(fb, &routed.target).await {
+            notify_route(RouteNotice {
+                host: target_label(&routed.target),
+                failed_node: node.clone(),
+                via: fb_name.clone(),
+            });
+            return Some((up, via_label(fb)));
+        }
+    }
+    None
+}
+
 /// SOCKS5-сервер с маршрутизацией: на каждое соединение применяет правила
 /// движка и проксирует через выбранный исходящий (либо блокирует). Число
 /// одновременных соединений ограничено ([`MAX_CONNECTIONS`]), рукопожатие — под
@@ -545,18 +633,15 @@ async fn serve_routed(
             match req {
                 SocksRequest::Connect(target) => {
                     let routed = eng.route(&target).await;
-                    match routed.decision {
-                        Decision::Connect(ob) => match connect_with_retry(&ob, &routed.target).await
-                        {
-                            Ok(up) => {
+                    match &routed.decision {
+                        Decision::Connect(ob) => match connect_routed(&routed, ob).await {
+                            Some((up, via)) => {
                                 let _ = client.write_all(&reply(0x00)).await;
-                                let g = crate::conn::register(
-                                    target_label(&routed.target),
-                                    via_label(&ob),
-                                );
+                                let g =
+                                    crate::conn::register(target_label(&routed.target), via);
                                 let _ = crate::conn::copy_counted(client, up, &g).await;
                             }
-                            Err(_) => {
+                            None => {
                                 let _ = client.write_all(&reply(0x05)).await; // connection refused
                             }
                         },
@@ -604,18 +689,18 @@ async fn handle_http(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
         // authority-form: host:port (порт обязателен).
         let (host, port) = split_host_port(&target_str, 443);
         let routed = engine.route(&Target::Domain(host, port)).await;
-        match routed.decision {
-            Decision::Connect(ob) => match connect_with_retry(&ob, &routed.target).await {
-                Ok(up) => {
+        match &routed.decision {
+            Decision::Connect(ob) => match connect_routed(&routed, ob).await {
+                Some((up, via)) => {
                     client
                         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                         .await?;
-                    let g = crate::conn::register(target_label(&routed.target), via_label(&ob));
+                    let g = crate::conn::register(target_label(&routed.target), via);
                     crate::conn::copy_counted(client, up, &g).await
                 }
-                Err(e) => {
+                None => {
                     let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
-                    Err(e)
+                    Err(io::Error::other("upstream connect failed"))
                 }
             },
             Decision::Block => {
@@ -630,9 +715,9 @@ async fn handle_http(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
             return Ok(());
         };
         let routed = engine.route(&Target::Domain(host, port)).await;
-        match routed.decision {
-            Decision::Connect(ob) => match connect_with_retry(&ob, &routed.target).await {
-                Ok(mut up) => {
+        match &routed.decision {
+            Decision::Connect(ob) => match connect_routed(&routed, ob).await {
+                Some((mut up, via)) => {
                     // Переписываем строку запроса в origin-form, сохраняя заголовки.
                     let headers_block = head
                         .windows(2)
@@ -642,12 +727,12 @@ async fn handle_http(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
                     let mut out = format!("{method} {path} HTTP/1.1\r\n").into_bytes();
                     out.extend_from_slice(headers_block);
                     up.write_all(&out).await?;
-                    let g = crate::conn::register(target_label(&routed.target), via_label(&ob));
+                    let g = crate::conn::register(target_label(&routed.target), via);
                     crate::conn::copy_counted(client, up, &g).await
                 }
-                Err(e) => {
+                None => {
                     let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
-                    Err(e)
+                    Err(io::Error::other("upstream connect failed"))
                 }
             },
             Decision::Block => {

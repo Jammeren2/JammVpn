@@ -20,6 +20,8 @@ use jammvpn_net::{
     gen_preshared_key, gen_private_key, serve_socks_swappable, subscription,
     urltest, wg_public_key, ArcSwap, Engine, WgServer, WgServerParams,
 };
+// Реэкспорт для регистрации получателя уведомлений маршрутизации из app.
+pub use jammvpn_net::{set_route_notifier, RouteNotice};
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
