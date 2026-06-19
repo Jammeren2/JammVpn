@@ -542,3 +542,9 @@ textarea.ta:focus { outline: none; border-color: #22d3ee; box-shadow: 0 0 0 3px 
 /* «Что нового» — список изменений в модалке первого запуска версии. */
 .whatsnew-list { margin: 14px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 9px; }
 .whatsnew-list li { color: #c7d0e0; font-size: 13.5px; line-height: 1.45; }
+
+/* Легенда поддерживаемых протоколов в «Добавить узел» (инфо, не кнопки;
+   нативный тултип по title — «подробнее про протокол» при наведении). */
+.proto-legend { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0; }
+.proto-tag { padding: 5px 11px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.04); color: #9aa3b8; font: 600 12px "Space Grotesk"; cursor: help; transition: 0.15s; }
+.proto-tag:hover { color: #c7f5fe; border-color: rgba(34, 211, 238, 0.5); background: rgba(34, 211, 238, 0.12); }

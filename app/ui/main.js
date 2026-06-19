@@ -392,47 +392,35 @@ async function testLatencies() {
   }
 }
 
-// --- Модалка добавления узла/подписки ---
-const ADD_PLACEHOLDERS = {
-  vless: "vless://uuid@host:443?security=reality&pbk=...&sid=...&sni=...#Имя",
-  shadowsocks: "ss://base64@host:port#Имя   (поддерживается Outline-ссылка)",
-  trojan: "trojan://password@host:443?sni=...#Имя",
-  wireguard:
-    "[Interface]\nPrivateKey = ...\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = ...\nPresharedKey = ...\nEndpoint = host:51820\nAllowedIPs = 0.0.0.0/0, ::/0",
-  tuic: "tuic://uuid:password@host:443?sni=...#Имя",
-  socks: "socks5://user:pass@host:1080#Имя   (или http://user:pass@host:8080)",
-  sub: "https://example.com/sub  — ссылка на подписку",
-};
-let addProto = "vless";
-
+// --- Модалка добавления узла/подписки (универсальное поле, автодетект) ---
 function openAddModal() {
   $("add-modal").style.display = "flex";
   $("add-msg").textContent = "";
   $("add-input").value = "";
-  setAddProto("vless");
   $("add-input").focus();
 }
 function closeAddModal() {
   $("add-modal").style.display = "none";
 }
-function setAddProto(p) {
-  addProto = p;
-  for (const c of document.querySelectorAll("#add-proto .proto-chip"))
-    c.classList.toggle("on", c.dataset.proto === p);
-  $("add-input").placeholder = ADD_PLACEHOLDERS[p] || "";
+
+// Одна строка вида http(s)://… без схемы узла — это URL подписки; всё
+// остальное (vless/ss/trojan/hy2/tuic/socks/wg-конфиг/JSON/YAML) — узел(ы).
+function looksLikeSubscription(text) {
+  return !text.includes("\n") && /^https?:\/\//i.test(text);
 }
+
 async function submitAdd() {
   const text = $("add-input").value.trim();
   const msg = $("add-msg");
   if (!text) {
-    msg.textContent = "вставьте ключ / конфиг / ссылку";
+    msg.textContent = "вставьте ссылку / конфиг / URL подписки";
     msg.className = "hint err";
     return;
   }
   msg.className = "hint";
   msg.textContent = "добавляю…";
   try {
-    if (addProto === "sub") {
+    if (looksLikeSubscription(text)) {
       await invoke("add_subscription", { url: text, tag: null, intervalHours: 12 });
       const ups = await invoke("update_subscriptions");
       const n = ups.reduce((s, u) => s + (u.count || 0), 0);
@@ -1346,10 +1334,6 @@ async function init() {
   $("btn-add-node").addEventListener("click", openAddModal);
   $("add-close").addEventListener("click", closeAddModal);
   $("add-submit").addEventListener("click", submitAdd);
-  $("add-proto").addEventListener("click", (e) => {
-    const c = e.target.closest(".proto-chip");
-    if (c) setAddProto(c.dataset.proto);
-  });
   $("add-modal").addEventListener("click", (e) => {
     if (e.target === $("add-modal")) closeAddModal();
   });

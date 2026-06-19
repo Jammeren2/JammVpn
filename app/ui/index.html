@@ -361,17 +361,19 @@
       <div class="modal-overlay" id="add-modal" style="display: none">
         <div class="modal">
           <div class="modal-head"><h2>Добавить узел или подписку</h2><button class="icon-btn" id="add-close">✕</button></div>
-          <p class="hint" style="margin: 2px 0 0">1) выбери тип, 2) вставь ключ / конфиг / ссылку подписки.</p>
-          <div class="proto-grid" id="add-proto">
-            <button class="proto-chip on" data-proto="vless">VLESS</button>
-            <button class="proto-chip" data-proto="shadowsocks">Shadowsocks</button>
-            <button class="proto-chip" data-proto="trojan">Trojan</button>
-            <button class="proto-chip" data-proto="wireguard">WireGuard / AmneziaWG</button>
-            <button class="proto-chip" data-proto="tuic">TUIC</button>
-            <button class="proto-chip" data-proto="socks">SOCKS5 / HTTP</button>
-            <button class="proto-chip" data-proto="sub">Подписка (URL)</button>
+          <p class="hint" style="margin: 2px 0 0">Вставьте ссылку, конфиг или URL подписки — формат определится автоматически. Поддерживается (наведите для деталей):</p>
+          <div class="proto-legend" id="add-legend">
+            <span class="proto-tag" title="VLESS с REALITY / XTLS-Vision: маскировка под TLS к настоящему сайту, обходит DPI.">VLESS</span>
+            <span class="proto-tag" title="Shadowsocks (AEAD и 2022 / SIP022): лёгкий шифрованный прокси, в т.ч. multi-user.">Shadowsocks</span>
+            <span class="proto-tag" title="Trojan: прокси, неотличимый от обычного HTTPS-трафика.">Trojan</span>
+            <span class="proto-tag" title="Hysteria2: быстрый прокси поверх QUIC (TCP и UDP).">Hysteria2</span>
+            <span class="proto-tag" title="TUIC v5: мультиплекс-прокси поверх QUIC, низкие задержки.">TUIC</span>
+            <span class="proto-tag" title="Готовый SOCKS5 или HTTP(S)-прокси (локальный или удалённый).">SOCKS5 / HTTP</span>
+            <span class="proto-tag" title="URL подписки: список узлов (Happ, v2rayN, Clash, sing-box).">Подписка</span>
+            <span class="proto-tag" title="WireGuard: быстрый современный VPN поверх UDP.">WireGuard</span>
+            <span class="proto-tag" title="AmneziaWG: WireGuard с обфускацией (Jc / Jmin / S1 / H1…) против блокировок.">AmneziaWG</span>
           </div>
-          <textarea class="ta" id="add-input" rows="5"></textarea>
+          <textarea class="ta" id="add-input" rows="6" placeholder="Вставьте ссылку / конфиг / URL подписки. Примеры:&#10;vless://uuid@host:443?security=reality&pbk=…&sni=…#Имя&#10;ss://base64@host:port#Имя&#10;trojan://password@host:443?sni=…#Имя&#10;hysteria2://auth@host:443?sni=…#Имя&#10;tuic://uuid:password@host:443?sni=…#Имя&#10;socks5://user:pass@host:1080   ·   https://site/sub (подписка)&#10;[Interface] … — WireGuard / AmneziaWG .conf"></textarea>
           <div class="form-row" style="margin-top: 12px"><button class="btn-primary" id="add-submit">Добавить</button><span class="hint" id="add-msg" style="margin: 0"></span></div>
         </div>
       </div>
