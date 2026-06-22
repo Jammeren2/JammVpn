@@ -372,6 +372,8 @@ html, body {
 .bal-count { padding: 1px 7px; border-radius: 8px; background: rgba(255, 255, 255, 0.08); font: 600 10.5px "JetBrains Mono"; }
 .bal-best { margin-left: auto; cursor: pointer; padding: 2px 9px; border-radius: 8px; border: 1px solid rgba(95, 208, 255, 0.3); color: #5fd0ff; font-size: 11px; white-space: nowrap; }
 .bal-best:hover { background: rgba(95, 208, 255, 0.12); }
+.flag { height: 0.95em; width: auto; vertical-align: -0.13em; margin: 0 3px 0 1px; border-radius: 2px; }
+.flag[alt]:not([src]) { font-size: 0.8em; }
 .sp-hint { font-size: 11px; color: #5b6479; line-height: 1.5; margin-top: 12px; }
 
 /* заголовки страниц */

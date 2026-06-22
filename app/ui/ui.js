@@ -294,6 +294,27 @@
     }
   }
 
+  // Рисует флаг-эмодзи как картинку (twemoji): Windows-webview показывает пары
+  // Regional Indicator буквами, поэтому подменяем их на <img>. Если картинка не
+  // загрузилась (нет сети) — alt с кодом страны. Остальной текст экранируется.
+  function withFlags(name) {
+    const chars = [...String(name)];
+    let out = "";
+    for (let i = 0; i < chars.length; i++) {
+      const cp = chars[i].codePointAt(0);
+      const nx = i + 1 < chars.length ? chars[i + 1].codePointAt(0) : 0;
+      if (cp >= 0x1f1e6 && cp <= 0x1f1ff && nx >= 0x1f1e6 && nx <= 0x1f1ff) {
+        const code = String.fromCharCode(cp - 0x1f1e6 + 65, nx - 0x1f1e6 + 65);
+        const fn = cp.toString(16) + "-" + nx.toString(16);
+        out += `<img class="flag" alt="${code}" loading="lazy" src="https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/${fn}.svg">`;
+        i++;
+        continue;
+      }
+      out += esc(chars[i]);
+    }
+    return out;
+  }
+
   function nodeRowHtml(r, selected) {
     const isWg = /wireguard|amnezia|awg/i.test(r.proto);
     const isVless = /vless/i.test(r.proto);
@@ -311,7 +332,7 @@
     const sub = [r.proto, r.addr, flagCountry(r.name)].filter(Boolean).join(" · ");
     return `<div class="node-row${selected ? " sel" : ""}" data-pick="${esc(r.value)}">
       <span class="node-radio"></span>
-      <span class="node-nm"><span class="c">${esc(r.name)}</span><span class="k">${esc(sub)}</span></span>
+      <span class="node-nm"><span class="c">${withFlags(r.name)}</span><span class="k">${esc(sub)}</span></span>
       ${lat}<span class="node-acts">${acts}</span></div>`;
   }
 
@@ -359,10 +380,14 @@
         }
         for (const [bname, bl] of bals) {
           const bsel = bl.some((r) => r.value === val);
+          // «Лучший» имеет смысл только при 2+ нодах в кластере.
+          const best = bl.length > 1
+            ? `<span class="bal-best" data-best-group="${esc(g)}" data-best-bal="${esc(bname)}" title="Проверить все и выбрать самый быстрый">★ лучший</span>`
+            : "";
           html += `<div class="bal-head${bsel ? " has-sel" : ""}">
             <span class="bal-name">⚖ ${esc(bname)}</span>
             <span class="bal-count">${bl.length}</span>
-            <span class="bal-best" data-best-group="${esc(g)}" data-best-bal="${esc(bname)}" title="Проверить все и выбрать самый быстрый">★ лучший</span></div>`;
+            ${best}</div>`;
           for (const r of bl) html += nodeRowHtml(r, val === r.value);
         }
         for (const r of loose) html += nodeRowHtml(r, val === r.value);
