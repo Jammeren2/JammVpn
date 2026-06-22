@@ -35,8 +35,10 @@ use tokio::task::JoinHandle;
 const TCP_BUF: usize = 512 * 1024;
 /// Размер буфера UDP-сокета (датаграммы — большое окно не нужно).
 const SOCKET_BUF: usize = 64 * 1024;
-/// Слоты метаданных UDP-датаграмм.
-const UDP_META: usize = 32;
+/// Слоты метаданных UDP-датаграмм (потолок числа датаграмм в буфере). 32 было
+/// мало для всплеска (загрузка аватаров VRChat) — переполнение TX молча теряло
+/// ответы; поднято до 256.
+const UDP_META: usize = 256;
 /// Простой UDP-flow без активности дольше — закрываем.
 const UDP_IDLE: Duration = Duration::from_secs(60);
 /// Таймаут ожидания установления входящего TCP.
@@ -236,7 +238,7 @@ async fn run_driver(
 ) {
     loop {
         let (outbox, delay) = {
-            let mut st = shared.stack.lock().unwrap();
+            let mut st = shared.stack.lock().unwrap_or_else(|e| e.into_inner());
             let now = SmolInstant::from_micros(base.elapsed().as_micros() as i64);
             let Stack {
                 iface,
@@ -289,7 +291,7 @@ async fn run_driver(
 /// Создаёт сокет для нового потока (если нужно), спавнит relay и кладёт пакет в стек.
 fn demux_and_enqueue(shared: &Arc<Shared>, ip_pkt: &[u8]) {
     let flow = parse_flow(ip_pkt);
-    let mut st = shared.stack.lock().unwrap();
+    let mut st = shared.stack.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(f) = flow {
         let key = (ep_to_sockaddr(f.src), ep_to_sockaddr(f.dst));
@@ -299,6 +301,11 @@ fn demux_and_enqueue(shared: &Arc<Shared>, ip_pkt: &[u8]) {
                     tcp::SocketBuffer::new(vec![0u8; TCP_BUF]),
                     tcp::SocketBuffer::new(vec![0u8; TCP_BUF]),
                 );
+                // Без таймаута полузакрытый сокет (FinWait2: приложение упало/ушло
+                // из сети, своего FIN не шлёт) висел бы вечно, держа 2×512 КБ. Idle-
+                // таймаут переводит его в Closed → abandoned-уборка освобождает.
+                sock.set_timeout(Some(Duration::from_secs(30).into()));
+                sock.set_keep_alive(Some(Duration::from_secs(15).into()));
                 let listen = IpListenEndpoint {
                     addr: Some(f.dst.addr),
                     port: f.dst.port,
@@ -308,7 +315,7 @@ fn demux_and_enqueue(shared: &Arc<Shared>, ip_pkt: &[u8]) {
                     st.tcp_seen.insert(key);
                     let dst = Target::Socket(ep_to_sockaddr(f.dst));
                     let jh = shared.handle.spawn(relay_tcp(shared.clone(), handle, key, dst));
-                    shared.relays.lock().unwrap().push(jh);
+                    shared.relays.lock().unwrap_or_else(|e| e.into_inner()).push(jh);
                 }
             }
             IpProtocol::Udp if !st.udp_flows.contains_key(&key) => {
@@ -332,7 +339,7 @@ fn demux_and_enqueue(shared: &Arc<Shared>, ip_pkt: &[u8]) {
                     let jh = shared
                         .handle
                         .spawn(relay_udp(shared.clone(), handle, key, dst, f.src));
-                    shared.relays.lock().unwrap().push(jh);
+                    shared.relays.lock().unwrap_or_else(|e| e.into_inner()).push(jh);
                 }
             }
             _ => {}
@@ -352,7 +359,7 @@ async fn wait_established(shared: &Arc<Shared>, handle: SocketHandle) -> bool {
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
-                let mut st = shared.stack.lock().unwrap();
+                let mut st = shared.stack.lock().unwrap_or_else(|e| e.into_inner());
                 let s = st.sockets.get_mut::<tcp::Socket>(handle);
                 use tcp::State::*;
                 match s.state() {
@@ -374,10 +381,12 @@ async fn relay_tcp(
     key: (SocketAddr, SocketAddr),
     dst: Target,
 ) {
+    let mut connected = false;
     if wait_established(&shared, handle).await {
         let routed = shared.engine.route(&dst).await;
         if let Decision::Connect(ob) = routed.decision {
             if let Ok(up) = ob.connect_tcp(&routed.target).await {
+                connected = true;
                 let down = NsTcpStream::new(shared.clone(), handle);
                 // Регистрируем в мониторе соединений (видно в статистике).
                 let via = if matches!(ob, crate::outbound::Outbound::Direct) {
@@ -391,10 +400,19 @@ async fn relay_tcp(
         }
     }
     {
-        let mut st = shared.stack.lock().unwrap();
+        let mut st = shared.stack.lock().unwrap_or_else(|e| e.into_inner());
         st.tcp_seen.remove(&key);
-        if st.sockets.get::<tcp::Socket>(handle).state() != tcp::State::Closed {
-            st.sockets.get_mut::<tcp::Socket>(handle).close();
+        let s = st.sockets.get_mut::<tcp::Socket>(handle);
+        if s.state() != tcp::State::Closed {
+            if connected {
+                s.close(); // нормальное завершение после relay — FIN
+            } else {
+                // Локальное рукопожатие прошло (приложение считает соединение
+                // установленным), но исходящий не поднялся (Block/ошибка connect).
+                // RST, а не FIN — иначе приложение видит connect-then-EOF и «первая
+                // попытка не грузится»; с RST оно сразу чисто переподключается.
+                s.abort();
+            }
             st.abandoned.push(handle);
         } else {
             st.sockets.remove(handle);
@@ -422,22 +440,32 @@ async fn relay_udp(
             // Регистрируем в мониторе соединений (видно в статистике, как у TCP).
             let g = crate::conn::register(target_label(&dst), via, Some(key.0));
             let sess = Arc::new(sess);
-            // Направления — НЕЗАВИСИМЫЕ циклы, а НЕ ветки `select!`: select! отменял
-            // бы `sess.recv()` на полпути `read_exact` при каждом исходящем пакете,
-            // ломая length-фрейминг VLESS/Trojan UDP → ответы (download) рвутся
-            // (Discord: «он меня слышит, а я его — нет»). Таймаут на каждой операции
-            // = простой направления; отмена recv по таймауту безопасна (мы выходим).
+            // Единый сигнал отмены: UI-дроп (g.kill) ИЛИ жёсткая ошибка любого
+            // направления — чтобы выживший цикл не висел ещё UDP_IDLE впустую.
+            let cancel = Arc::new(tokio::sync::Notify::new());
+            // Направления — НЕЗАВИСИМЫЕ циклы, а НЕ select! recv↔send: select! рвал
+            // бы length-фрейминг VLESS/Trojan UDP при каждом исходящем пакете.
+            // `sess.recv()` отменяется ТОЛЬКО на teardown (cancel/idle) → продолжения
+            // после отмены нет, десинка фрейминга нет.
             let egress = {
                 let shared = shared.clone();
                 let sess = sess.clone();
+                let cancel = cancel.clone();
                 let up = Arc::clone(&g.up);
                 async move {
-                    while let Ok(Some(data)) =
-                        tokio::time::timeout(UDP_IDLE, udp_recv(&shared, handle)).await
-                    {
-                        up.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                        if sess.send(&data).await.is_err() {
-                            break;
+                    loop {
+                        tokio::select! {
+                            _ = cancel.notified() => break,
+                            r = tokio::time::timeout(UDP_IDLE, udp_recv(&shared, handle)) => match r {
+                                Ok(Some(data)) => {
+                                    up.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                                    if sess.send(&data).await.is_err() {
+                                        cancel.notify_waiters();
+                                        break;
+                                    }
+                                }
+                                _ => break, // простой или сокет закрыт
+                            }
                         }
                     }
                 }
@@ -445,23 +473,43 @@ async fn relay_udp(
             let ingress = {
                 let shared = shared.clone();
                 let sess = sess.clone();
+                let cancel = cancel.clone();
                 let down = Arc::clone(&g.down);
                 async move {
-                    while let Ok(Ok(data)) =
-                        tokio::time::timeout(UDP_IDLE, sess.recv()).await
-                    {
-                        down.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                        udp_send(&shared, handle, &data, client);
+                    loop {
+                        tokio::select! {
+                            _ = cancel.notified() => break,
+                            r = tokio::time::timeout(UDP_IDLE, sess.recv()) => match r {
+                                Ok(Ok(data)) => {
+                                    down.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                                    udp_send(&shared, handle, &data, client).await;
+                                }
+                                Ok(Err(_)) => { cancel.notify_waiters(); break; } // ошибка сессии
+                                Err(_) => break, // простой
+                            }
+                        }
                     }
                 }
             };
-            tokio::join!(egress, ingress);
+            // UI-дроп: g.kill будит cancel → оба направления выходят, идёт teardown.
+            let killed = {
+                let cancel = cancel.clone();
+                let kill = Arc::clone(&g.kill);
+                async move {
+                    kill.notified().await;
+                    cancel.notify_waiters();
+                }
+            };
+            tokio::select! {
+                _ = async { tokio::join!(egress, ingress); } => {}
+                _ = killed => {}
+            }
             sess.close().await;
             drop(g);
         }
     }
     {
-        let mut st = shared.stack.lock().unwrap();
+        let mut st = shared.stack.lock().unwrap_or_else(|e| e.into_inner());
         st.udp_flows.remove(&key);
         st.sockets.remove(handle);
     }
@@ -471,7 +519,7 @@ async fn relay_udp(
 /// Принимает датаграмму из стек-UDP-сокета. `None` — сокет закрыт.
 async fn udp_recv(shared: &Arc<Shared>, handle: SocketHandle) -> Option<Vec<u8>> {
     std::future::poll_fn(|cx| {
-        let mut st = shared.stack.lock().unwrap();
+        let mut st = shared.stack.lock().unwrap_or_else(|e| e.into_inner());
         let s = st.sockets.get_mut::<udp::Socket>(handle);
         if s.can_recv() {
             let mut buf = vec![0u8; 65_535];
@@ -491,13 +539,32 @@ async fn udp_recv(shared: &Arc<Shared>, handle: SocketHandle) -> Option<Vec<u8>>
     .await
 }
 
-/// Отправляет ответ цели обратно источнику через стек-UDP-сокет.
-fn udp_send(shared: &Arc<Shared>, handle: SocketHandle, data: &[u8], client: IpEndpoint) {
-    let mut st = shared.stack.lock().unwrap();
-    let s = st.sockets.get_mut::<udp::Socket>(handle);
-    let _ = s.send_slice(data, client);
-    drop(st);
-    shared.kick();
+/// Отправляет ответ цели обратно источнику через стек-UDP-сокет. При полном TX —
+/// бэкпрешер (паркуемся до освобождения буфера драйвером), а не молчаливая потеря.
+async fn udp_send(shared: &Arc<Shared>, handle: SocketHandle, data: &[u8], client: IpEndpoint) {
+    std::future::poll_fn(|cx| {
+        let mut st = shared.stack.lock().unwrap_or_else(|e| e.into_inner());
+        let s = st.sockets.get_mut::<udp::Socket>(handle);
+        match s.send_slice(data, client) {
+            Ok(()) => {
+                drop(st);
+                shared.kick();
+                Poll::Ready(())
+            }
+            Err(udp::SendError::BufferFull) => {
+                s.register_send_waker(cx.waker());
+                drop(st);
+                shared.kick();
+                Poll::Pending
+            }
+            // Unaddressable — недоставляемо, дропаем (не зависаем).
+            Err(_) => {
+                drop(st);
+                Poll::Ready(())
+            }
+        }
+    })
+    .await
 }
 
 /// `AsyncRead`/`AsyncWrite` поверх стек-TCP-сокета.
@@ -519,7 +586,7 @@ impl AsyncRead for NsTcpStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let me = self.get_mut();
-        let mut st = me.shared.stack.lock().unwrap();
+        let mut st = me.shared.stack.lock().unwrap_or_else(|e| e.into_inner());
         let s = st.sockets.get_mut::<tcp::Socket>(me.handle);
         if s.can_recv() {
             let n = s
@@ -547,7 +614,7 @@ impl AsyncWrite for NsTcpStream {
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
         let me = self.get_mut();
-        let mut st = me.shared.stack.lock().unwrap();
+        let mut st = me.shared.stack.lock().unwrap_or_else(|e| e.into_inner());
         let s = st.sockets.get_mut::<tcp::Socket>(me.handle);
         if !s.may_send() {
             return Poll::Ready(Err(io::Error::new(
@@ -577,7 +644,7 @@ impl AsyncWrite for NsTcpStream {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let me = self.get_mut();
         {
-            let mut st = me.shared.stack.lock().unwrap();
+            let mut st = me.shared.stack.lock().unwrap_or_else(|e| e.into_inner());
             st.sockets.get_mut::<tcp::Socket>(me.handle).close();
         }
         me.shared.kick();

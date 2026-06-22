@@ -57,8 +57,8 @@ pub struct ConnGuard {
     pub up: Arc<AtomicU64>,
     /// Счётчик принятых байт (читается из исходящего).
     pub down: Arc<AtomicU64>,
-    /// Сигнал принудительного закрытия (см. [`copy_counted`]).
-    kill: Arc<Notify>,
+    /// Сигнал принудительного закрытия из UI (см. [`copy_counted`] и relay_udp).
+    pub kill: Arc<Notify>,
 }
 
 /// Регистрирует соединение; держите guard на время relay. `src` — локальный
