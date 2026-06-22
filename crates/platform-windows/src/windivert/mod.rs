@@ -15,6 +15,7 @@ pub mod driver;
 
 use crate::winpkfilter::attribution::{Proto, ProcessResolver};
 use jammvpn_core::split::{decide, Action, ConnApp, ConnRequest, SplitConfig};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,7 +38,17 @@ struct DivertHandle(WinDivert<NetworkLayer>);
 unsafe impl Send for DivertHandle {}
 unsafe impl Sync for DivertHandle {}
 
-type AddrSlot = Arc<Mutex<Option<windivert::address::WinDivertAddress<NetworkLayer>>>>;
+/// Адрес WinDivert (интерфейс) исходящего пакета per ЛОКАЛЬНЫЙ IP: ответ
+/// инъектируем как входящий на ТОТ интерфейс, с которого ушёл поток этого IP.
+/// `last` — фолбэк. Раньше был один общий адрес на все потоки — на машинах с
+/// несколькими адаптерами ответы уходили не на тот интерфейс (Discord/UDP не
+/// получал IP-discovery → соединение не вставало с первого раза).
+#[derive(Default)]
+struct AddrTable {
+    by_ip: HashMap<IpAddr, windivert::address::WinDivertAddress<NetworkLayer>>,
+    last: Option<windivert::address::WinDivertAddress<NetworkLayer>>,
+}
+type AddrMap = Arc<Mutex<AddrTable>>;
 
 /// Общий переоткрываемый хендл: поток захвата может переоткрыть его после сбоя
 /// драйвера, и инжектор сразу увидит новый (оба берут текущий под Mutex).
@@ -77,8 +88,8 @@ pub struct SplitTunnel {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     handle: SharedHandle,
-    /// Адрес последнего исходящего пакета (интерфейс) — шаблон для инъекции ответов.
-    last_addr: AddrSlot,
+    /// Адреса интерфейсов per локальный IP (шаблоны для инъекции ответов).
+    addrs: AddrMap,
     stats: Arc<Stats>,
     /// `false`, пока поток захвата восстанавливает хендл после сбоя драйвера.
     healthy: Arc<AtomicBool>,
@@ -89,7 +100,7 @@ pub struct SplitTunnel {
 #[derive(Clone)]
 pub struct ResponseInjector {
     handle: SharedHandle,
-    last_addr: AddrSlot,
+    addrs: AddrMap,
     stats: Arc<Stats>,
     log: Logger,
 }
@@ -97,9 +108,15 @@ pub struct ResponseInjector {
 impl ResponseInjector {
     /// Инъектирует IP-пакет (ответ из netstack) приложению как ВХОДЯЩИЙ.
     pub fn inject(&self, ip_packet: Vec<u8>) {
-        // Берём шаблон адреса последнего исходящего пакета (интерфейс), помечаем
-        // как входящий + impostor и пересчитываем контрольные суммы.
-        let addr = { self.last_addr.lock().unwrap().clone() };
+        // Ответ адресован локальному IP приложения (= dst пакета). Берём шаблон
+        // адреса интерфейса именно этого IP (фолбэк — последний), помечаем как
+        // входящий + impostor и пересчитываем контрольные суммы.
+        let addr = {
+            let t = self.addrs.lock().unwrap();
+            ip_src_dst(&ip_packet)
+                .and_then(|(_, dst)| t.by_ip.get(&dst).cloned())
+                .or_else(|| t.last.clone())
+        };
         let Some(mut addr) = addr else {
             // Ещё не видели исходящих — некуда инъектить (нет интерфейса).
             let n = self.stats.no_addr.fetch_add(1, Ordering::Relaxed);
@@ -155,7 +172,7 @@ impl SplitTunnel {
         // Захватываем только исходящие TCP/UDP; входящие приложениям доставляет
         // система, а ответы туннеля мы инъектируем сами.
         let handle: SharedHandle = Arc::new(Mutex::new(Arc::new(open_handle(&log)?)));
-        let last_addr = Arc::new(Mutex::new(None));
+        let addrs: AddrMap = Arc::new(Mutex::new(AddrTable::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Stats::default());
         let healthy = Arc::new(AtomicBool::new(true));
@@ -163,14 +180,14 @@ impl SplitTunnel {
         let thread = {
             let stop = stop.clone();
             let handle = handle.clone();
-            let last_addr = last_addr.clone();
+            let addrs = addrs.clone();
             let stats = stats.clone();
             let healthy = healthy.clone();
             let log = log.clone();
             std::thread::Builder::new()
                 .name("windivert-capture".into())
                 .spawn(move || {
-                    capture_loop(stop, config, on_capture, handle, last_addr, stats, healthy, log)
+                    capture_loop(stop, config, on_capture, handle, addrs, stats, healthy, log)
                 })
                 .map_err(|e| e.to_string())?
         };
@@ -179,7 +196,7 @@ impl SplitTunnel {
             stop,
             thread: Some(thread),
             handle,
-            last_addr,
+            addrs,
             stats,
             healthy,
             log,
@@ -196,7 +213,7 @@ impl SplitTunnel {
     pub fn injector(&self) -> ResponseInjector {
         ResponseInjector {
             handle: self.handle.clone(),
-            last_addr: self.last_addr.clone(),
+            addrs: self.addrs.clone(),
             stats: self.stats.clone(),
             log: self.log.clone(),
         }
@@ -219,7 +236,7 @@ fn capture_loop(
     config: SplitConfig,
     mut on_capture: OnCapture,
     handle: SharedHandle,
-    last_addr: AddrSlot,
+    addrs: AddrMap,
     stats: Arc<Stats>,
     healthy: Arc<AtomicBool>,
     log: Logger,
@@ -304,10 +321,18 @@ fn capture_loop(
         match verdict {
             Verdict::Tunnel => {
                 stats.tunnel.fetch_add(1, Ordering::Relaxed);
-                // Запоминаем интерфейс именно ТУННЕЛЬНОГО потока (реальный NIC) —
-                // ответы инъектируем как входящие на этот интерфейс. (Адрес
-                // localhost-потоков сюда не попадёт.)
-                *last_addr.lock().unwrap() = Some(packet.address.clone());
+                // Запоминаем интерфейс ТУННЕЛЬНОГО потока per локальный IP (src) —
+                // ответы инъектируем как входящие именно на этот интерфейс. На
+                // машинах с несколькими адаптерами один общий адрес был неверным.
+                if let Some((src, _)) = ip_src_dst(&packet.data) {
+                    let a = packet.address.clone();
+                    let mut t = addrs.lock().unwrap();
+                    if t.by_ip.len() >= 64 {
+                        t.by_ip.clear(); // защита от роста (адаптеров единицы)
+                    }
+                    t.by_ip.insert(src, a.clone());
+                    t.last = Some(a);
+                }
                 // WinDivert ловит исходящие пакеты ДО offload-вычисления контрольных
                 // сумм — у них невалидные/нулевые суммы. netstack (smoltcp) валидирует
                 // RX-суммы и отбросил бы их → пересчитываем перед подачей.
@@ -407,6 +432,33 @@ fn classify(
         "{proto:?} :{local_port}→{dst_ip}:{dst_port} app={app_name}",
     );
     (verdict, info)
+}
+
+/// Адреса источника и назначения IP-пакета (IPv4/IPv6) без разбора L4.
+/// Для исходящего src = локальный IP приложения; для ответа dst = он же.
+fn ip_src_dst(ip: &[u8]) -> Option<(IpAddr, IpAddr)> {
+    match ip.first()? >> 4 {
+        4 => {
+            if ip.len() < 20 {
+                return None;
+            }
+            Some((
+                IpAddr::V4(Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15])),
+                IpAddr::V4(Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19])),
+            ))
+        }
+        6 => {
+            if ip.len() < 40 {
+                return None;
+            }
+            let mut s = [0u8; 16];
+            s.copy_from_slice(&ip[8..24]);
+            let mut d = [0u8; 16];
+            d.copy_from_slice(&ip[24..40]);
+            Some((IpAddr::V6(Ipv6Addr::from(s)), IpAddr::V6(Ipv6Addr::from(d))))
+        }
+        _ => None,
+    }
 }
 
 /// Разбирает IPv4/IPv6 + TCP/UDP: `(proto, is_v6, local_port, dst_ip, dst_port)`.
