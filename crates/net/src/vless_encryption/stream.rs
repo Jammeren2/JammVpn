@@ -44,6 +44,8 @@ pub struct VlessEncStream<S> {
     // запись
     wbuf: Vec<u8>,
     wpos: usize,
+    // режим random: XOR-обёртка заголовков записей (None для native/xorpub)
+    xor: Option<super::xor::XorState>,
 }
 
 impl<S> VlessEncStream<S> {
@@ -68,6 +70,7 @@ impl<S> VlessEncStream<S> {
             ppos: 0,
             wbuf: Vec::new(),
             wpos: 0,
+            xor: st.xor,
         }
     }
 }
@@ -81,14 +84,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> VlessEncStream<S> {
             let mut rb = ReadBuf::new(&mut tmp[..want]);
             match Pin::new(&mut self.inner).poll_read(cx, &mut rb) {
                 Poll::Ready(Ok(())) => {
-                    let filled = rb.filled();
-                    if filled.is_empty() {
+                    let n = rb.filled().len();
+                    if n == 0 {
                         if self.rtmp.is_empty() {
                             return Poll::Ready(Ok(false));
                         }
                         return Poll::Ready(Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
                     }
-                    self.rtmp.extend_from_slice(filled);
+                    // random: восстанавливаем заголовки записей до фрейминга.
+                    if let Some(xor) = self.xor.as_mut() {
+                        xor.transform_read(&mut tmp[..n]);
+                    }
+                    self.rtmp.extend_from_slice(&tmp[..n]);
                 }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
@@ -233,6 +240,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for VlessEncStream<S> {
         record.extend_from_slice(&sealed);
         if rekey {
             me.write_aead = Aead::new(&record, &me.united_key, me.use_aes);
+        }
+        // random: ксорим заголовок записи (rekey-ctx выше — по плейнтексту, как в Go).
+        if let Some(xor) = me.xor.as_mut() {
+            xor.transform_write(&mut record);
         }
         me.wbuf.extend_from_slice(&record);
 

@@ -3,12 +3,15 @@
 //! `proxy/vless/encryption`. Здесь — разбор клиентского дескриптора
 //! `mlkem768x25519plus.<mode>.<rtt>.<key>[.padding...]`.
 //!
-//! ПОРТ В РАБОТЕ: парсинг дескриптора + AEAD-слой; handshake/stream —
-//! отлаживаются против локального эталонного Xray (см. planning/xray/).
+//! Реализованы все режимы (`native`/`xorpub`/`random`) и оба NFS-слоя
+//! (X25519 и ML-KEM-768); каждый верифицирован байт-в-байт против локального
+//! Xray 26.3.27 (эхо small+256 KiB). 0-RTT (кэш тикета) не используется —
+//! всегда 1-RTT (сервер это принимает).
 
 mod aead;
 mod handshake;
 mod stream;
+mod xor;
 
 pub use stream::VlessEncStream;
 
