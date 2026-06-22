@@ -30,6 +30,8 @@ dist-ssr/
 *.zip
 /release/
 /out/
+# Трассировки профилирования CPU (ETW) — бывают на гигабайты.
+*.etl
 # Артефакты сборки kernel-драйвера (cl/link).
 /wfp-driver/build/
 *.sys

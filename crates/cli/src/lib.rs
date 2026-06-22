@@ -2592,19 +2592,21 @@ mod tests {
 
     #[test]
     fn distinct_sub_tags_separate_same_host() {
-        let mut cfg = AppConfig::default();
-        cfg.subscriptions = vec![
-            Subscription {
-                url: "https://1.2.3.4:8443/subA".into(),
-                tag: None,
-                update_interval_hours: 12,
-            },
-            Subscription {
-                url: "https://1.2.3.4:8443/subB".into(),
-                tag: None,
-                update_interval_hours: 12,
-            },
-        ];
+        let mut cfg = AppConfig {
+            subscriptions: vec![
+                Subscription {
+                    url: "https://1.2.3.4:8443/subA".into(),
+                    tag: None,
+                    update_interval_hours: 12,
+                },
+                Subscription {
+                    url: "https://1.2.3.4:8443/subB".into(),
+                    tag: None,
+                    update_interval_hours: 12,
+                },
+            ],
+            ..Default::default()
+        };
         ensure_distinct_sub_tags(&mut cfg);
         let t0 = cfg.subscriptions[0].tag.clone().unwrap();
         let t1 = cfg.subscriptions[1].tag.clone().unwrap();

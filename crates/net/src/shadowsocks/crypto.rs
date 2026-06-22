@@ -309,7 +309,7 @@ mod tests {
             let ipsk = vec![0x11u8; method.key_len()];
             let upsk = vec![0x22u8; method.key_len()];
             let salt = vec![0x33u8; method.salt_len()];
-            let eih = build_identity_headers(method, &[ipsk.clone()], &upsk, &salt).unwrap();
+            let eih = build_identity_headers(method, std::slice::from_ref(&ipsk), &upsk, &salt).unwrap();
             assert_eq!(eih.len(), 16);
             // Сервер: расшифровать EIH identity-подключом → получить hash(uPSK)[..16].
             let subkey = identity_subkey_2022(method, &ipsk, &salt);
