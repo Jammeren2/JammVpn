@@ -50,13 +50,16 @@ struct AddrTable {
 }
 type AddrMap = Arc<Mutex<AddrTable>>;
 
-/// Общий переоткрываемый хендл: поток захвата может переоткрыть его после сбоя
-/// драйвера, и инжектор сразу увидит новый (оба берут текущий под Mutex).
-type SharedHandle = Arc<Mutex<Arc<DivertHandle>>>;
+/// Общий переоткрываемый хендл. `None` = хендл ЗАКРЫТ (фильтр снят, диверта нет):
+/// так его можно по-настоящему закрыть на время восстановления и при остановке,
+/// даже если инжектор ещё держит клон Arc<Mutex<…>> — иначе в DIVERT-режиме
+/// открытый недренируемый хендл блэкхолит ВЕСЬ исходящий трафик машины.
+type SharedHandle = Arc<Mutex<Option<Arc<DivertHandle>>>>;
 
-/// WinDivert-фильтр: только исходящие TCP/UDP (входящие доставляет система,
-/// ответы туннеля инъектируем сами).
-const FILTER: &str = "outbound and (tcp or udp)";
+/// WinDivert-фильтр: только исходящие IPv4 TCP/UDP. ВАЖНО — `ip` (IPv4-only):
+/// netstack — IPv4-only, а в DIVERT-режиме захваченные IPv6-пакеты туннельных
+/// приложений уходили в никуда (IPv6-блэкхол). IPv6 оставляем системе.
+const FILTER: &str = "outbound and ip and (tcp or udp)";
 
 /// Открывает WinDivert-хендл (network-слой, заданный фильтр).
 fn open_handle(log: &Logger) -> Result<DivertHandle, String> {
@@ -137,7 +140,10 @@ impl ResponseInjector {
             }
             return;
         }
-        let h = { self.handle.lock().unwrap().clone() };
+        let Some(h) = ({ self.handle.lock().unwrap().clone() }) else {
+            // Хендл сейчас закрыт (восстановление/остановка) — тихо пропускаем.
+            return;
+        };
         match h.0.send(&pkt) {
             Ok(_) => {
                 let n = self.stats.inject_ok.fetch_add(1, Ordering::Relaxed);
@@ -171,7 +177,7 @@ impl SplitTunnel {
 
         // Захватываем только исходящие TCP/UDP; входящие приложениям доставляет
         // система, а ответы туннеля мы инъектируем сами.
-        let handle: SharedHandle = Arc::new(Mutex::new(Arc::new(open_handle(&log)?)));
+        let handle: SharedHandle = Arc::new(Mutex::new(Some(Arc::new(open_handle(&log)?))));
         let addrs: AddrMap = Arc::new(Mutex::new(AddrTable::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Stats::default());
@@ -233,6 +239,11 @@ impl Drop for SplitTunnel {
         if let Some(t) = self.thread.take() {
             let _ = t.join(); // поток выходит за ~200 мс (таймаут recv_wait)
         }
+        // Закрываем хендл ЯВНО: инжектор (в out_task контроллера) может ещё
+        // держать клон SharedHandle, и без этого WinDivertClose не вызвался бы —
+        // фильтр остался бы установлен и блэкхолил весь outbound до abort()
+        // out_task асинхронно. None роняет внутренний Arc<DivertHandle> сразу.
+        *self.handle.lock().unwrap() = None;
     }
 }
 
@@ -252,6 +263,9 @@ fn capture_loop(
     /// Серия подряд ошибок recv, после которой считаем драйвер упавшим и
     /// переоткрываем хендл.
     const REOPEN_AFTER: u32 = 10;
+    /// Сколько раз подряд может не удаться переоткрытие, прежде чем сдаёмся и
+    /// выключаем split (хендл закрыт → трафик идёт напрямую, без блэкхола).
+    const MAX_REOPEN: u32 = 30;
 
     log(format!(
         "split(WinDivert): поток захвата запущен; режим={:?}, приложения={:?}, kill_switch={}",
@@ -262,12 +276,15 @@ fn capture_loop(
     let mut detailed = 0u32; // сколько пакетов залогировать детально
     let mut consec_err = 0u32; // подряд ошибок recv (сброс при успехе)
     let mut last_report = std::time::Instant::now();
-    // Локальная копия хендла для горячего цикла; меняется только при переоткрытии.
-    let mut h = { handle.lock().unwrap().clone() };
+    // Текущий хендл для горячего цикла. `None` = закрыт (восстановление/останов).
+    let mut h: Option<Arc<DivertHandle>> = { handle.lock().unwrap().clone() };
 
     while !stop.load(Ordering::Relaxed) {
+        // Клон хендла на итерацию; None → хендл закрыт навсегда (восстановление не
+        // удалось) → выходим: фильтр снят, трафик идёт напрямую, split выключен.
+        let Some(cur) = h.clone() else { break };
         // Блокирующий recv с таймаутом, чтобы периодически проверять stop.
-        let packet = match h.0.recv_wait(&mut buf, 200) {
+        let packet = match cur.0.recv_wait(&mut buf, 200) {
             Ok(Some(p)) => {
                 consec_err = 0;
                 p
@@ -285,17 +302,22 @@ fn capture_loop(
                 if consec_err <= 5 {
                     log(format!("split(WinDivert): ошибка recv: {e}"));
                 }
-                // Серия ошибок = вероятный сбой драйвера → переоткрываем хендл,
-                // пока не получится (с паузой). Иначе цикл крутился бы вхолостую.
+                // Серия ошибок = вероятный сбой драйвера. СНАЧАЛА закрываем хендл
+                // (снимаем фильтр), иначе WinDivert продолжает дивертить весь
+                // outbound в недренируемую очередь → блэкхол всего интернета.
                 if consec_err >= REOPEN_AFTER {
                     healthy.store(false, Ordering::Relaxed);
-                    log("split(WinDivert): драйвер не отвечает — переоткрываю хендл…".into());
+                    *handle.lock().unwrap() = None;
+                    h = None;
+                    drop(cur); // последняя ссылка → WinDivertClose, фильтр снят
+                    log("split(WinDivert): драйвер не отвечает — фильтр снят, восстанавливаю…".into());
+                    let mut fails = 0u32;
                     while !stop.load(Ordering::Relaxed) {
                         match open_handle(&log) {
                             Ok(nh) => {
                                 let nh = Arc::new(nh);
-                                *handle.lock().unwrap() = nh.clone();
-                                h = nh;
+                                *handle.lock().unwrap() = Some(nh.clone());
+                                h = Some(nh);
                                 stats.reopens.fetch_add(1, Ordering::Relaxed);
                                 healthy.store(true, Ordering::Relaxed);
                                 consec_err = 0;
@@ -303,6 +325,11 @@ fn capture_loop(
                                 break;
                             }
                             Err(e) => {
+                                fails += 1;
+                                if fails >= MAX_REOPEN {
+                                    log("split(WinDivert): драйвер не восстановился — split выключен, трафик идёт напрямую".into());
+                                    return; // хендл уже None: фильтра нет, интернет работает
+                                }
                                 log(format!(
                                     "split(WinDivert): переоткрытие не удалось: {e}; повтор через 2 с"
                                 ));
@@ -350,12 +377,20 @@ fn capture_loop(
                         log(format!("split(WinDivert): пересчёт сумм туннельного пакета: {e}"));
                     }
                 }
-                on_capture(&owned.data);
+                // catch_unwind: паника в netstack-инъекции НЕ должна убить поток
+                // захвата — иначе перестанет реинъектиться и ПРЯМОЙ трафик (в
+                // DIVERT-режиме его кладёт только этот поток) → блэкхол интернета.
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    on_capture(&owned.data)
+                }));
+                if r.is_err() {
+                    log("split(WinDivert): инъекция в netstack паникнула — пакет пропущен".into());
+                }
                 // оригинал НЕ реинъектим — уходит в туннель (netstack).
             }
             Verdict::Direct => {
                 stats.direct.fetch_add(1, Ordering::Relaxed);
-                if let Err(e) = h.0.send(&packet) {
+                if let Err(e) = cur.0.send(&packet) {
                     let n = stats.send_err.fetch_add(1, Ordering::Relaxed);
                     if n < 5 {
                         log(format!("split(WinDivert): ошибка реинъекции (прямой трафик): {e}"));
