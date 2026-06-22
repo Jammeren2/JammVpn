@@ -112,7 +112,9 @@ async fn run_wg(udp: Arc<UdpSocket>, mut tunn: Tunn, netstack: Netstack, mut out
             // IP-пакеты — в стек.
             r = udp.recv_from(&mut udp_buf) => {
                 if let Ok((n, addr)) = r {
-                    peer = Some(addr);
+                    // НЕ обновляем peer на сыром пакете: иначе любой, кто шлёт UDP
+                    // на listen-сокет, перенаправил бы на себя весь нисходящий
+                    // трафик. Endpoint роумится ТОЛЬКО по валидному decapsulate.
                     let mut first = true;
                     loop {
                         let input: &[u8] = if first { &udp_buf[..n] } else { &[] };
@@ -124,8 +126,18 @@ async fn run_wg(udp: Arc<UdpSocket>, mut tunn: Tunn, netstack: Netstack, mut out
                             _ => None,
                         };
                         match res {
-                            Some((true, b)) => { let _ = udp.send_to(&b, addr).await; }
-                            Some((false, ip)) => { netstack.inject(&ip); break; }
+                            // Валидный handshake-ответ — отвечаем источнику и
+                            // принимаем его как endpoint.
+                            Some((true, b)) => {
+                                peer = Some(addr);
+                                let _ = udp.send_to(&b, addr).await;
+                            }
+                            // Аутентифицированный IP-пакет — принимаем endpoint.
+                            Some((false, ip)) => {
+                                peer = Some(addr);
+                                netstack.inject(&ip);
+                                break;
+                            }
                             None => break,
                         }
                     }

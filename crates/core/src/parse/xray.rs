@@ -67,15 +67,23 @@ fn parse_config_entry(config: &JsonValue) -> Vec<Result<ServerProfile, ParseErro
             arr.iter()
                 .filter_map(|b| {
                     let tag = b.get("tag").and_then(JsonValue::as_str)?.to_string();
-                    let sel = b
+                    // Пустой префикс делает starts_with("") истинным для ВСЕХ нод
+                    // → балансировщик пометил бы все узлы. Отбрасываем пустые.
+                    let sel: Vec<String> = b
                         .get("selector")
                         .and_then(JsonValue::as_array)
                         .map(|s| {
                             s.iter()
-                                .filter_map(|x| x.as_str().map(str::to_string))
+                                .filter_map(|x| x.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
                                 .collect()
                         })
                         .unwrap_or_default();
+                    if sel.is_empty() {
+                        return None; // балансировщик без валидных префиксов — пропускаем
+                    }
                     Some((tag, sel))
                 })
                 .collect()

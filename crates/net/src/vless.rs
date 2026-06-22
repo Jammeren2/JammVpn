@@ -30,9 +30,13 @@ pub const FLOW_VISION: &str = "xtls-rprx-vision";
 fn push_address(b: &mut Vec<u8>, target: &Target) {
     match target {
         Target::Domain(host, _) => {
+            // Длина адреса — один байт. Зажимаем до 255 СОГЛАСОВАННО (и байт длины,
+            // и сами байты), чтобы не было десинка заголовка. Реальные домены ≤253.
+            let bytes = host.as_bytes();
+            let len = bytes.len().min(255);
             b.push(0x02);
-            b.push(host.len() as u8);
-            b.extend_from_slice(host.as_bytes());
+            b.push(len as u8);
+            b.extend_from_slice(&bytes[..len]);
         }
         Target::Socket(SocketAddr::V4(a)) => {
             b.push(0x01);

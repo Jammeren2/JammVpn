@@ -31,7 +31,7 @@ const UDP_META: usize = 32;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Динамический диапазон локальных портов.
 const PORT_BASE: u16 = 49152;
-const PORT_SPAN: u32 = (u16::MAX - PORT_BASE) as u32;
+const PORT_SPAN: u32 = (u16::MAX - PORT_BASE) as u32 + 1; // включая 65535
 
 /// Разделяемый сетевой стек. Под `std::sync::Mutex`; держать НЕ через `.await`.
 pub(crate) struct Stack {
