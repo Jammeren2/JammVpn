@@ -13,8 +13,9 @@ pub mod attribution;
 pub mod driver;
 
 use attribution::{Proto, ProcessResolver};
-use jammvpn_core::split::{decide, Action, ConnApp, ConnRequest, SplitConfig};
+use jammvpn_core::split::{decide, Action, ConnRequest, SplitConfig};
 use ndisapi::{DirectionFlags, EthRequest, FilterFlags, IntermediateBuffer, Ndisapi};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -199,8 +200,9 @@ impl SplitTunnel {
 
 /// Решение по одному пакету.
 enum Verdict {
-    /// Туннелировать: IP-пакет + Ethernet-шаблон ответа (swapped MAC).
-    Tunnel(Vec<u8>, [u8; ETH_HDR]),
+    /// Туннелировать: IP-пакет + Ethernet-шаблон ответа (swapped MAC) +
+    /// локальный IP потока (ключ, на какой адаптер инъектировать ответы).
+    Tunnel(Vec<u8>, [u8; ETH_HDR], IpAddr),
     /// Реинъектить на адаптер (исходящее напрямую).
     ToAdapter,
     /// Реинъектить в MSTCP (входящее / системное).
@@ -248,12 +250,18 @@ fn capture_loop(
     let mut resolver = ProcessResolver::new();
     let mut read_ib = IntermediateBuffer::new();
     let mut inject_ib = IntermediateBuffer::new();
-    // Адаптер + Ethernet-шаблон последнего туннелированного пакета (для инъекции
-    // ответов). Допущение v1: одна активная сеть.
-    let mut active: Option<(HANDLE, [u8; ETH_HDR])> = None;
+    // Адаптер + Ethernet-шаблон ответа per ЛОКАЛЬНЫЙ IP. У каждого адаптера свой
+    // IP и своя пара MAC (локальный↔шлюз), поэтому ответ из netstack инъектируем
+    // на тот адаптер, с которого ушёл исходящий пакет этого же локального IP.
+    // `last` — фолбэк, если поток ещё не в карте. (Раньше был один `active` на
+    // все адаптеры — на машинах с несколькими адаптерами ответы уходили не туда.)
+    let mut flow_eth: HashMap<IpAddr, (HANDLE, [u8; ETH_HDR])> = HashMap::new();
+    let mut last: Option<(HANDLE, [u8; ETH_HDR])> = None;
 
-    // Счётчики для периодической диагностики.
-    let (mut n_out, mut n_tunnel, mut n_direct, mut n_inject) = (0u64, 0u64, 0u64, 0u64);
+    // Счётчики + первые N пакетов детально (для диагностики, как у WinDivert).
+    let (mut n_out, mut n_tunnel, mut n_direct, mut n_inject, mut n_lost) =
+        (0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut detailed = 0u32;
     let mut last_report = std::time::Instant::now();
 
     let events = [packet_event.0, response_event.0];
@@ -268,28 +276,37 @@ fn capture_loop(
             break;
         }
 
-        // 1) Инъекция ответов из netstack в MSTCP.
-        if let Some((handle, eth)) = active {
-            while let Ok(ip) = response_rx.try_recv() {
-                if ip.len() + ETH_HDR > MAX_FRAME {
-                    continue;
-                }
-                inject_ib.device_flags = DirectionFlags::PACKET_FLAG_ON_RECEIVE;
-                inject_ib.set_length((ip.len() + ETH_HDR) as u32);
-                let data = inject_ib.get_data_mut();
-                data[..ETH_HDR].copy_from_slice(&eth);
-                data[ETH_HDR..].copy_from_slice(&ip);
-                let mut req = EthRequest::new(handle);
-                req.set_packet(&mut inject_ib);
-                let _ = driver.send_packet_to_mstcp(&req);
-                n_inject += 1;
+        // 1) Инъекция ответов из netstack в MSTCP — на адаптер исходного потока.
+        while let Ok(ip) = response_rx.try_recv() {
+            if ip.len() + ETH_HDR > MAX_FRAME {
+                n_lost += 1;
+                continue;
             }
+            // Ответ адресован локальному IP приложения = dst пакета. Берём
+            // адаптер/MAC именно этого локального IP; фолбэк — последний.
+            let target = parse_ip(&ip)
+                .and_then(|(_, _, _, dst_ip, _, _)| flow_eth.get(&dst_ip).copied())
+                .or(last);
+            let Some((handle, eth)) = target else {
+                n_lost += 1;
+                continue;
+            };
+            inject_ib.device_flags = DirectionFlags::PACKET_FLAG_ON_RECEIVE;
+            inject_ib.set_length((ip.len() + ETH_HDR) as u32);
+            let data = inject_ib.get_data_mut();
+            data[..ETH_HDR].copy_from_slice(&eth);
+            data[ETH_HDR..].copy_from_slice(&ip);
+            let mut req = EthRequest::new(handle);
+            req.set_packet(&mut inject_ib);
+            let _ = driver.send_packet_to_mstcp(&req);
+            n_inject += 1;
         }
 
         // Периодический отчёт (раз в ~5 с) — для диагностики.
         if last_report.elapsed().as_secs() >= 5 {
             log(format!(
-                "split: исходящих={n_out} туннель={n_tunnel} прямо={n_direct} ответов-в-mstcp={n_inject}"
+                "split: исходящих={n_out} туннель={n_tunnel} прямо={n_direct} ответов-в-mstcp={n_inject} потеряно-ответов={n_lost} потоков={}",
+                flow_eth.len()
             ));
             last_report = std::time::Instant::now();
         }
@@ -303,15 +320,25 @@ fn capture_loop(
                 if driver.read_packet(&mut req).is_err() {
                     break; // очередь адаптера пуста
                 }
-                let verdict = {
+                let (verdict, info) = {
                     let ib = req.packet.buffer.as_deref().unwrap();
                     classify(ib.get_data(), ib.get_device_flags(), &config, &mut resolver)
                 };
+                if detailed < 15 && !info.is_empty() {
+                    detailed += 1;
+                    log(format!("split: пакет#{detailed} {info}"));
+                }
                 match verdict {
-                    Verdict::Tunnel(mut ip, eth) => {
+                    Verdict::Tunnel(mut ip, eth, local_ip) => {
                         n_out += 1;
                         n_tunnel += 1;
-                        active = Some((handle, eth));
+                        // Карта адаптеров мала (по числу локальных IP); страховка
+                        // от роста при странных конфигурациях.
+                        if flow_eth.len() >= 64 {
+                            flow_eth.clear();
+                        }
+                        flow_eth.insert(local_ip, (handle, eth));
+                        last = Some((handle, eth));
                         // На NDIS-краю контрольные суммы ещё не посчитаны
                         // (checksum offload) — netstack/smoltcp валидирует rx и
                         // иначе отбросил бы пакет. WinDivert (L3) делает то же.
@@ -340,108 +367,51 @@ fn capture_loop(
 }
 
 /// Классифицирует Ethernet-кадр: куда направить / туннелировать.
+/// Возвращает вердикт и строку диагностики (пустую для входящих/не-IP — их не
+/// логируем, чтобы не зашумлять).
 fn classify(
     frame: &[u8],
     dir: DirectionFlags,
     config: &SplitConfig,
     resolver: &mut ProcessResolver,
-) -> Verdict {
+) -> (Verdict, String) {
     let outgoing = dir == DirectionFlags::PACKET_FLAG_ON_SEND;
     // Не-IP / короткие кадры — просто пропускаем по направлению.
     if frame.len() < ETH_HDR {
-        return passthrough(outgoing);
+        return (passthrough(outgoing), String::new());
     }
     let ip = &frame[ETH_HDR..];
-    let parsed = parse_ip(ip);
-    let Some((proto, is_v6, local_port, dst_ip, dst_port)) = parsed else {
-        return passthrough(outgoing);
+    let Some((proto, is_v6, local_port, dst_ip, dst_port, src_ip)) = parse_ip(ip) else {
+        return (passthrough(outgoing), String::new());
     };
     // Входящее (ответы прямым приложениям/системе) — наверх в TCP/IP.
     if !outgoing {
-        return Verdict::ToMstcp;
+        return (Verdict::ToMstcp, String::new());
     }
     // Исходящее: атрибуция к процессу и решение по split-правилам.
-    let app = resolver
-        .resolve(proto, is_v6, local_port)
-        .unwrap_or(ConnApp {
-            exe_path: None,
-            process_name: None,
-        });
+    let app = resolver.resolve(proto, is_v6, local_port).unwrap_or_default();
+    let name = app
+        .process_name
+        .clone()
+        .or_else(|| app.exe_path.clone())
+        .unwrap_or_else(|| "<неизвестно>".into());
     let req = ConnRequest {
         app: &app,
         dst_ip,
         dst_port,
     };
-    match decide(&req, config, true) {
-        Action::Tunnel => Verdict::Tunnel(ip.to_vec(), swapped_eth(frame)),
-        Action::Direct => Verdict::ToAdapter,
-        Action::Block => Verdict::Drop,
-    }
-}
-
-#[cfg(test)]
-mod checksum_tests {
-    use super::{recalc_checksums, sum16};
-
-    /// IPv4-заголовок валиден, если сумма всех 16-битных слов свёрнута в 0xFFFF.
-    fn ipv4_hdr_ok(ip: &[u8]) -> bool {
-        let ihl = ((ip[0] & 0x0F) as usize) * 4;
-        let mut s = sum16(&ip[..ihl], 0);
-        while s >> 16 != 0 {
-            s = (s & 0xFFFF) + (s >> 16);
-        }
-        s as u16 == 0xFFFF
-    }
-
-    /// TCP/UDP валиден, если псевдозаголовок+сегмент свёрнуты в 0xFFFF.
-    fn l4_ok(ip: &[u8]) -> bool {
-        let ihl = ((ip[0] & 0x0F) as usize) * 4;
-        let total = u16::from_be_bytes([ip[2], ip[3]]) as usize;
-        let proto = ip[9];
-        let l4 = &ip[ihl..total];
-        let mut pseudo = 0u32;
-        pseudo = sum16(&ip[12..16], pseudo);
-        pseudo = sum16(&ip[16..20], pseudo);
-        pseudo += proto as u32 + l4.len() as u32;
-        let mut s = sum16(l4, pseudo);
-        while s >> 16 != 0 {
-            s = (s & 0xFFFF) + (s >> 16);
-        }
-        s as u16 == 0xFFFF
-    }
-
-    #[test]
-    fn recalc_makes_ipv4_tcp_valid() {
-        // IPv4 (ihl=5) + TCP (20 байт) + 4 байта payload, суммы обнулены/мусор.
-        let mut ip = vec![
-            0x45, 0x00, 0x00, 0x2c, // ver/ihl, tos, total_len=44
-            0x12, 0x34, 0x40, 0x00, // id, flags/frag
-            0x40, 0x06, 0xff, 0xff, // ttl, proto=6(TCP), checksum=мусор
-            192, 168, 1, 50, // src
-            93, 184, 216, 34, // dst
-            // TCP
-            0xc0, 0x00, 0x01, 0xbb, // sport, dport=443
-            0x00, 0x00, 0x00, 0x01, // seq
-            0x00, 0x00, 0x00, 0x00, // ack
-            0x50, 0x18, 0xff, 0xff, // off/flags, window
-            0xab, 0xcd, 0x00, 0x00, // checksum=мусор, urg
-            0xde, 0xad, 0xbe, 0xef, // payload
-        ];
-        recalc_checksums(&mut ip);
-        assert!(ipv4_hdr_ok(&ip), "IPv4-заголовок невалиден после пересчёта");
-        assert!(l4_ok(&ip), "TCP-сумма невалидна после пересчёта");
-    }
-
-    #[test]
-    fn truncated_lso_packet_left_untouched() {
-        // total_len=64000, но буфер мал → обрезанный LSO, не трогаем.
-        let mut ip = vec![0x45, 0x00, 0xfa, 0x00, 0, 0, 0, 0, 0x40, 0x06, 0, 0];
-        ip.extend_from_slice(&[192, 168, 1, 50, 93, 184, 216, 34]);
-        ip.extend_from_slice(&[0u8; 20]);
-        let before = ip.clone();
-        recalc_checksums(&mut ip);
-        assert_eq!(ip, before, "обрезанный LSO-пакет не должен меняться");
-    }
+    let (verdict, label) = match decide(&req, config, true) {
+        Action::Tunnel => (
+            Verdict::Tunnel(ip.to_vec(), swapped_eth(frame), src_ip),
+            "Tunnel",
+        ),
+        Action::Direct => (Verdict::ToAdapter, "Direct"),
+        Action::Block => (Verdict::Drop, "Drop"),
+    };
+    (
+        verdict,
+        format!("{proto:?} :{local_port}→{dst_ip}:{dst_port} app={name} → {label}"),
+    )
 }
 
 fn passthrough(outgoing: bool) -> Verdict {
@@ -462,31 +432,42 @@ fn swapped_eth(frame: &[u8]) -> [u8; ETH_HDR] {
     e
 }
 
-/// Разбирает IPv4/IPv6 + TCP/UDP: `(proto, is_v6, local_port, dst_ip, dst_port)`.
-/// `local_port` — порт источника (для исходящих = локальный порт приложения).
-fn parse_ip(ip: &[u8]) -> Option<(Proto, bool, u16, IpAddr, u16)> {
+/// Разбирает IPv4/IPv6 + TCP/UDP:
+/// `(proto, is_v6, src_port, dst_ip, dst_port, src_ip)`.
+/// `src_port`/`src_ip` — источник (для исходящих = локальные порт/IP приложения).
+fn parse_ip(ip: &[u8]) -> Option<(Proto, bool, u16, IpAddr, u16, IpAddr)> {
     if ip.is_empty() {
         return None;
     }
-    let (is_v6, proto_num, dst_ip, l4): (bool, u8, IpAddr, &[u8]) = match ip[0] >> 4 {
-        4 => {
-            if ip.len() < 20 {
-                return None;
+    let (is_v6, proto_num, src_ip, dst_ip, l4): (bool, u8, IpAddr, IpAddr, &[u8]) =
+        match ip[0] >> 4 {
+            4 => {
+                if ip.len() < 20 {
+                    return None;
+                }
+                let ihl = ((ip[0] & 0x0F) as usize) * 4;
+                let src = IpAddr::V4(Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]));
+                let dst = IpAddr::V4(Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]));
+                (false, ip[9], src, dst, ip.get(ihl..)?)
             }
-            let ihl = ((ip[0] & 0x0F) as usize) * 4;
-            let dst = IpAddr::V4(Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]));
-            (false, ip[9], dst, ip.get(ihl..)?)
-        }
-        6 => {
-            if ip.len() < 40 {
-                return None;
+            6 => {
+                if ip.len() < 40 {
+                    return None;
+                }
+                let mut s = [0u8; 16];
+                s.copy_from_slice(&ip[8..24]);
+                let mut d = [0u8; 16];
+                d.copy_from_slice(&ip[24..40]);
+                (
+                    true,
+                    ip[6],
+                    IpAddr::V6(Ipv6Addr::from(s)),
+                    IpAddr::V6(Ipv6Addr::from(d)),
+                    ip.get(40..)?,
+                )
             }
-            let mut o = [0u8; 16];
-            o.copy_from_slice(&ip[24..40]);
-            (true, ip[6], IpAddr::V6(Ipv6Addr::from(o)), ip.get(40..)?)
-        }
-        _ => return None,
-    };
+            _ => return None,
+        };
     let proto = match proto_num {
         6 => Proto::Tcp,
         17 => Proto::Udp,
@@ -497,7 +478,7 @@ fn parse_ip(ip: &[u8]) -> Option<(Proto, bool, u16, IpAddr, u16)> {
     }
     let src_port = u16::from_be_bytes([l4[0], l4[1]]);
     let dst_port = u16::from_be_bytes([l4[2], l4[3]]);
-    Some((proto, is_v6, src_port, dst_ip, dst_port))
+    Some((proto, is_v6, src_port, dst_ip, dst_port, src_ip))
 }
 
 /// Сумма 16-битных слов (для контрольной суммы интернета), с начальным `init`.
@@ -597,5 +578,70 @@ fn recalc_checksums(ip: &mut [u8]) {
             set_l4_checksum(next, l4, pseudo);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::{recalc_checksums, sum16};
+
+    /// IPv4-заголовок валиден, если сумма всех 16-битных слов свёрнута в 0xFFFF.
+    fn ipv4_hdr_ok(ip: &[u8]) -> bool {
+        let ihl = ((ip[0] & 0x0F) as usize) * 4;
+        let mut s = sum16(&ip[..ihl], 0);
+        while s >> 16 != 0 {
+            s = (s & 0xFFFF) + (s >> 16);
+        }
+        s as u16 == 0xFFFF
+    }
+
+    /// TCP/UDP валиден, если псевдозаголовок+сегмент свёрнуты в 0xFFFF.
+    fn l4_ok(ip: &[u8]) -> bool {
+        let ihl = ((ip[0] & 0x0F) as usize) * 4;
+        let total = u16::from_be_bytes([ip[2], ip[3]]) as usize;
+        let proto = ip[9];
+        let l4 = &ip[ihl..total];
+        let mut pseudo = 0u32;
+        pseudo = sum16(&ip[12..16], pseudo);
+        pseudo = sum16(&ip[16..20], pseudo);
+        pseudo += proto as u32 + l4.len() as u32;
+        let mut s = sum16(l4, pseudo);
+        while s >> 16 != 0 {
+            s = (s & 0xFFFF) + (s >> 16);
+        }
+        s as u16 == 0xFFFF
+    }
+
+    #[test]
+    fn recalc_makes_ipv4_tcp_valid() {
+        // IPv4 (ihl=5) + TCP (20 байт) + 4 байта payload, суммы обнулены/мусор.
+        let mut ip = vec![
+            0x45, 0x00, 0x00, 0x2c, // ver/ihl, tos, total_len=44
+            0x12, 0x34, 0x40, 0x00, // id, flags/frag
+            0x40, 0x06, 0xff, 0xff, // ttl, proto=6(TCP), checksum=мусор
+            192, 168, 1, 50, // src
+            93, 184, 216, 34, // dst
+            // TCP
+            0xc0, 0x00, 0x01, 0xbb, // sport, dport=443
+            0x00, 0x00, 0x00, 0x01, // seq
+            0x00, 0x00, 0x00, 0x00, // ack
+            0x50, 0x18, 0xff, 0xff, // off/flags, window
+            0xab, 0xcd, 0x00, 0x00, // checksum=мусор, urg
+            0xde, 0xad, 0xbe, 0xef, // payload
+        ];
+        recalc_checksums(&mut ip);
+        assert!(ipv4_hdr_ok(&ip), "IPv4-заголовок невалиден после пересчёта");
+        assert!(l4_ok(&ip), "TCP-сумма невалидна после пересчёта");
+    }
+
+    #[test]
+    fn truncated_lso_packet_left_untouched() {
+        // total_len=64000, но буфер мал → обрезанный LSO, не трогаем.
+        let mut ip = vec![0x45, 0x00, 0xfa, 0x00, 0, 0, 0, 0, 0x40, 0x06, 0, 0];
+        ip.extend_from_slice(&[192, 168, 1, 50, 93, 184, 216, 34]);
+        ip.extend_from_slice(&[0u8; 20]);
+        let before = ip.clone();
+        recalc_checksums(&mut ip);
+        assert_eq!(ip, before, "обрезанный LSO-пакет не должен меняться");
     }
 }
