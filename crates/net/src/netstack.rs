@@ -29,7 +29,11 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 
-/// Размер буфера TCP-сокета.
+/// Размер буфера TCP-сокета = окно TCP. Это потолок скорости одного соединения:
+/// throughput ≈ буфер / RTT. 64 КБ при RTT 50 мс дают всего ~10 Мбит/с, поэтому
+/// берём 512 КБ (со scaling-окном smoltcp) — на порядок выше для загрузок.
+const TCP_BUF: usize = 512 * 1024;
+/// Размер буфера UDP-сокета (датаграммы — большое окно не нужно).
 const SOCKET_BUF: usize = 64 * 1024;
 /// Слоты метаданных UDP-датаграмм.
 const UDP_META: usize = 32;
@@ -292,8 +296,8 @@ fn demux_and_enqueue(shared: &Arc<Shared>, ip_pkt: &[u8]) {
         match f.proto {
             IpProtocol::Tcp if f.syn && !st.tcp_seen.contains(&key) => {
                 let mut sock = tcp::Socket::new(
-                    tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF]),
-                    tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF]),
+                    tcp::SocketBuffer::new(vec![0u8; TCP_BUF]),
+                    tcp::SocketBuffer::new(vec![0u8; TCP_BUF]),
                 );
                 let listen = IpListenEndpoint {
                     addr: Some(f.dst.addr),
