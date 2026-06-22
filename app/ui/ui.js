@@ -600,7 +600,7 @@
     const via = c.via === "direct" ? "direct" : c.via === "block" ? "block" : "proxy";
     const viaLabel = via === "direct" ? "напрямую" : via === "block" ? "заблок." : "прокси";
     return `<div class="conn-row">
-      <span class="conn-proc"><span class="conn-dot ${via}"></span><span>—</span></span>
+      <span class="conn-proc"><span class="conn-dot ${via}"></span><span>${esc(c.process || "—")}</span></span>
       <span class="conn-dest">${esc(c.target)}</span>
       <span class="conn-via">${viaLabel}</span>
       <span class="conn-up">${fmtBytes(c.up)}</span>
@@ -612,7 +612,8 @@
     if (!box) return;
     list.sort((a, b) => {
       if (sortKey === "ip") return b.up - a.up;
-      if (sortKey === "proc" || sortKey === "dest") return String(a.target).localeCompare(String(b.target));
+      if (sortKey === "proc") return String(a.process || "—").localeCompare(String(b.process || "—"));
+      if (sortKey === "dest") return String(a.target).localeCompare(String(b.target));
       return b.down - a.down;
     });
     box.innerHTML = list.length ? list.map(connRow).join("") : '<div class="empty">Нет активных соединений.</div>';

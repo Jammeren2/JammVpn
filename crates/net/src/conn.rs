@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -17,6 +18,8 @@ use tokio::sync::Notify;
 struct Entry {
     target: String,
     via: &'static str,
+    /// Локальный источник (адрес инициатора) — для атрибуции к процессу в UI.
+    src: Option<SocketAddr>,
     up: Arc<AtomicU64>,
     down: Arc<AtomicU64>,
     /// Сигнал принудительного закрытия соединения из UI.
@@ -39,6 +42,8 @@ pub struct ConnInfo {
     pub target: String,
     /// Маршрут: `proxy` | `direct`.
     pub via: &'static str,
+    /// Локальный источник соединения (для атрибуции к процессу на стороне UI).
+    pub src: Option<SocketAddr>,
     /// Передано (байт, egress).
     pub up: u64,
     /// Принято (байт, ingress).
@@ -56,8 +61,9 @@ pub struct ConnGuard {
     kill: Arc<Notify>,
 }
 
-/// Регистрирует соединение; держите guard на время relay.
-pub fn register(target: String, via: &'static str) -> ConnGuard {
+/// Регистрирует соединение; держите guard на время relay. `src` — локальный
+/// адрес инициатора (для атрибуции к процессу в UI), `None` если неизвестен.
+pub fn register(target: String, via: &'static str, src: Option<SocketAddr>) -> ConnGuard {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let up = Arc::new(AtomicU64::new(0));
     let down = Arc::new(AtomicU64::new(0));
@@ -67,6 +73,7 @@ pub fn register(target: String, via: &'static str) -> ConnGuard {
         Entry {
             target,
             via,
+            src,
             up: Arc::clone(&up),
             down: Arc::clone(&down),
             kill: Arc::clone(&kill),
@@ -108,6 +115,7 @@ pub fn snapshot() -> Vec<ConnInfo> {
             id: *id,
             target: e.target.clone(),
             via: e.via,
+            src: e.src,
             up: e.up.load(Ordering::Relaxed),
             down: e.down.load(Ordering::Relaxed),
         })
@@ -186,7 +194,7 @@ mod tests {
     fn register_snapshot_drop() {
         let snap0 = snapshot().len();
         {
-            let g = register("example.com:443".into(), "proxy");
+            let g = register("example.com:443".into(), "proxy", None);
             g.up.fetch_add(100, Ordering::Relaxed);
             g.down.fetch_add(250, Ordering::Relaxed);
             let snap = snapshot();

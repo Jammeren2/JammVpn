@@ -637,8 +637,11 @@ async fn serve_routed(
                         Decision::Connect(ob) => match connect_routed(&routed, ob).await {
                             Some((up, via)) => {
                                 let _ = client.write_all(&reply(0x00)).await;
-                                let g =
-                                    crate::conn::register(target_label(&routed.target), via);
+                                let g = crate::conn::register(
+                                    target_label(&routed.target),
+                                    via,
+                                    client.peer_addr().ok(),
+                                );
                                 let _ = crate::conn::copy_counted(client, up, &g).await;
                             }
                             None => {
@@ -695,7 +698,11 @@ async fn handle_http(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
                     client
                         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                         .await?;
-                    let g = crate::conn::register(target_label(&routed.target), via);
+                    let g = crate::conn::register(
+                        target_label(&routed.target),
+                        via,
+                        client.peer_addr().ok(),
+                    );
                     crate::conn::copy_counted(client, up, &g).await
                 }
                 None => {
@@ -727,7 +734,11 @@ async fn handle_http(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
                     let mut out = format!("{method} {path} HTTP/1.1\r\n").into_bytes();
                     out.extend_from_slice(headers_block);
                     up.write_all(&out).await?;
-                    let g = crate::conn::register(target_label(&routed.target), via);
+                    let g = crate::conn::register(
+                        target_label(&routed.target),
+                        via,
+                        client.peer_addr().ok(),
+                    );
                     crate::conn::copy_counted(client, up, &g).await
                 }
                 None => {
@@ -832,7 +843,11 @@ where
             // относящегося к SOCKS ответа.
             if let Decision::Connect(ob) = routed.decision {
                 if let Ok(upstream) = connect_with_retry(&ob, &routed.target).await {
-                    let g = crate::conn::register(target_label(&routed.target), via_label(&ob));
+                    let g = crate::conn::register(
+                        target_label(&routed.target),
+                        via_label(&ob),
+                        client.peer_addr().ok(),
+                    );
                     let _ = crate::conn::copy_counted(client, upstream, &g).await;
                 }
             }

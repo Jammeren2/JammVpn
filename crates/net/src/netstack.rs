@@ -381,7 +381,7 @@ async fn relay_tcp(
                 } else {
                     "proxy"
                 };
-                let g = crate::conn::register(target_label(&dst), via);
+                let g = crate::conn::register(target_label(&dst), via, Some(key.0));
                 let _ = crate::conn::copy_counted(down, up, &g).await;
             }
         }
@@ -410,20 +410,50 @@ async fn relay_udp(
     let routed = shared.engine.route(&dst).await;
     if let Decision::Connect(ob) = routed.decision {
         if let Ok(sess) = ob.connect_udp(&routed.target).await {
-            loop {
-                tokio::select! {
-                    out = udp_recv(&shared, handle) => match out {
-                        Some(data) => { if sess.send(&data).await.is_err() { break; } }
-                        None => break,
-                    },
-                    inb = sess.recv() => match inb {
-                        Ok(data) => udp_send(&shared, handle, &data, client),
-                        Err(_) => break,
-                    },
-                    _ = tokio::time::sleep(UDP_IDLE) => break,
+            let via = if matches!(ob, crate::outbound::Outbound::Direct) {
+                "direct"
+            } else {
+                "proxy"
+            };
+            // Регистрируем в мониторе соединений (видно в статистике, как у TCP).
+            let g = crate::conn::register(target_label(&dst), via, Some(key.0));
+            let sess = Arc::new(sess);
+            // Направления — НЕЗАВИСИМЫЕ циклы, а НЕ ветки `select!`: select! отменял
+            // бы `sess.recv()` на полпути `read_exact` при каждом исходящем пакете,
+            // ломая length-фрейминг VLESS/Trojan UDP → ответы (download) рвутся
+            // (Discord: «он меня слышит, а я его — нет»). Таймаут на каждой операции
+            // = простой направления; отмена recv по таймауту безопасна (мы выходим).
+            let egress = {
+                let shared = shared.clone();
+                let sess = sess.clone();
+                let up = Arc::clone(&g.up);
+                async move {
+                    while let Ok(Some(data)) =
+                        tokio::time::timeout(UDP_IDLE, udp_recv(&shared, handle)).await
+                    {
+                        up.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                        if sess.send(&data).await.is_err() {
+                            break;
+                        }
+                    }
                 }
-            }
+            };
+            let ingress = {
+                let shared = shared.clone();
+                let sess = sess.clone();
+                let down = Arc::clone(&g.down);
+                async move {
+                    while let Ok(Ok(data)) =
+                        tokio::time::timeout(UDP_IDLE, sess.recv()).await
+                    {
+                        down.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                        udp_send(&shared, handle, &data, client);
+                    }
+                }
+            };
+            tokio::join!(egress, ingress);
             sess.close().await;
+            drop(g);
         }
     }
     {
@@ -548,5 +578,92 @@ impl AsyncWrite for NsTcpStream {
         }
         me.shared.kick();
         Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddrV4;
+    use std::time::Duration;
+
+    /// Контрольная сумма IPv4-заголовка (поле суммы = 0 на входе).
+    fn ipv4_checksum(hdr: &[u8]) -> u16 {
+        let mut sum = 0u32;
+        let mut i = 0;
+        while i + 1 < hdr.len() {
+            sum += u16::from_be_bytes([hdr[i], hdr[i + 1]]) as u32;
+            i += 2;
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
+    /// Собирает IPv4+UDP пакет (UDP-сумма = 0, допустимо для IPv4).
+    fn udp_packet(src: SocketAddrV4, dst: SocketAddrV4, payload: &[u8]) -> Vec<u8> {
+        let total = 20 + 8 + payload.len();
+        let mut p = vec![0u8; total];
+        p[0] = 0x45;
+        p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        p[8] = 64; // ttl
+        p[9] = 17; // udp
+        p[12..16].copy_from_slice(&src.ip().octets());
+        p[16..20].copy_from_slice(&dst.ip().octets());
+        let cks = ipv4_checksum(&p[..20]);
+        p[10..12].copy_from_slice(&cks.to_be_bytes());
+        p[20..22].copy_from_slice(&src.port().to_be_bytes());
+        p[22..24].copy_from_slice(&dst.port().to_be_bytes());
+        p[24..26].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        p[28..].copy_from_slice(payload);
+        p
+    }
+
+    /// Сквозной UDP через Direct: ответ должен прийти ОТ цели (а не от iface),
+    /// и соединение должно попасть в монитор со счётчиком байт (фикс статистики).
+    #[tokio::test]
+    async fn udp_relay_direct_echo_src_and_stats() {
+        let echo = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = match echo.local_addr().unwrap() {
+            SocketAddr::V4(a) => a,
+            _ => unreachable!(),
+        };
+        tokio::spawn(async move {
+            let mut b = vec![0u8; 2048];
+            while let Ok((n, peer)) = echo.recv_from(&mut b).await {
+                let _ = echo.send_to(&b[..n], peer).await;
+            }
+        });
+
+        let engine = Arc::new(crate::engine::Engine::new(
+            HashMap::new(),
+            None,
+            vec![],
+            jammvpn_core::RouteAction::Direct,
+        ));
+        let (ns, mut out) = Netstack::new(engine, Ipv4Addr::new(10, 9, 0, 1), 24);
+        let app = SocketAddrV4::new(Ipv4Addr::new(10, 9, 0, 5), 40000);
+
+        ns.inject(&udp_packet(app, echo_addr, b"voice-ping"));
+
+        let resp = tokio::time::timeout(Duration::from_secs(5), out.recv())
+            .await
+            .expect("нет ответного пакета (download UDP сломан)")
+            .expect("стек остановлен");
+        let flow = parse_flow(&resp).expect("ответ — не UDP/IP");
+        assert_eq!(flow.proto, IpProtocol::Udp);
+        // КЛЮЧЕВОЕ: src ответа = цель (echo), а не iface 10.9.0.1.
+        assert_eq!(ep_to_sockaddr(flow.src), SocketAddr::V4(echo_addr));
+        assert_eq!(ep_to_sockaddr(flow.dst), SocketAddr::V4(app));
+        assert_eq!(&resp[28..], b"voice-ping");
+
+        let snap = crate::conn::snapshot();
+        assert!(
+            snap.iter()
+                .any(|c| c.via == "direct" && c.target == echo_addr.to_string() && c.up >= 10),
+            "UDP-соединение должно быть в мониторе со счётчиком байт"
+        );
+        drop(ns);
     }
 }

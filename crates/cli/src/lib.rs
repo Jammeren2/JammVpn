@@ -283,8 +283,32 @@ pub struct ConnectionInfo {
     pub id: u64,
     pub target: String,
     pub via: String,
+    /// Имя процесса-инициатора (`Discord.exe`), если удалось определить.
+    pub process: Option<String>,
     pub up: u64,
     pub down: u64,
+}
+
+/// Атрибуция соединения к процессу по локальному адресу источника (через таблицы
+/// TCP ОС, как у split). `None` вне Windows или если порт ещё не в таблице.
+#[cfg(windows)]
+fn resolve_process(src: Option<std::net::SocketAddr>) -> Option<String> {
+    use jammvpn_platform_windows::winpkfilter::attribution::{Proto, ProcessResolver};
+    use std::sync::{Mutex, OnceLock};
+    // Один резолвер на процесс: кэширует таблицу порт→PID (обновляется ~раз в с).
+    static RESOLVER: OnceLock<Mutex<ProcessResolver>> = OnceLock::new();
+    let src = src?;
+    let mut r = RESOLVER
+        .get_or_init(|| Mutex::new(ProcessResolver::new()))
+        .lock()
+        .ok()?;
+    let app = r.resolve(Proto::Tcp, src.is_ipv6(), src.port())?;
+    app.process_name.or(app.exe_path)
+}
+
+#[cfg(not(windows))]
+fn resolve_process(_src: Option<std::net::SocketAddr>) -> Option<String> {
+    None
 }
 
 /// Список активных проксируемых соединений (живой срез).
@@ -295,6 +319,7 @@ pub fn list_connections() -> Vec<ConnectionInfo> {
             id: c.id,
             target: c.target,
             via: c.via.to_string(),
+            process: resolve_process(c.src),
             up: c.up,
             down: c.down,
         })
