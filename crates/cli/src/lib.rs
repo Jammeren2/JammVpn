@@ -181,6 +181,32 @@ fn sanitize_config(cfg: &mut AppConfig) {
     if !valid_cidr(&cfg.dns.fakeip.range) {
         cfg.dns.fakeip.range = "198.18.0.0/15".to_string();
     }
+    ensure_distinct_node_names(cfg);
+}
+
+/// Гарантирует УНИКАЛЬНОЕ имя у каждого узла (`cfg.servers`). Имя узла — это
+/// идентификатор и в UI (выбор узла), и в карте outbounds движка (`HashMap` по
+/// имени). Два узла с одинаковым именем ломали обе стороны: в UI оба
+/// показывались «выбранными», а в движке один молча затирал другой. Первый узел
+/// с данным именем остаётся как есть (стабильность выбранного узла), последующие
+/// дубли получают суффикс « · адрес:порт» (при полном совпадении — « (n)»).
+/// Детерминированно: один и тот же конфиг → одни и те же имена при каждой загрузке.
+fn ensure_distinct_node_names(cfg: &mut AppConfig) {
+    use std::collections::HashSet;
+    let mut used: HashSet<String> = HashSet::new();
+    for s in &mut cfg.servers {
+        if used.insert(s.name.clone()) {
+            continue; // имя ещё не встречалось — оставляем
+        }
+        let base = s.name.clone();
+        let mut cand = format!("{base} · {}:{}", s.address, s.port);
+        let mut n = 2;
+        while !used.insert(cand.clone()) {
+            cand = format!("{base} · {}:{} ({n})", s.address, s.port);
+            n += 1;
+        }
+        s.name = cand;
+    }
 }
 
 /// Сохраняет конфиг в SQLite (шифруя секреты), создавая каталог при необходимости.
@@ -2613,6 +2639,26 @@ mod tests {
         assert_ne!(t0, t1, "подписки с одного хоста должны разделяться");
         assert_eq!(t0, "1.2.3.4:8443");
         assert_eq!(t1, "1.2.3.4:8443 (2)");
+    }
+
+    #[test]
+    fn distinct_node_names_dedup() {
+        use jammvpn_core::parse_link;
+        let mut cfg = AppConfig {
+            servers: vec![
+                parse_link("trojan://p@166.88.197.17:443?sni=a#USA").unwrap(),
+                parse_link("trojan://p@166.88.197.17:530?sni=a#USA").unwrap(),
+                parse_link("trojan://p@1.1.1.1:443?sni=a#OTHER").unwrap(),
+            ],
+            ..Default::default()
+        };
+        ensure_distinct_node_names(&mut cfg);
+        // Первый «USA» остаётся (стабильность выбора), дубль — с суффиксом.
+        assert_eq!(cfg.servers[0].name, "USA");
+        assert_eq!(cfg.servers[1].name, "USA · 166.88.197.17:530");
+        assert_eq!(cfg.servers[2].name, "OTHER");
+        let names: std::collections::HashSet<_> = cfg.servers.iter().map(|s| &s.name).collect();
+        assert_eq!(names.len(), 3, "все имена должны быть уникальны");
     }
 
     #[test]
