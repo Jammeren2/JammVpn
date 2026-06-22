@@ -1325,13 +1325,29 @@ pub async fn download_geo() -> Result<String, String> {
         .await
         .map_err(|e| format!("{name}: {e}"))?;
         if bytes.len() < 1024 {
-            return Err(format!("{name}: подозрительно мал ({} Б)", bytes.len()));
+            return Err(format!(
+                "{name}: подозрительно мал ({} Б) — вероятно, ошибка загрузки",
+                bytes.len()
+            ));
         }
+        // Проверяем, что это валидный .dat (а не HTML-страница ошибки и т.п.),
+        // прежде чем записывать поверх возможно рабочей базы.
+        let count = match name {
+            "geosite.dat" => jammvpn_core::geo::GeoSiteDb::parse(&bytes)
+                .map(|d| format!("{} категорий", d.len()))
+                .map_err(|e| format!("{name}: не похоже на geosite.dat ({e})"))?,
+            _ => jammvpn_core::geo::GeoIpDb::parse(&bytes)
+                .map(|d| format!("{} стран", d.len()))
+                .map_err(|e| format!("{name}: не похоже на geoip.dat ({e})"))?,
+        };
         let file = dir.join(name);
         std::fs::write(&file, &bytes).map_err(|e| e.to_string())?;
-        sizes.push(format!("{name} {} КБ", bytes.len() / 1024));
+        sizes.push(format!("{name} {} КБ ({count})", bytes.len() / 1024));
         paths.push((name.to_string(), file.to_string_lossy().to_string()));
-        log_line(&format!("geo: {name} сохранён ({} КБ)", bytes.len() / 1024));
+        log_line(&format!(
+            "geo: {name} сохранён ({} КБ, {count})",
+            bytes.len() / 1024
+        ));
     }
     let geosite = paths.iter().find(|(n, _)| n == "geosite.dat").map(|(_, p)| p.clone());
     let geoip = paths.iter().find(|(n, _)| n == "geoip.dat").map(|(_, p)| p.clone());
