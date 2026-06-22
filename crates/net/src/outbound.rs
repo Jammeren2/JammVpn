@@ -155,8 +155,8 @@ impl Outbound {
     /// - `Tuic`: поток поверх общего QUIC-соединения (мультиплекс по assoc_id,
     ///   QUIC-датаграммы; домен резолвит сервер).
     /// - `Wireguard`/AmneziaWG: датаграммы поверх smoltcp udp-сокета в туннеле.
-    ///
-    /// Прочие исходящие (VLESS/…) UDP пока не поддерживают.
+    /// - `Vless`: length-framed датаграммы поверх потока (REALITY/Encryption).
+    /// - `Trojan`: length-framed UDP поверх потока (CMD=0x03).
     pub async fn connect_udp(&self, target: &Target) -> io::Result<UdpSession> {
         match self {
             Outbound::Direct => {
@@ -240,6 +240,17 @@ impl Outbound {
                     target: target.clone(),
                 })
             }
+            Outbound::Vless(cfg) => {
+                // VLESS UDP: команда 0x02 + пустой flow поверх транспорта
+                // (REALITY/Encryption, БЕЗ Vision — он UDP не поддерживает).
+                // Данные — length-framed датаграммы к одной цели из заголовка.
+                let stream = vless_connect_udp(cfg, target).await?;
+                let (read, write) = tokio::io::split(stream);
+                Ok(UdpSession::Vless {
+                    read: tokio::sync::Mutex::new(read),
+                    write: tokio::sync::Mutex::new(write),
+                })
+            }
             _ => Err(proto_err("udp: данный исходящий пока не поддерживает UDP")),
         }
     }
@@ -283,6 +294,12 @@ pub enum UdpSession {
         write: tokio::sync::Mutex<tokio::io::WriteHalf<BoxedStream>>,
         target: Target,
     },
+    /// Через VLESS: датаграммы `[len(2 BE)][payload]` к одной цели (адрес — в
+    /// заголовке запроса) поверх потока (REALITY/Encryption, без Vision).
+    Vless {
+        read: tokio::sync::Mutex<tokio::io::ReadHalf<BoxedStream>>,
+        write: tokio::sync::Mutex<tokio::io::WriteHalf<BoxedStream>>,
+    },
     /// Через WireGuard/AmneziaWG: датаграммы поверх smoltcp udp-сокета в туннеле.
     Wireguard(crate::wireguard::WgUdpSocket),
 }
@@ -323,6 +340,17 @@ impl UdpSession {
                 let pkt = crate::trojan::encode_udp_packet(target, payload);
                 let mut w = write.lock().await;
                 w.write_all(&pkt).await?;
+                w.flush().await?;
+            }
+            UdpSession::Vless { write, .. } => {
+                if payload.len() > u16::MAX as usize {
+                    return Err(proto_err("vless udp: датаграмма > 65535 байт"));
+                }
+                let mut buf = Vec::with_capacity(2 + payload.len());
+                buf.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+                buf.extend_from_slice(payload);
+                let mut w = write.lock().await;
+                w.write_all(&buf).await?;
                 w.flush().await?;
             }
             UdpSession::Ss2022 {
@@ -379,6 +407,15 @@ impl UdpSession {
             UdpSession::Trojan { read, .. } => {
                 let mut r = read.lock().await;
                 let (_addr, payload) = crate::trojan::read_udp_packet(&mut *r).await?;
+                Ok(payload)
+            }
+            UdpSession::Vless { read, .. } => {
+                let mut r = read.lock().await;
+                let mut len = [0u8; 2];
+                r.read_exact(&mut len).await?;
+                let n = u16::from_be_bytes(len) as usize;
+                let mut payload = vec![0u8; n];
+                r.read_exact(&mut payload).await?;
                 Ok(payload)
             }
             UdpSession::Ss2022 { sock, session, .. } => {
@@ -632,6 +669,32 @@ async fn vless_connect(cfg: &VlessConfig, target: &Target) -> io::Result<BoxedSt
 
     // VLESS-ответный заголовок отбрасывается ЛЕНИВО при первом чтении: упреждающий
     // read между записью заголовка и payload ломает порядок поверх REALITY.
+    Ok(Box::new(VlessRespStrip::new(stream)))
+}
+
+/// Устанавливает VLESS UDP-сессию к `target`: транспорт → [REALITY] →
+/// [Encryption] → VLESS-заголовок (CMD=UDP, flow пуст) → поток для length-framed
+/// датаграмм. Vision НЕ применяется (сервер отвергает UDP с flow=vision; UDP с
+/// пустым flow принимается даже vision-аккаунтом).
+async fn vless_connect_udp(cfg: &VlessConfig, target: &Target) -> io::Result<BoxedStream> {
+    let enc = match &cfg.encryption {
+        Some(desc) => vless_encryption::parse_encryption(desc)
+            .map_err(|msg| io::Error::other(format!("VLESS Encryption: {msg}")))?,
+        None => None,
+    };
+    let mut stream: BoxedStream = match &cfg.transport {
+        Transport::Tcp => Box::new(TcpStream::connect(&cfg.server).await?),
+        Transport::Reality(rt) => {
+            let tcp = TcpStream::connect(&cfg.server).await?;
+            Box::new(reality_connect(tcp, rt).await?)
+        }
+    };
+    if let Some(enc) = &enc {
+        stream = Box::new(vless_encryption::wrap_client(stream, enc).await?);
+    }
+    let header = vless::encode_request_udp(&cfg.uuid, target);
+    stream.write_all(&header).await?;
+    stream.flush().await?;
     Ok(Box::new(VlessRespStrip::new(stream)))
 }
 

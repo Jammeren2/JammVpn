@@ -21,8 +21,29 @@ use std::net::SocketAddr;
 pub const VERSION: u8 = 0x00;
 /// Команда «TCP».
 pub const CMD_TCP: u8 = 0x01;
+/// Команда «UDP».
+pub const CMD_UDP: u8 = 0x02;
 /// Значение flow для XTLS-Vision.
 pub const FLOW_VISION: &str = "xtls-rprx-vision";
+
+/// Дописывает тип адреса + адрес: `1`=IPv4, `2`=домен, `3`=IPv6.
+fn push_address(b: &mut Vec<u8>, target: &Target) {
+    match target {
+        Target::Domain(host, _) => {
+            b.push(0x02);
+            b.push(host.len() as u8);
+            b.extend_from_slice(host.as_bytes());
+        }
+        Target::Socket(SocketAddr::V4(a)) => {
+            b.push(0x01);
+            b.extend_from_slice(&a.ip().octets());
+        }
+        Target::Socket(SocketAddr::V6(a)) => {
+            b.push(0x03);
+            b.extend_from_slice(&a.ip().octets());
+        }
+    }
+}
 
 /// Кодирует заголовок запроса VLESS.
 ///
@@ -60,21 +81,21 @@ pub fn encode_request(uuid: &[u8; 16], flow: Option<&str>, target: &Target) -> V
     }
     b.push(CMD_TCP);
     b.extend_from_slice(&target.port().to_be_bytes());
-    match target {
-        Target::Domain(host, _) => {
-            b.push(0x02);
-            b.push(host.len() as u8);
-            b.extend_from_slice(host.as_bytes());
-        }
-        Target::Socket(SocketAddr::V4(a)) => {
-            b.push(0x01);
-            b.extend_from_slice(&a.ip().octets());
-        }
-        Target::Socket(SocketAddr::V6(a)) => {
-            b.push(0x03);
-            b.extend_from_slice(&a.ip().octets());
-        }
-    }
+    push_address(&mut b, target);
+    b
+}
+
+/// Кодирует заголовок UDP-запроса VLESS. Flow ВСЕГДА пустой: XTLS-Vision не
+/// поддерживает UDP, и сервер принимает UDP-команду только с пустым flow (даже у
+/// vision-аккаунта). Данные после заголовка — датаграммы `[len(2 BE)][payload]`.
+pub fn encode_request_udp(uuid: &[u8; 16], target: &Target) -> Vec<u8> {
+    let mut b = Vec::with_capacity(24);
+    b.push(VERSION);
+    b.extend_from_slice(uuid);
+    b.push(0x00); // addon len = 0 (без flow)
+    b.push(CMD_UDP);
+    b.extend_from_slice(&target.port().to_be_bytes());
+    push_address(&mut b, target);
     b
 }
 
@@ -130,6 +151,20 @@ mod tests {
         assert_eq!(b[cmd_off], CMD_TCP);
         assert_eq!(&b[cmd_off + 1..cmd_off + 3], &443u16.to_be_bytes());
         assert_eq!(b[cmd_off + 3], 0x02); // domain
+    }
+
+    #[test]
+    fn encode_request_udp_ipv4() {
+        let uuid = [2u8; 16];
+        let target = Target::Socket("8.8.8.8:53".parse().unwrap());
+        let b = encode_request_udp(&uuid, &target);
+        assert_eq!(b[0], VERSION);
+        assert_eq!(&b[1..17], &uuid);
+        assert_eq!(b[17], 0); // addon len = 0 (без flow)
+        assert_eq!(b[18], CMD_UDP);
+        assert_eq!(&b[19..21], &53u16.to_be_bytes());
+        assert_eq!(b[21], 0x01); // ipv4
+        assert_eq!(&b[22..26], &[8, 8, 8, 8]);
     }
 
     #[test]
