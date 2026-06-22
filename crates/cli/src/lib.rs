@@ -519,9 +519,22 @@ pub struct DiagStep {
 /// (подключение к узлу → TLS через туннель → HTTP-ответ).
 pub async fn diagnose_node(name: &str) -> Vec<DiagStep> {
     let cfg = load();
-    let engine = Engine::from_config(&cfg);
-    let ob = match engine.outbounds().get(name) {
-        Some(o) => o.clone(),
+    // Имена узлов нормализованы в load_config (уникальны) → ищем профиль по имени
+    // и собираем его исходящий НАПРЯМУЮ. Раньше брали из карты движка, куда
+    // не-собравшиеся узлы не попадают, и выдавали ложное «не найден в конфигурации»
+    // вместо реальной причины сбоя сборки.
+    let ob = match cfg.servers.iter().find(|s| s.name == name) {
+        Some(p) => match jammvpn_net::outbound_from_profile(p) {
+            Ok(o) => o,
+            Err(e) => {
+                return vec![DiagStep {
+                    name: "Узел".into(),
+                    ok: false,
+                    detail: format!("узел «{name}»: не удалось собрать исходящий — {e}"),
+                    ms: 0,
+                }]
+            }
+        },
         None => {
             return vec![DiagStep {
                 name: "Узел".into(),
