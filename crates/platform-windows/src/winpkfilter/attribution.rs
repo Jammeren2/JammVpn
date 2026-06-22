@@ -6,7 +6,7 @@
 //! таблицы — относительно дорогой системный вызов, а захват идёт на каждый пакет.
 
 use jammvpn_core::split::ConnApp;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE};
 use windows::Win32::NetworkManagement::IpHelper::{
@@ -36,6 +36,9 @@ pub struct ProcessResolver {
     ports: HashMap<(bool, bool, u16), u32>,
     /// PID → путь к exe (кэш, чтобы не открывать процесс на каждый пакет).
     pid_exe: HashMap<u32, Option<String>>,
+    /// Ключи, уже пробованные форс-обновлением против ТЕКУЩЕЙ таблицы (сброс при
+    /// пересборке) — чтобы новый ключ всегда форсил пересборку в обход кулдауна.
+    forced_keys: HashSet<(bool, bool, u16)>,
     last: Option<Instant>,
     last_forced: Option<Instant>,
 }
@@ -51,6 +54,7 @@ impl ProcessResolver {
         Self {
             ports: HashMap::new(),
             pid_exe: HashMap::new(),
+            forced_keys: HashSet::new(),
             last: None,
             last_forced: None,
         }
@@ -63,7 +67,7 @@ impl ProcessResolver {
         self.maybe_refresh();
         let key = (proto == Proto::Tcp, is_v6, local_port);
         let mut pid = self.ports.get(&key).copied();
-        if pid.is_none() && self.force_refresh() {
+        if pid.is_none() && self.force_refresh_for(key) {
             pid = self.ports.get(&key).copied();
         }
         let pid = pid?;
@@ -82,6 +86,7 @@ impl ProcessResolver {
     /// Перестраивает таблицы порт→PID.
     fn load_tables(&mut self) {
         self.ports.clear();
+        self.forced_keys.clear(); // новая таблица → все ключи снова «не пробованы»
         unsafe {
             self.load_tcp(false);
             self.load_tcp(true);
@@ -102,18 +107,23 @@ impl ProcessResolver {
         }
     }
 
-    /// Принудительное обновление таблиц при промахе (с кулдауном, чтобы не
-    /// молотить системные таблицы на каждом неопознанном пакете).
-    fn force_refresh(&mut self) -> bool {
+    /// Принудительная пересборка таблиц при промахе. НОВЫЙ ключ (ещё не пробованный
+    /// против текущей таблицы) форсит пересборку в обход кулдауна — иначе пачка
+    /// новых сокетов (VRChat и т.п.) утекала бы «прямо». Повторный промах того же
+    /// ключа (его просто нет в таблице) подавляется кулдауном, чтобы не молотить
+    /// системные таблицы.
+    fn force_refresh_for(&mut self, key: (bool, bool, u16)) -> bool {
+        let already = self.forced_keys.contains(&key);
         let recent = self
             .last_forced
             .map(|t| t.elapsed() < FORCE_COOLDOWN)
             .unwrap_or(false);
-        if recent {
+        if already && recent {
             return false;
         }
         self.last_forced = Some(Instant::now());
-        self.load_tables();
+        self.load_tables(); // очищает forced_keys
+        self.forced_keys.insert(key);
         true
     }
 
@@ -135,16 +145,28 @@ impl ProcessResolver {
         if size == 0 {
             return;
         }
+        // Таблица могла вырасти между size-probe и fill → ERROR_INSUFFICIENT_BUFFER
+        // (fill НЕ заполняет буфер). Повторяем с увеличенным размером; парсим только
+        // при NO_ERROR, иначе читали бы нулевой буфер (0 строк → пропадают все порты).
         let mut buf = vec![0u8; size as usize];
-        let rc = GetExtendedTcpTable(
-            Some(buf.as_mut_ptr() as *mut _),
-            &mut size,
-            false,
-            af,
-            TCP_TABLE_OWNER_PID_ALL,
-            0,
-        );
-        if rc != 0 && rc != ERROR_INSUFFICIENT_BUFFER.0 {
+        let mut rc;
+        let mut tries = 0;
+        loop {
+            rc = GetExtendedTcpTable(
+                Some(buf.as_mut_ptr() as *mut _),
+                &mut size,
+                false,
+                af,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            );
+            if rc != ERROR_INSUFFICIENT_BUFFER.0 || tries >= 3 {
+                break;
+            }
+            tries += 1;
+            buf = vec![0u8; size as usize];
+        }
+        if rc != 0 {
             return;
         }
         if is_v6 {
@@ -154,10 +176,13 @@ impl ProcessResolver {
                 table.dwNumEntries as usize,
             );
             for r in rows {
-                self.ports.insert(
-                    (true, true, swap_port(r.dwLocalPort)),
-                    r.dwOwningPid,
-                );
+                let port = swap_port(r.dwLocalPort);
+                self.ports.insert((true, true, port), r.dwOwningPid);
+                // Dual-stack сокет на `::` (IPV6_V6ONLY=false) шлёт и IPv4 — в v4-
+                // таблице его нет, добавляем v4-алиас (не затирая реальный v4-ряд).
+                if r.ucLocalAddr == [0u8; 16] {
+                    self.ports.entry((true, false, port)).or_insert(r.dwOwningPid);
+                }
             }
         } else {
             let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
@@ -182,15 +207,24 @@ impl ProcessResolver {
             return;
         }
         let mut buf = vec![0u8; size as usize];
-        let rc = GetExtendedUdpTable(
-            Some(buf.as_mut_ptr() as *mut _),
-            &mut size,
-            false,
-            af,
-            UDP_TABLE_OWNER_PID,
-            0,
-        );
-        if rc != 0 && rc != ERROR_INSUFFICIENT_BUFFER.0 {
+        let mut rc;
+        let mut tries = 0;
+        loop {
+            rc = GetExtendedUdpTable(
+                Some(buf.as_mut_ptr() as *mut _),
+                &mut size,
+                false,
+                af,
+                UDP_TABLE_OWNER_PID,
+                0,
+            );
+            if rc != ERROR_INSUFFICIENT_BUFFER.0 || tries >= 3 {
+                break;
+            }
+            tries += 1;
+            buf = vec![0u8; size as usize];
+        }
+        if rc != 0 {
             return;
         }
         if is_v6 {
@@ -200,10 +234,12 @@ impl ProcessResolver {
                 table.dwNumEntries as usize,
             );
             for r in rows {
-                self.ports.insert(
-                    (false, true, swap_port(r.dwLocalPort)),
-                    r.dwOwningPid,
-                );
+                let port = swap_port(r.dwLocalPort);
+                self.ports.insert((false, true, port), r.dwOwningPid);
+                // Dual-stack UDP-сокет на `::` шлёт и IPv4 — добавляем v4-алиас.
+                if r.ucLocalAddr == [0u8; 16] {
+                    self.ports.entry((false, false, port)).or_insert(r.dwOwningPid);
+                }
             }
         } else {
             let table = &*(buf.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);

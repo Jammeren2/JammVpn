@@ -351,7 +351,14 @@ fn capture_loop(
                         // (checksum offload) — netstack/smoltcp валидирует rx и
                         // иначе отбросил бы пакет. WinDivert (L3) делает то же.
                         recalc_checksums(&mut ip);
-                        on_capture(&ip);
+                        // catch_unwind: паника в netstack-инъекции не должна
+                        // ронять поток захвата (иначе встанет весь split).
+                        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            || on_capture(&ip),
+                        ));
+                        if r.is_err() {
+                            log("split: инъекция в netstack паникнула — пакет пропущен".into());
+                        }
                         // оригинал не реинъектим (дропнут tunnel-режимом).
                     }
                     Verdict::ToAdapter => {
@@ -409,6 +416,9 @@ fn classify(
         dst_port,
     };
     let (verdict, label) = match decide(&req, config, true) {
+        // netstack — IPv4-only: IPv6 нельзя туннелировать (ушёл бы в никуда), но
+        // и дропать нельзя — пропускаем напрямую на адаптер.
+        Action::Tunnel if is_v6 => (Verdict::ToAdapter, "Direct(v6)"),
         Action::Tunnel => (
             Verdict::Tunnel(ip.to_vec(), swapped_eth(frame), src_ip),
             "Tunnel",
