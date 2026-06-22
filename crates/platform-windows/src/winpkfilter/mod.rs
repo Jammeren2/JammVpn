@@ -182,8 +182,16 @@ impl SplitTunnel {
         }
     }
 
-    /// Останавливает перехват (снимает tunnel-режим, ждёт поток).
-    pub fn stop(mut self) {
+    /// Останавливает перехват. Реальная остановка — в `Drop` (вызывается и при
+    /// явном stop, и при любом уничтожении контроллера), чтобы поток захвата НЕ
+    /// мог утечь зомби-инстансом при смене драйвера/перезапуске.
+    pub fn stop(self) {
+        // drop(self) → Drop снимет tunnel-режим, дождётся поток, закроет события.
+    }
+}
+
+impl Drop for SplitTunnel {
+    fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         unsafe {
             let _ = SetEvent(self.packet_event.0);

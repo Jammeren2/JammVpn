@@ -219,12 +219,19 @@ impl SplitTunnel {
         }
     }
 
-    /// Останавливает перехват. Поток выходит сам в течение ~200 мс (таймаут recv);
-    /// хендл закрывается, когда снимутся все ссылки (после join + drop инжектора).
-    pub fn stop(mut self) {
+    /// Останавливает перехват. Реальная остановка — в `Drop` (вызывается и при
+    /// явном stop, и при любом уничтожении контроллера), чтобы поток захвата НЕ
+    /// мог утечь зомби-инстансом при смене драйвера/перезапуске.
+    pub fn stop(self) {
+        // drop(self) → Drop завершит поток.
+    }
+}
+
+impl Drop for SplitTunnel {
+    fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            let _ = t.join(); // поток выходит за ~200 мс (таймаут recv_wait)
         }
     }
 }
