@@ -135,6 +135,7 @@ async function refreshNodes() {
         : "";
       const tr = document.createElement("tr");
       tr.dataset.group = n.group || "";
+      tr.dataset.balancer = n.balancer || "";
       tr.innerHTML = `<td>${idx}</td><td>${esc(n.name)}</td><td>${esc(
         n.protocol
       )}</td><td>${esc(n.address)}:${n.port}</td><td class="lat" data-name="${esc(

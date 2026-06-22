@@ -158,6 +158,7 @@
             ? lat.classList.contains("ok") ? "ok" : lat.classList.contains("err") ? "err" : ""
             : "",
           group: tr.dataset.group || "",
+          balancer: tr.dataset.balancer || "",
         };
       });
     }
@@ -166,7 +167,7 @@
     return sel
       ? [...sel.options]
           .filter((o) => o.value !== "")
-          .map((o) => ({ value: o.value, name: o.textContent, proto: "", addr: "", lat: "", latClass: "", group: "" }))
+          .map((o) => ({ value: o.value, name: o.textContent, proto: "", addr: "", lat: "", latClass: "", group: "", balancer: "" }))
       : [];
   }
   function curRow() {
@@ -347,7 +348,24 @@
         <span class="sub-icon" data-delsub="${esc(g)}" title="Удалить подписку">✕</span></div>`;
       if (open) {
         html += `<div class="sub-kids">`;
-        for (const r of gl) html += nodeRowHtml(r, val === r.value);
+        // Объединяем ноды по балансировщику подписки; остальные — плоско.
+        const bals = new Map();
+        const loose = [];
+        for (const r of gl) {
+          if (r.balancer) {
+            if (!bals.has(r.balancer)) bals.set(r.balancer, []);
+            bals.get(r.balancer).push(r);
+          } else loose.push(r);
+        }
+        for (const [bname, bl] of bals) {
+          const bsel = bl.some((r) => r.value === val);
+          html += `<div class="bal-head${bsel ? " has-sel" : ""}">
+            <span class="bal-name">⚖ ${esc(bname)}</span>
+            <span class="bal-count">${bl.length}</span>
+            <span class="bal-best" data-best-group="${esc(g)}" data-best-bal="${esc(bname)}" title="Проверить все и выбрать самый быстрый">★ лучший</span></div>`;
+          for (const r of bl) html += nodeRowHtml(r, val === r.value);
+        }
+        for (const r of loose) html += nodeRowHtml(r, val === r.value);
         html += `</div>`;
       }
     }
@@ -371,6 +389,25 @@
     list.addEventListener("click", async (e) => {
       const t = e.target;
       let a;
+      if ((a = t.closest(".bal-best"))) {
+        // «Найти лучший»: пингуем все ноды балансировщика и выбираем быстрейшую.
+        e.stopPropagation();
+        if (!invoke) return;
+        const grp = a.dataset.bestGroup, bname = a.dataset.bestBal;
+        const members = rows().filter((r) => r.group === grp && r.balancer === bname);
+        const old = a.textContent;
+        a.textContent = "проверяю…";
+        let best = null, bestMs = Infinity;
+        for (const m of members) {
+          try {
+            const r = await invoke("test_node_latency", { name: m.name });
+            if (r && r.latency_ms != null && r.latency_ms < bestMs) { bestMs = r.latency_ms; best = m; }
+          } catch (_) {}
+        }
+        if (best) { selectByValue(best.value); }
+        else { a.textContent = "нет ответа"; setTimeout(() => { a.textContent = old; }, 1500); }
+        return;
+      }
       if ((a = t.closest(".node-act[data-ping]"))) {
         e.stopPropagation();
         if (!invoke) return;

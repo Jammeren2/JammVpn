@@ -366,6 +366,12 @@ html, body {
 .sub-icon { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; color: #8a93a8; font-size: 13px; }
 .sub-icon:hover { background: rgba(255, 255, 255, 0.08); color: #e9edf6; }
 .sub-kids { display: flex; flex-direction: column; gap: 8px; padding-left: 14px; margin-top: 8px; }
+.bal-head { display: flex; align-items: center; gap: 9px; padding: 5px 6px 5px 4px; color: #8a93a8; font: 600 12px "Space Grotesk"; }
+.bal-name { letter-spacing: 0.2px; }
+.bal-head.has-sel .bal-name { color: #c7f5fe; }
+.bal-count { padding: 1px 7px; border-radius: 8px; background: rgba(255, 255, 255, 0.08); font: 600 10.5px "JetBrains Mono"; }
+.bal-best { margin-left: auto; cursor: pointer; padding: 2px 9px; border-radius: 8px; border: 1px solid rgba(95, 208, 255, 0.3); color: #5fd0ff; font-size: 11px; white-space: nowrap; }
+.bal-best:hover { background: rgba(95, 208, 255, 0.12); }
 .sp-hint { font-size: 11px; color: #5b6479; line-height: 1.5; margin-top: 12px; }
 
 /* заголовки страниц */

@@ -56,25 +56,60 @@ fn parse_config_entry(config: &JsonValue) -> Vec<Result<ServerProfile, ParseErro
         .and_then(JsonValue::as_str)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    // Балансировщики Xray: каждый группирует outbound'ы, чьи теги начинаются с
+    // одного из префиксов `selector`. Запоминаем (тег → префиксы), чтобы пометить
+    // узлы балансировщиком (для «объединения» нод по группам в UI).
+    let balancers: Vec<(String, Vec<String>)> = config
+        .get("routing")
+        .and_then(|r| r.get("balancers"))
+        .and_then(JsonValue::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|b| {
+                    let tag = b.get("tag").and_then(JsonValue::as_str)?.to_string();
+                    let sel = b
+                        .get("selector")
+                        .and_then(JsonValue::as_array)
+                        .map(|s| {
+                            s.iter()
+                                .filter_map(|x| x.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some((tag, sel))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let balancer_of = |ob_tag: &str| -> Option<String> {
+        balancers
+            .iter()
+            .find(|(_, sel)| sel.iter().any(|p| ob_tag.starts_with(p.as_str())))
+            .map(|(tag, _)| tag.clone())
+    };
     let Some(obs) = config.get("outbounds").and_then(JsonValue::as_array) else {
         return Vec::new();
     };
     obs.iter()
-        .map(parse_outbound)
+        .map(|ob| {
+            let ob_tag = ob.get("tag").and_then(JsonValue::as_str).unwrap_or("");
+            let bal = balancer_of(ob_tag);
+            parse_outbound(ob).map(|mut p| {
+                if let Some(rem) = &remarks {
+                    p.name = format!("{rem} · {}", p.name);
+                }
+                if let Some(b) = bal {
+                    p.params.insert("balancer".into(), b);
+                }
+                p
+            })
+        })
         // Не-proxy outbound (freedom/dns/blackhole) и объекты без protocol — мимо.
         .filter(|r| {
             !matches!(
                 r,
                 Err(ParseError::UnknownScheme(_)) | Err(ParseError::MissingField("protocol"))
             )
-        })
-        .map(|r| {
-            r.map(|mut p| {
-                if let Some(rem) = &remarks {
-                    p.name = format!("{rem} · {}", p.name);
-                }
-                p
-            })
         })
         .collect()
 }
@@ -298,6 +333,24 @@ mod tests {
         assert_eq!(trojan.param("sni"), Some("t.com"));
         assert_eq!(trojan.param("path"), Some("/ws"));
         assert_eq!(trojan.param("host"), Some("cdn.t.com"));
+    }
+
+    #[test]
+    fn balancers_tag_member_nodes() {
+        // Подписка-массив с балансировщиком: selector — префиксы тегов outbound'ов.
+        let input = r#"[{"remarks":"sub","routing":{"balancers":[{"tag":"eu","selector":["EUROPE_MAIN"]}]},"outbounds":[
+            {"protocol":"vless","tag":"EUROPE_MAIN","settings":{"vnext":[{"address":"a.com","port":443,"users":[{"id":"u","encryption":"none"}]}]}},
+            {"protocol":"vless","tag":"EUROPE_MAIN-2","settings":{"vnext":[{"address":"b.com","port":443,"users":[{"id":"u","encryption":"none"}]}]}},
+            {"protocol":"vless","tag":"OTHER","settings":{"vnext":[{"address":"c.com","port":443,"users":[{"id":"u","encryption":"none"}]}]}}
+        ]}]"#;
+        let ok: Vec<_> = parse_xray_config(input)
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(ok.len(), 3);
+        assert_eq!(ok[0].param("balancer"), Some("eu"));
+        assert_eq!(ok[1].param("balancer"), Some("eu"));
+        assert_eq!(ok[2].param("balancer"), None);
     }
 
     #[test]

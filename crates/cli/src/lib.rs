@@ -39,6 +39,9 @@ pub struct NodeInfo {
     pub port: u16,
     /// Группа узла = источник-подписка (первый тег) или `None` — свой ключ.
     pub group: Option<String>,
+    /// Балансировщик из подписки (Xray `routing.balancers`) — несколько нод
+    /// одного логического выхода; `None`, если узел не входит в балансировщик.
+    pub balancer: Option<String>,
 }
 
 /// Результат теста задержки одного узла.
@@ -299,6 +302,7 @@ pub fn list_nodes() -> Vec<NodeInfo> {
             address: s.address.clone(),
             port: s.port,
             group: s.tags.first().cloned(),
+            balancer: s.params.get("balancer").cloned(),
         })
         .collect()
 }
