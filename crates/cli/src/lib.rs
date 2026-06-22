@@ -389,11 +389,10 @@ pub async fn import(arg: &str) -> Result<String, String> {
             .cloned()
             .unwrap_or(sub);
         let tag = subscription::sub_tag(&stored);
-        let host = subscription::sub_host(&stored.url);
         subscription::tag_servers(&mut servers, &tag);
         let n = servers.len();
         cfg.servers
-            .retain(|s| !s.tags.iter().any(|t| t == &tag || t == &host));
+            .retain(|s| !s.tags.iter().any(|t| t == &tag));
         cfg.servers.extend(servers);
         format!("импортировано узлов из подписки: {n}")
     } else {
@@ -807,10 +806,9 @@ pub async fn update_subscriptions() -> Result<Vec<SubUpdate>, String> {
         let Some(mut servers) = servers else { continue };
         let sub = cfg.subscriptions[i].clone();
         let tag = subscription::sub_tag(&sub);
-        let host = subscription::sub_host(&sub.url);
         subscription::tag_servers(&mut servers, &tag);
         cfg.servers
-            .retain(|s| !s.tags.iter().any(|t| t == &tag || t == &host));
+            .retain(|s| !s.tags.iter().any(|t| t == &tag));
         cfg.servers.extend(servers);
     }
     save_config(&path, &cfg, store.as_ref())?;
@@ -837,10 +835,9 @@ pub async fn update_one_subscription(url: &str) -> Result<usize, String> {
     ensure_distinct_sub_tags(&mut cfg);
     let sub = cfg.subscriptions[idx].clone();
     let tag = subscription::sub_tag(&sub);
-    let host = subscription::sub_host(&sub.url);
     subscription::tag_servers(&mut servers, &tag);
     cfg.servers
-        .retain(|s| !s.tags.iter().any(|t| t == &tag || t == &host));
+        .retain(|s| !s.tags.iter().any(|t| t == &tag));
     let n = servers.len();
     cfg.servers.extend(servers);
     save_config(&path, &cfg, store.as_ref())?;
@@ -1869,6 +1866,14 @@ pub fn build_engine(cfg: &AppConfig, server: Option<&str>) -> Result<Engine, Str
         .map(str::to_string)
         .or_else(|| cfg.settings.default_proxy.clone())
         .or_else(|| cfg.settings.proxy_node.clone());
+    // Если дефолтный узел отсутствует в конфиге (напр. узел переименован
+    // подпиской/дедупом), движок молча Block-ал бы ВЕСЬ дефолтный трафик. Лучше
+    // явная ошибка, чем «ничего не проксируется».
+    if let Some(d) = &default {
+        if !cfg.servers.iter().any(|s| &s.name == d) {
+            return Err(format!("узел по умолчанию не найден: {d}"));
+        }
+    }
     let mut eff = cfg.clone();
     eff.settings.default_proxy = default;
     // КРИТИЧНО: при выбранном узле непокрытый правилами трафик ДОЛЖЕН идти через
@@ -2582,8 +2587,18 @@ impl WinpkSplitController {
         }
     }
 
-    /// Останавливает перехват и стек.
-    pub fn stop(mut self) {
+    /// Останавливает перехват и стек. (Реальная остановка дублируется в `Drop`,
+    /// чтобы вытесненный/забытый контроллер тоже корректно снимался.)
+    pub fn stop(self) {
+        // drop(self) → Drop остановит перехват и стек.
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WinpkSplitController {
+    fn drop(&mut self) {
+        // Сначала снимаем перехват (его Drop закрывает хендл/адаптеры даже если
+        // инжектор в out_task ещё держит клон), затем гасим out_task и стек.
         if let Some(t) = self.tunnel.take() {
             match t {
                 SplitTunnelBackend::Winpk(x) => x.stop(),

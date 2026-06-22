@@ -559,11 +559,18 @@ fn set_split(kill_switch: bool) -> Result<(), String> {
 /// userspace netstack. Требует установленного драйвера `ndisrd` и админ-прав.
 #[tauri::command]
 async fn split_apply(state: State<'_, SplitState>) -> Result<(), String> {
-    if state.0.lock().unwrap().is_some() {
-        return Err("split уже применён".into());
+    // Снимаем прошлый контроллер ПОЛНОСТЬЮ перед стартом нового (смена драйвера/
+    // узла, повторный «Применить», двойной клик) — иначе работали бы два
+    // перехвата сразу. Лок НЕ держим через .await.
+    let old = state.0.lock().unwrap().take();
+    if let Some(old) = old {
+        old.stop();
     }
     let controller = ctl::WinpkSplitController::start().await?;
-    *state.0.lock().unwrap() = Some(controller);
+    if let Some(stale) = state.0.lock().unwrap().replace(controller) {
+        // Гонка: пока стартовали, кто-то успел положить контроллер — снимаем его.
+        stale.stop();
+    }
     Ok(())
 }
 
