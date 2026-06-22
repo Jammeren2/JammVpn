@@ -278,6 +278,21 @@
   // ----------------------------------------------------------------
   const expanded = new Set();
 
+  // Windows не рисует флаг-эмодзи как флаг (показывает буквы пары, напр. «FI»).
+  // Достаём страну из пары Regional Indicator и подписываем её название по-русски.
+  function flagCountry(str) {
+    const ri = [...String(str)]
+      .map((c) => c.codePointAt(0))
+      .filter((cp) => cp >= 0x1f1e6 && cp <= 0x1f1ff);
+    if (ri.length < 2) return "";
+    const code = String.fromCharCode(ri[0] - 0x1f1e6 + 65, ri[1] - 0x1f1e6 + 65);
+    try {
+      return new Intl.DisplayNames(["ru"], { type: "region" }).of(code) || "";
+    } catch (_) {
+      return "";
+    }
+  }
+
   function nodeRowHtml(r, selected) {
     const isWg = /wireguard|amnezia|awg/i.test(r.proto);
     const isVless = /vless/i.test(r.proto);
@@ -292,7 +307,7 @@
       acts += `<span class="node-act del" data-del="${esc(r.name)}" title="Удалить">✕</span>`;
     }
     const lat = r.lat && r.lat !== "—" ? `<span class="node-lat ${r.latClass}">${esc(r.lat)}</span>` : "";
-    const sub = [r.proto, r.addr].filter(Boolean).join(" · ");
+    const sub = [r.proto, r.addr, flagCountry(r.name)].filter(Boolean).join(" · ");
     return `<div class="node-row${selected ? " sel" : ""}" data-pick="${esc(r.value)}">
       <span class="node-radio"></span>
       <span class="node-nm"><span class="c">${esc(r.name)}</span><span class="k">${esc(sub)}</span></span>
