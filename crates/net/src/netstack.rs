@@ -394,7 +394,7 @@ async fn relay_tcp(
                 } else {
                     "proxy"
                 };
-                let g = crate::conn::register(target_label(&dst), via, Some(key.0));
+                let g = crate::conn::register(target_label(&dst), via, "tcp", Some(key.0));
                 let _ = crate::conn::copy_counted(down, up, &g).await;
             }
         }
@@ -438,7 +438,7 @@ async fn relay_udp(
                 "proxy"
             };
             // Регистрируем в мониторе соединений (видно в статистике, как у TCP).
-            let g = crate::conn::register(target_label(&dst), via, Some(key.0));
+            let g = crate::conn::register(target_label(&dst), via, "udp", Some(key.0));
             let sess = Arc::new(sess);
             // Единый сигнал отмены: UI-дроп (g.kill) ИЛИ жёсткая ошибка любого
             // направления — чтобы выживший цикл не висел ещё UDP_IDLE впустую.

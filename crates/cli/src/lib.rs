@@ -313,6 +313,8 @@ pub struct ConnectionInfo {
     pub id: u64,
     pub target: String,
     pub via: String,
+    /// Протокол: `tcp` | `udp`.
+    pub proto: String,
     /// Имя процесса-инициатора (`Discord.exe`), если удалось определить.
     pub process: Option<String>,
     pub up: u64,
@@ -349,6 +351,7 @@ pub fn list_connections() -> Vec<ConnectionInfo> {
             id: c.id,
             target: c.target,
             via: c.via.to_string(),
+            proto: c.proto.to_string(),
             process: resolve_process(c.src),
             up: c.up,
             down: c.down,

@@ -676,9 +676,10 @@
   function connRow(c) {
     const via = c.via === "direct" ? "direct" : c.via === "block" ? "block" : "proxy";
     const viaLabel = via === "direct" ? "напрямую" : via === "block" ? "заблок." : "прокси";
+    const proto = c.proto === "udp" ? "udp" : "tcp";
     return `<div class="conn-row">
       <span class="conn-proc"><span class="conn-dot ${via}"></span><span>${esc(c.process || "—")}</span></span>
-      <span class="conn-dest">${esc(c.target)}</span>
+      <span class="conn-dest"><span class="proto-badge ${proto}">${proto.toUpperCase()}</span>${esc(c.target)}</span>
       <span class="conn-via">${viaLabel}</span>
       <span class="conn-up">${fmtBytes(c.up)}</span>
       <span class="conn-down">${fmtBytes(c.down)}</span>
@@ -696,6 +697,16 @@
     box.innerHTML = list.length ? list.map(connRow).join("") : '<div class="empty">Нет активных соединений.</div>';
     const cc = document.querySelector("[data-conncount]");
     if (cc) cc.textContent = list.length;
+    // Разбивка TCP/UDP (число соединений + суммарный трафик).
+    const udp = list.filter((c) => c.proto === "udp");
+    const tcp = list.filter((c) => c.proto !== "udp");
+    const sum = (a) => a.reduce((s, c) => s + (c.up || 0) + (c.down || 0), 0);
+    const ps = document.querySelector("[data-protosplit]");
+    if (ps) {
+      ps.innerHTML =
+        `<span class="proto-badge tcp">TCP</span> ${tcp.length} · ${fmtBytes(sum(tcp))}` +
+        `   <span class="proto-badge udp">UDP</span> ${udp.length} · ${fmtBytes(sum(udp))}`;
+    }
   }
 
   async function poll() {

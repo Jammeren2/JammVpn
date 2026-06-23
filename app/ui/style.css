@@ -440,6 +440,10 @@ html, body {
 .pause-btn:hover { color: #cdd6e4; border-color: rgba(255, 255, 255, 0.25); }
 .pause-btn.paused { background: rgba(34, 211, 238, 0.16); border-color: rgba(34, 211, 238, 0.3); color: #c7f5fe; }
 .conn-head, .conn-row { display: grid; grid-template-columns: 1.5fr 1.9fr 1fr 86px 86px 30px; gap: 12px; align-items: center; }
+.proto-badge { display: inline-block; font: 700 9px "JetBrains Mono"; letter-spacing: 0.5px; padding: 1px 5px; border-radius: 5px; margin-right: 7px; vertical-align: 1px; }
+.proto-badge.tcp { color: #5fd0ff; background: rgba(95, 208, 255, 0.13); }
+.proto-badge.udp { color: #ffb24d; background: rgba(255, 178, 77, 0.14); }
+.proto-split { display: flex; align-items: center; gap: 6px; padding: 0 4px 10px; font: 600 12px "Space Grotesk"; color: #8a93a8; }
 .conn-head { padding: 0 18px 11px; font: 600 10.5px "Space Grotesk"; letter-spacing: 0.6px; text-transform: uppercase; color: #5b6479; }
 .conn-list { display: flex; flex-direction: column; gap: 8px; }
 .conn-row { padding: 12px 18px; border-radius: 13px; border: 1px solid rgba(255, 255, 255, 0.07); background: rgba(20, 27, 40, 0.45); transition: 0.2s; }

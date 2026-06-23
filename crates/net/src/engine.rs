@@ -640,6 +640,7 @@ async fn serve_routed(
                                 let g = crate::conn::register(
                                     target_label(&routed.target),
                                     via,
+                                    "tcp",
                                     client.peer_addr().ok(),
                                 );
                                 let _ = crate::conn::copy_counted(client, up, &g).await;
@@ -701,6 +702,7 @@ async fn handle_http(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
                     let g = crate::conn::register(
                         target_label(&routed.target),
                         via,
+                        "tcp",
                         client.peer_addr().ok(),
                     );
                     crate::conn::copy_counted(client, up, &g).await
@@ -737,6 +739,7 @@ async fn handle_http(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
                     let g = crate::conn::register(
                         target_label(&routed.target),
                         via,
+                        "tcp",
                         client.peer_addr().ok(),
                     );
                     crate::conn::copy_counted(client, up, &g).await
@@ -846,6 +849,7 @@ where
                     let g = crate::conn::register(
                         target_label(&routed.target),
                         via_label(&ob),
+                        "tcp",
                         client.peer_addr().ok(),
                     );
                     let _ = crate::conn::copy_counted(client, upstream, &g).await;
