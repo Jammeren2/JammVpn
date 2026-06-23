@@ -113,12 +113,19 @@ impl ProcessResolver {
     /// ключа (его просто нет в таблице) подавляется кулдауном, чтобы не молотить
     /// системные таблицы.
     fn force_refresh_for(&mut self, key: (bool, bool, u16)) -> bool {
-        let already = self.forced_keys.contains(&key);
+        // Этот ключ уже пробовали против ТЕКУЩЕЙ таблицы — пересборка не поможет.
+        if self.forced_keys.contains(&key) {
+            return false;
+        }
+        // Глобальный потолок частоты: не пересобираем чаще раза в FORCE_COOLDOWN,
+        // иначе всплеск новых сокетов (VRChat открывает их пачками) застопорил бы
+        // поток захвата блокирующими GetExtended*Table. Ключ НЕ помечаем forced →
+        // ретрай на следующем пакете, когда кулдаун истечёт.
         let recent = self
             .last_forced
             .map(|t| t.elapsed() < FORCE_COOLDOWN)
             .unwrap_or(false);
-        if already && recent {
+        if recent {
             return false;
         }
         self.last_forced = Some(Instant::now());
